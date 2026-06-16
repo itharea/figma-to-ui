@@ -1,0 +1,31 @@
+{
+  "name": "figma-to-ui",
+  "version": "1.0.0",
+  "description": "Decode binary Figma .fig export files locally — no Figma account, plugin, or REST API. Extract design tokens, layouts, copy, components, SVG vectors, and image/video assets for 1:1 UI implementation.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "figma",
+    "fig",
+    "design-tokens",
+    "svg",
+    "ui",
+    "fig-kiwi",
+    "design-to-code"
+  ],
+  "scripts": {
+    "parse": "node scripts/parse.ts",
+    "tree": "node scripts/tree.ts",
+    "find": "node scripts/find.ts",
+    "variables": "node scripts/variables.ts",
+    "dump": "node scripts/dump.ts",
+    "overrides": "node scripts/overrides.ts",
+    "export-svg": "node scripts/export-svg.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "kiwi-schema": "^0.5.0"
+  }
+}

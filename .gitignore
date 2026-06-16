@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Lockfiles — single dependency; let each package manager generate its own
+bun.lock
+bun.lockb
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# macOS
+.DS_Store
+
+# Work artifacts (intermediates produced while decoding a .fig)
+message.json
+*.message.json
+ex/
+out.svg
+out.png
+
+# Logs / editor
+*.log
+.vscode/
+.idea/
