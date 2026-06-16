@@ -48,7 +48,7 @@ name becomes the skill name (`figma-to-ui`), and the agent picks up `SKILL.md` (
 
 ```sh
 # example for Claude Code; swap the path for your agent from the table above
-git clone <your-repo-url> ~/.claude/skills/figma-to-ui
+git clone https://github.com/itharea/figma-to-ui.git ~/.claude/skills/figma-to-ui
 ```
 
 Using a different agent? Clone the repo anywhere and point it at `SKILL.md`.
@@ -59,7 +59,7 @@ Clone and install the one dependency so the scripts can run directly on a `.fig`
 example from an agent's shell, a CI step, or a pipeline:
 
 ```sh
-git clone <your-repo-url> figma-to-ui
+git clone https://github.com/itharea/figma-to-ui.git
 cd figma-to-ui
 npm install        # or pnpm install, yarn, bun install
 ```
