@@ -14,13 +14,13 @@
     "design-to-code"
   ],
   "scripts": {
-    "parse": "node scripts/parse.ts",
-    "tree": "node scripts/tree.ts",
-    "find": "node scripts/find.ts",
-    "variables": "node scripts/variables.ts",
-    "dump": "node scripts/dump.ts",
-    "overrides": "node scripts/overrides.ts",
-    "export-svg": "node scripts/export-svg.ts"
+    "parse": "node scripts/parse.mts",
+    "tree": "node scripts/tree.mts",
+    "find": "node scripts/find.mts",
+    "variables": "node scripts/variables.mts",
+    "dump": "node scripts/dump.mts",
+    "overrides": "node scripts/overrides.mts",
+    "export-svg": "node scripts/export-svg.mts"
   },
   "engines": {
     "node": ">=22.18"

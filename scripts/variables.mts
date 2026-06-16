@@ -1,7 +1,7 @@
 // Dump Figma variables (design tokens) — the canonical token source when the
 // file uses them. Groups by variable set; prints each mode's value.
-// Usage: node variables.ts <message.json>
-import { load, key, colorStr } from "./lib.ts";
+// Usage: node variables.mts <message.json>
+import { load, key, colorStr } from "./lib.mts";
 
 const { nodes, byKey } = load(process.argv[2]);
 

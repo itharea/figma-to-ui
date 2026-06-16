@@ -1,11 +1,11 @@
 // Print symbolOverrides for every INSTANCE in a node's subtree — this is
 // where per-instance text/colors live (instances have no children in the tree).
-// Usage: node overrides.ts <message.json> <guidKey>
-import { load, key, colorStr } from "./lib.ts";
+// Usage: node overrides.mts <message.json> <guidKey>
+import { load, key, colorStr } from "./lib.mts";
 
 const { byKey, children } = load(process.argv[2]);
 const target = process.argv[3];
-if (!target) throw new Error("usage: overrides.ts <message.json> <guidKey>");
+if (!target) throw new Error("usage: overrides.mts <message.json> <guidKey>");
 
 function summarizeOverride(o: any): string {
   const bits: string[] = [];

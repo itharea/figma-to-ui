@@ -1,14 +1,14 @@
 // Dump a node's subtree as one line per node: type, name, size, position,
 // fills/strokes, radius, auto-layout, font, text, effects. This dump is the
 // per-screen implementation artifact — complete and unambiguous.
-// Usage: node dump.ts <message.json> <guidKey> [maxDepth]
-// (guidKey like "735:14256" — get it from tree.ts or find.ts)
-import { load, key, colorStr } from "./lib.ts";
+// Usage: node dump.mts <message.json> <guidKey> [maxDepth]
+// (guidKey like "735:14256" — get it from tree.mts or find.mts)
+import { load, key, colorStr } from "./lib.mts";
 
 const { byKey, children } = load(process.argv[2]);
 const target = process.argv[3];
 const maxDepth = parseInt(process.argv[4] ?? "99", 10);
-if (!target) throw new Error("usage: dump.ts <message.json> <guidKey> [maxDepth]");
+if (!target) throw new Error("usage: dump.mts <message.json> <guidKey> [maxDepth]");
 
 function paintStr(p: any): string {
   if (!p) return "";

@@ -1,13 +1,13 @@
 // Export a vector node (logo, illustration, custom icon) as an SVG file by
 // decoding fillGeometry/strokeGeometry blobs and composing transforms.
-// Usage: node export-svg.ts <message.json> <guidKey> <out.svg>
+// Usage: node export-svg.mts <message.json> <guidKey> <out.svg>
 import * as fs from "fs";
-import { load, key, colorStr } from "./lib.ts";
+import { load, key, colorStr } from "./lib.mts";
 
 const { msg, byKey, children } = load(process.argv[2]);
 const target = process.argv[3];
 const outFile = process.argv[4];
-if (!target || !outFile) throw new Error("usage: export-svg.ts <message.json> <guidKey> <out.svg>");
+if (!target || !outFile) throw new Error("usage: export-svg.mts <message.json> <guidKey> <out.svg>");
 const blobs = msg.blobs;
 
 // blob byte stream: [uint8 opcode][float32 LE args…]

@@ -19,17 +19,24 @@ against fig-kiwi format version 106 (2026).
 
 ```sh
 WORK=/tmp/figparse && mkdir -p $WORK && cd $WORK
-cp <repo>/scripts/*.ts .
+cp <repo>/scripts/*.mts .
 npm init -y >/dev/null 2>&1 && npm i kiwi-schema   # or: pnpm add / yarn add / bun add kiwi-schema
 ```
 
 **Runtime is your choice** — the scripts are plain Node-compatible code (no
 Bun-only APIs), so run them with whatever the host project uses:
 
-- `node <script>.ts …` — Node ≥ 22.18 runs TypeScript directly (and ships
+- `node <script>.mts …` — Node ≥ 22.18 runs TypeScript directly (and ships
   `zstd`); the default below.
-- `bun <script>.ts …` — works as-is.
-- `npx tsx <script>.ts …` (or `pnpm dlx tsx` / `yarn dlx tsx`) — for older Node.
+- `bun <script>.mts …` — works as-is.
+- `npx tsx <script>.mts …` (or `pnpm dlx tsx` / `yarn dlx tsx`) — for older Node.
+
+The scripts use the **`.mts`** extension on purpose: `.mts` is unconditionally
+an ES module, so `import` works regardless of the surrounding `package.json`
+(the `npm init -y` above writes a CommonJS one — a plain `.ts` would die with
+*"Cannot use import statement outside a module"*; `.mts` does not need
+`"type": "module"` anywhere). This is what makes `node` work out of the box and
+keeps `bun`/`tsx` working unchanged.
 
 Install the single dependency (`kiwi-schema`) with the project's package
 manager (`npm i` / `pnpm add` / `yarn add` / `bun add`). The only hard floor is
@@ -69,17 +76,17 @@ then chunks: [uint32 LE byteLength][data] repeated
   `28 B5 2F FD`), raw deflate in older ones.
 
 ```sh
-node parse.ts $WORK/ex/canvas.fig $WORK/message.json
+node parse.mts $WORK/ex/canvas.fig $WORK/message.json
 ```
 
-`parse.ts` handles both compressions, serializes BigInts as strings, and
+`parse.mts` handles both compressions, serializes BigInts as strings, and
 Uint8Arrays as byte arrays (hashes get hex-encoded later; geometry blobs are
 parsed in §6).
 
 ## 3. The node graph
 
 `message.nodeChanges` is a **flat array** of every node (tens of thousands).
-There is no nested tree — `lib.ts` rebuilds it:
+There is no nested tree — `lib.mts` rebuilds it:
 
 - Identity: `node.guid = {sessionID, localID}` → string key
   `"${sessionID}:${localID}"`.
@@ -91,9 +98,9 @@ There is no nested tree — `lib.ts` rebuilds it:
 **First move — print the skeleton, then locate things by name:**
 
 ```sh
-node tree.ts $WORK/message.json                      # pages + top-level frames with guid keys
-node find.ts $WORK/message.json "tab.?bar"           # search nodes by name regex
-node find.ts $WORK/message.json "." SYMBOL           # list all component masters
+node tree.mts $WORK/message.json                      # pages + top-level frames with guid keys
+node find.mts $WORK/message.json "tab.?bar"           # search nodes by name regex
+node find.mts $WORK/message.json "." SYMBOL           # list all component masters
 ```
 
 Page and frame *names* carry the information architecture. Watch for
@@ -149,7 +156,7 @@ page: designers leave notes there about undecided content.
   `size`, `visible`, …). This is where per-instance text lives.
 
 ```sh
-node overrides.ts $WORK/message.json <screen-guidKey>
+node overrides.mts $WORK/message.json <screen-guidKey>
 ```
 
 **Designer-intent signal:** an instance with *no* `textData` override renders
@@ -172,10 +179,10 @@ Vector shapes index into `message.blobs`:
 - Fill color from `fillPaints[0].color`; multiply node × paint opacities.
 
 ```sh
-node export-svg.ts $WORK/message.json <guidKey> out.svg
+node export-svg.mts $WORK/message.json <guidKey> out.svg
 ```
 
-`export-svg.ts` follows `symbolData.symbolID` into masters, so icons/logos
+`export-svg.mts` follows `symbolData.symbolID` into masters, so icons/logos
 that wrap component instances export correctly (per-instance fill overrides
 are not applied — recolor in the consuming component).
 
@@ -207,9 +214,9 @@ centers the SVG on the brand background, screenshotted at 3×.)
 
 1. **Unzip + parse** (§1–2); build the index. Query with scripts; never load
    `message.json` into context.
-2. **Print the skeleton** (`tree.ts`). Identify canonical pages vs trials;
+2. **Print the skeleton** (`tree.mts`). Identify canonical pages vs trials;
    confirm scope with the user. Read any `todo`/notes page.
-3. **Extract tokens first.** Check for Figma variables (`variables.ts`) —
+3. **Extract tokens first.** Check for Figma variables (`variables.mts`) —
    `type: "VARIABLE"` nodes carry exact values per mode (light/dark) under
    `variableDataValues.entries`, grouped by `VARIABLE_SET`; when present they
    are the canonical token source. Otherwise scrape the colors/typography
@@ -217,7 +224,7 @@ centers the SVG on the brand background, screenshotted at 3×.)
    `symbolOverrides` text (name + hex pairs). Typography pages give the full
    ramp — *trust node values over label text*; labels go stale (a label
    saying "28px" on a 36px node is real).
-4. **Dump each canonical screen** (`dump.ts`) — a 50–150-line indented
+4. **Dump each canonical screen** (`dump.mts`) — a 50–150-line indented
    summary. This per-screen dump is the artifact that goes into
    implementation context; it is complete and unambiguous, unlike a
    screenshot.
@@ -253,13 +260,13 @@ centers the SVG on the brand background, screenshotted at 3×.)
 
 | Script | Usage | Purpose |
 |---|---|---|
-| `parse.ts` | `node parse.ts <canvas.fig> <out.json>` | fig-kiwi → message.json |
-| `tree.ts` | `node tree.ts <msg.json>` | page/frame skeleton with guid keys |
-| `find.ts` | `node find.ts <msg.json> <regex> [type]` | locate nodes by name |
-| `variables.ts` | `node variables.ts <msg.json>` | design tokens from Figma variables |
-| `dump.ts` | `node dump.ts <msg.json> <guidKey> [depth]` | per-screen implementation dump |
-| `overrides.ts` | `node overrides.ts <msg.json> <guidKey>` | instance text/color overrides |
-| `export-svg.ts` | `node export-svg.ts <msg.json> <guidKey> <out.svg>` | vector → SVG |
+| `parse.mts` | `node parse.mts <canvas.fig> <out.json>` | fig-kiwi → message.json |
+| `tree.mts` | `node tree.mts <msg.json>` | page/frame skeleton with guid keys |
+| `find.mts` | `node find.mts <msg.json> <regex> [type]` | locate nodes by name |
+| `variables.mts` | `node variables.mts <msg.json>` | design tokens from Figma variables |
+| `dump.mts` | `node dump.mts <msg.json> <guidKey> [depth]` | per-screen implementation dump |
+| `overrides.mts` | `node overrides.mts <msg.json> <guidKey>` | instance text/color overrides |
+| `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg>` | vector → SVG |
 
-All scripts import `lib.ts` (tree index + color helpers) — copy the whole
+All scripts import `lib.mts` (tree index + color helpers) — copy the whole
 `scripts/` directory together.

@@ -1,7 +1,7 @@
 // Find nodes by name (case-insensitive regex) and print their ancestor path.
-// Usage: node find.ts <message.json> <name-regex> [type-filter]
-// Example: node find.ts msg.json "product.?card" SYMBOL
-import { load, key } from "./lib.ts";
+// Usage: node find.mts <message.json> <name-regex> [type-filter]
+// Example: node find.mts msg.json "product.?card" SYMBOL
+import { load, key } from "./lib.mts";
 
 const { nodes, byKey } = load(process.argv[2]);
 const re = new RegExp(process.argv[3] ?? ".", "i");

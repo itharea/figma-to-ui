@@ -1,5 +1,5 @@
 // Decode the fig-kiwi binary into queryable JSON.
-// Usage: node parse.ts <canvas.fig> <out-message.json>
+// Usage: node parse.mts <canvas.fig> <out-message.json>
 // (canvas.fig is the file extracted from the .fig zip — see SKILL.md §1)
 // Requires: kiwi-schema (install with npm / pnpm / yarn / bun); zstd needs Node >= 22.15 or Bun.
 import * as fs from "fs";
@@ -7,7 +7,7 @@ import * as zlib from "zlib";
 import { decodeBinarySchema, compileSchema } from "kiwi-schema";
 
 const [, , inPath, outPath] = process.argv;
-if (!inPath || !outPath) throw new Error("usage: parse.ts <canvas.fig> <out-message.json>");
+if (!inPath || !outPath) throw new Error("usage: parse.mts <canvas.fig> <out-message.json>");
 
 const buf = fs.readFileSync(inPath);
 const magic = buf.subarray(0, 8).toString("utf8");

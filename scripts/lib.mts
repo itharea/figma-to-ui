@@ -1,5 +1,5 @@
 // Shared node-graph index for decoded .fig messages.
-// Every script takes the path to message.json (produced by parse.ts) as argv[2].
+// Every script takes the path to message.json (produced by parse.mts) as argv[2].
 import * as fs from "fs";
 
 export const key = (g: any) => `${g.sessionID}:${g.localID}`;

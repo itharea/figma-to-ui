@@ -25,10 +25,11 @@ The scripts are plain Node-compatible TypeScript, so they run on whatever the ho
 project already uses:
 
 - A runtime, any one of:
-  - Node >= 22.18, which runs the `.ts` files directly with no transpiler (recommended).
-  - [Bun](https://bun.sh): `bun <script>.ts`.
-  - Older Node plus [tsx](https://www.npmjs.com/package/tsx): `npx tsx <script>.ts`.
+  - Node >= 22.18, which runs the `.mts` files directly with no transpiler (recommended).
+  - [Bun](https://bun.sh): `bun <script>.mts`.
+  - Older Node plus [tsx](https://www.npmjs.com/package/tsx): `npx tsx <script>.mts`.
   - The hard floor is Node >= 22.15 or Bun, for `zlib.zstdDecompressSync`.
+
 - One dependency, [kiwi-schema](https://www.npmjs.com/package/kiwi-schema). Install it
   with the project's package manager (`npm i`, `pnpm add`, `yarn add`, or `bun add`);
   it's declared in `package.json`.
@@ -77,22 +78,22 @@ workflow the agent follows.
 
 ## What's in the toolkit
 
-| Script          | What it does                              |
-| --------------- | ----------------------------------------- |
-| `parse.ts`      | decodes `canvas.fig` (fig-kiwi) to JSON   |
-| `tree.ts`       | page/frame skeleton with node keys        |
-| `find.ts`       | locates nodes by name                     |
-| `variables.ts`  | design tokens from Figma variables        |
-| `dump.ts`       | per-screen implementation dump            |
-| `overrides.ts`  | per-instance text/color overrides         |
-| `export-svg.ts` | vector nodes to SVG                       |
+| Script           | What it does                            |
+| ---------------- | --------------------------------------- |
+| `parse.mts`      | decodes `canvas.fig` (fig-kiwi) to JSON |
+| `tree.mts`       | page/frame skeleton with node keys      |
+| `find.mts`       | locates nodes by name                   |
+| `variables.mts`  | design tokens from Figma variables      |
+| `dump.mts`       | per-screen implementation dump          |
+| `overrides.mts`  | per-instance text/color overrides       |
+| `export-svg.mts` | vector nodes to SVG                     |
 
-All scripts share `scripts/lib.ts` (the node-tree index and color helpers), so keep the
+All scripts share `scripts/lib.mts` (the node-tree index and color helpers), so keep the
 `scripts/` directory together. Exact invocation for each one lives in `SKILL.md`.
 
 ## How it works
 
-`parse.ts` reads the `fig-kiwi` binary container: bytes 0-7 are the magic, then a uint32
+`parse.mts` reads the `fig-kiwi` binary container: bytes 0-7 are the magic, then a uint32
 version, then length-prefixed chunks. The embedded [kiwi](https://github.com/evanw/kiwi)
 schema (chunk 0) decodes the document message (chunk 1), which is decompressed (zstd in
 modern files, raw deflate in older ones) into a flat array of nodes. The other scripts
