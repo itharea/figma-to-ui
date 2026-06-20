@@ -257,6 +257,14 @@ centers the SVG on the brand background, screenshotted at 3×.)
 
 ## 8. Recommended extraction workflow
 
+**Default to the IR as your context source.** Beyond a one- or two-query lookup
+(a single color, one node's fields), compile the Design IR (step 2.5) and read
+its per-screen JSON **directly** as the source of truth — resolved, reconciled,
+provenance-stamped, KB-scale. The raw printers (§3–§7, steps 3–8 below) stay
+essential as the **quick-query path**, the **field-confirmation escape hatch**,
+and the **verifier the IR is checked against** — but for loading whole screens
+into implementation context, read the IR, not raw dumps.
+
 0.5. **Detect an existing design system first.** Before implementing anything,
    look for a `theme`/`tokens`/`design-system` module in the consuming repo. If
    one exists, switch to **map mode**: the job is **diff-and-reconcile, respect
@@ -271,7 +279,7 @@ centers the SVG on the brand background, screenshotted at 3×.)
    `message.json` into context.
 2. **Print the skeleton** (`tree.mts`). Identify canonical pages vs trials;
    confirm scope with the user. Read any `todo`/notes page.
-2.5. **(Optional) Compile the IR** once scope is confirmed:
+2.5. **Compile the IR — the default context surface** once scope is confirmed:
    `node build-ir.mts msg-<name>.json --scope <pages> --out ir-<name>` emits a
    small, provenance-stamped `ir-<name>/` (manifest + raw-map + fonts + tokens/* +
    components/* + **`screens/<page>/<screen>.json`** — resolved, reconciled,
@@ -282,10 +290,12 @@ centers the SVG on the brand background, screenshotted at 3×.)
    carries `size:16, sizeSource:"geometry"` + a `conflicts[]` entry). After
    compiling, **render-and-eyeball over the IR** (Phase 9's render consumes the
    resolved screen directly). `ir.mts ir-<name> "nodes with conflicts"` /
-   `"fonts where appFamily is empty"` answer cross-cutting questions. The IR is
-   **additive** — the raw tools (`find`/`tree`/`dump`/`overrides`/`node`/
-   `export-svg`) remain the verifier and escape hatch, and `raw-map.json` drops any
-   IR node id back to its raw `{guid, path}`.
+   `"fonts where appFamily is empty"` answer cross-cutting questions. The IR is the
+   **primary reading surface** for implementation; the raw tools
+   (`find`/`tree`/`dump`/`overrides`/`node`/`export-svg`) remain **additive** —
+   the **verifier and escape hatch** (the IR is checked *against* them, never the
+   reverse) and the quick-query path for one-off questions — and `raw-map.json`
+   drops any IR node id back to its raw `{guid, path}`.
 
    **If a code theme exists**, run `build-ir … --theme <path>`: it maps every IR
    `color.hex` and text `font.size` to a code token **by value, within its own
@@ -315,9 +325,10 @@ centers the SVG on the brand background, screenshotted at 3×.)
    line-height in a 20px auto-height box means the real size is ~16 — geometry
    wins. Labels go stale; resized boxes make node `fontSize` stale too.
 4. **Dump each canonical screen** (`dump.mts`) — a 50–150-line indented
-   summary. This per-screen dump is the artifact that goes into
-   implementation context; it is complete and unambiguous, unlike a
-   screenshot.
+   summary, complete and unambiguous unlike a screenshot. **Once the IR is
+   compiled (2.5), its `screens/<page>/<screen>.json` is the artifact that goes
+   into implementation context** (already resolved + reconciled); use the raw
+   `dump.mts` here as the fast cross-check and for screens outside the IR scope.
 5. **Build the component library first.** For "build a component", enumerate the
    component *sets* with `components.mts` and derive the prop API *before*
    dumping screens — mirror the SYMBOL masters into reusable components, then
