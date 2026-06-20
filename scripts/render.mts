@@ -105,16 +105,94 @@ async function renderOverIR() {
     return null;
   };
 
-  // Render one IR node absolutely positioned from its absX/absY (the IR already
-  // baked layout — we do not re-run auto-layout). TEXT uses the reconciled font.
-  function irNode(n: any): string {
+  // Resolve a sidecar image hash → a copied basename under the out images/ dir, or
+  // null (caller draws a labeled placeholder). Reads bytes from the resolved imgSrc.
+  const copiedImg = new Map<string, string | null>();
+  const useImage = (hash: string | undefined): string | null => {
+    if (!hash || !imgSrc) return null;
+    if (copiedImg.has(hash)) return copiedImg.get(hash)!;
+    let found: string | null = null;
+    const direct = fs.existsSync(path.join(imgSrc, hash)) ? hash : null;
+    found = direct ?? fs.readdirSync(imgSrc).find((f) => f === hash || f.startsWith(hash + ".")) ?? null;
+    if (found) {
+      fs.mkdirSync(assetsDir, { recursive: true });
+      fs.copyFileSync(path.join(imgSrc, found), path.join(assetsDir, found));
+    }
+    copiedImg.set(hash, found);
+    return found;
+  };
+
+  // border-radius CSS from style.cornerRadius (uniform number | per-corner object).
+  const radiusCss = (cr: any): string | null => {
+    if (cr === undefined || cr === null) return null;
+    if (typeof cr === "number") return cr ? `border-radius:${cr}px` : null;
+    return `border-radius:${cr.tl ?? 0}px ${cr.tr ?? 0}px ${cr.br ?? 0}px ${cr.bl ?? 0}px`;
+  };
+
+  // Faithful box-styling from IRStyle (B-style-layout / spec #2): solid/gradient
+  // background, border-radius, border (first stroke), box-shadow (drop/inner
+  // shadows), opacity. Returns the CSS decls + whether an IMAGE fill is present.
+  const styleCss = (n: any): { decls: string[]; imageHash: string | null } => {
+    const decls: string[] = [];
+    const st = n.style;
+    let imageHash: string | null = null;
+    if (!st) return { decls, imageHash };
+    // fills: first visible solid → background-color; gradient → linear-gradient;
+    // image → defer to caller (background-image or placeholder).
+    for (const f of st.fills ?? []) {
+      if (f.type === "solid" && f.hex && n.type !== "text") {
+        decls.push(`background-color:${f.hex}`);
+        break;
+      }
+      if (f.type === "gradient" && (f.stops ?? []).length) {
+        const stops = f.stops.map((s: any) => `${s.hex} ${Math.round((s.position ?? 0) * 100)}%`).join(",");
+        decls.push(`background-image:linear-gradient(${stops})`);
+        break;
+      }
+      if (f.type === "image") {
+        imageHash = f.imageHash ?? null;
+        break;
+      }
+    }
+    const r = radiusCss(st.cornerRadius);
+    if (r) decls.push(r);
+    const stroke = (st.strokes ?? [])[0];
+    if (stroke && stroke.hex) decls.push(`border:${stroke.weight ?? 1}px solid ${stroke.hex}`);
+    const shadows = (st.effects ?? [])
+      .filter((e: any) => e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW")
+      .map((e: any) => `${e.type === "INNER_SHADOW" ? "inset " : ""}${e.offsetX ?? 0}px ${e.offsetY ?? 0}px ${e.radius ?? 0}px ${e.spread ?? 0}px ${e.hex ?? "#0000"}`);
+    if (shadows.length) decls.push(`box-shadow:${shadows.join(",")}`);
+    if (typeof st.opacity === "number" && st.opacity < 1) decls.push(`opacity:${st.opacity}`);
+    return { decls, imageHash };
+  };
+
+  // Faithful auto-layout from IRLayout (B-style-layout / spec #2): flex container.
+  const layoutCss = (n: any): string[] => {
+    const l = n.layout;
+    if (!l) return [];
+    const out = ["display:flex", `flex-direction:${l.mode}`];
+    if (l.gap) out.push(`gap:${l.gap}px`);
+    const pt = l.paddingTop ?? 0, pr = l.paddingRight ?? 0, pb = l.paddingBottom ?? 0, pl = l.paddingLeft ?? 0;
+    if (pt || pr || pb || pl) out.push(`padding:${pt}px ${pr}px ${pb}px ${pl}px`);
+    if (l.justify) out.push(`justify-content:${l.justify}`);
+    if (l.align) out.push(`align-items:${l.align}`);
+    return out;
+  };
+
+  // Render one IR node. Auto-layout nodes (layout present) FLOW their children;
+  // otherwise children are absolutely positioned from absX/absY (the IR baked abs
+  // coords). `parentFlow` controls how THIS node positions itself in its parent.
+  // TEXT uses the reconciled font; style.fills/strokes/effects/opacity + layout
+  // give a faithful render (B-style-layout). Missing image → labeled placeholder.
+  function irNode(n: any, parentFlow = false): string {
     if (!n) return "";
     const b = n.box ?? { x: 0, y: 0, w: 0, h: 0, absX: 0, absY: 0 };
-    const left = Math.round((b.absX ?? 0) - rootAbsX);
-    const top = Math.round((b.absY ?? 0) - rootAbsY);
     const w = Math.round(b.w ?? 0);
     const h = Math.round(b.h ?? 0);
-    const base = `position:absolute;left:${left}px;top:${top}px;box-sizing:border-box`;
+    const pos = parentFlow
+      ? "position:relative"
+      : `position:absolute;left:${Math.round((b.absX ?? 0) - rootAbsX)}px;top:${Math.round((b.absY ?? 0) - rootAbsY)}px`;
+    const base = `${pos};box-sizing:border-box`;
 
     if (n.type === "text" && n.font) {
       const f = n.font;
@@ -130,6 +208,8 @@ async function renderOverIR() {
       if (f.lineHeightPx) ts.push(`line-height:${f.lineHeightPx}px`);
       if (f.letterSpacingPx) ts.push(`letter-spacing:${f.letterSpacingPx}px`);
       if (n.color?.hex) ts.push(`color:${n.color.hex}`);
+      const { decls } = styleCss(n); // text-level effects/opacity (no bg)
+      ts.push(...decls);
       return `<div data-id="${n.id}" data-recon="${f.sizeSource}" style="${ts.join(";")}">${esc(n.text?.value ?? "")}</div>`;
     }
 
@@ -140,15 +220,31 @@ async function renderOverIR() {
       return `<div style="${base};width:${w}px;height:${h}px">${inner}</div>`;
     }
 
-    const style = [base, `width:${w}px`, `height:${h}px`];
-    if (n.color?.hex) style.push(`background-color:${n.color.hex}`);
-    // a leaf with no fill, no children, that looks like an asset slot → placeholder
+    const flow = !!n.layout;
+    const style = [base, `width:${w}px`, `height:${h}px`, ...styleCss(n).decls, ...layoutCss(n)];
+    // IRColor.hex convenience fallback when style.fills had no solid (kept for parity)
+    const { imageHash } = styleCss(n);
+    const hasBg = style.some((s) => s.startsWith("background-color") || s.startsWith("background-image"));
+    if (!hasBg && n.color?.hex) style.push(`background-color:${n.color.hex}`);
+
+    // IMAGE fill → background-image (sidecar bytes), else labeled placeholder.
+    if (imageHash) {
+      const file = useImage(imageHash);
+      if (file) {
+        style.push(`background-image:url("images/${esc(file)}")`, "background-size:cover", "background-position:center", "background-repeat:no-repeat");
+        return `<div data-id="${n.id}" style="${style.join(";")}"></div>`;
+      }
+      notes.push(`image ${imageHash.slice(0, 8)}… missing → placeholder`);
+      return `<div data-id="${n.id}" style="${style.join(";")}">${placeholder(w, h, `img ${imageHash.slice(0, 8)}`)}</div>`;
+    }
+
+    // a leaf with no fill/style, no children, that looks like an asset slot → placeholder
     const isLeaf = !(n.children ?? []).length;
-    if (isLeaf && !n.color?.hex && /image|video|vector|icon/i.test(n.type) && w && h) {
+    if (isLeaf && !hasBg && !n.color?.hex && /image|video|vector|icon/i.test(n.type) && w && h) {
       notes.push(`asset ${n.id} (${n.type}) has no sidecar bytes → placeholder`);
       return `<div style="${base}">${placeholder(w, h, n.type)}</div>`;
     }
-    const kids = (n.children ?? []).map(irNode).join("");
+    const kids = (n.children ?? []).map((c: any) => irNode(c, flow)).join("");
     return `<div data-id="${n.id}" style="${style.join(";")}">${kids}</div>`;
   }
 
@@ -163,7 +259,6 @@ async function renderOverIR() {
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(outHtml, html);
   console.log(`wrote ${outHtml}: ${W}x${H} from IR ${label} (resolved+reconciled — no re-resolve, no blob decode)`);
-  void assetsDir; void imgSrc;
   for (const note of notes) console.error("  note: " + note);
   const r = rasterizeFile(outHtml, outPng, W, H, 2, "ffffffff");
   if (r.ok) console.log(`wrote ${outPng}: ${W * 2}x${H * 2} (@2x)`);

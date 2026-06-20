@@ -302,11 +302,38 @@ into implementation context, read the IR, not raw dumps.
    reverse) and the quick-query path for one-off questions — and `raw-map.json`
    drops any IR node id back to its raw `{guid, path}`.
 
+   A fill **bound to a Figma variable** carries the design token **directly** as
+   GROUND TRUTH (no theme needed): `color.var` = the variable's token name (e.g.
+   `"Color/praline/950"`), `color.varGuid` = the variable guidKey, and
+   `color.match = "bound"`. This is a pure function of the bytes (reads
+   `paint.colorVar`), always runs, and is never a value-matching guess; `color.hex`
+   stays the resolved concrete value. A literal (unbound) fill keeps `var:null`.
+
+   Every IR node also carries the **full box-styling + auto-layout** so the IR alone
+   suffices for a 1:1 implementation (parity with the raw dump / §4) — emitted only
+   when present so files stay lean:
+   - `style?`: `{ fills?, cornerRadius?, strokes?, effects?, opacity? }`.
+     `fills[]` is the COMPLETE paint list (`color.hex` stays the single-hex
+     convenience): each is `{type:"solid"|"gradient"|"image", hex?, var?, varGuid?,
+     stops?:[{position,hex}], imageHash?, opacity?}` — gradients keep their `stops`,
+     images their `imageHash` (bytes→hex, the `images/` filename, §7), and solids
+     their bound `var`/`varGuid` (GROUND TRUTH, same resolver as `color`).
+     `cornerRadius` is a bare number (uniform) or `{tl,tr,br,bl}` (per-corner).
+     `strokes[]` = `{weight, align, hex, var?, varGuid?}`. `effects[]` =
+     `{type, hex, offsetX, offsetY, radius, spread?}` (DROP_SHADOW/INNER_SHADOW/
+     *_BLUR). `opacity` only when < 1.
+   - `layout?`: `{mode:"row"|"column", gap?, paddingTop?, paddingRight?,
+     paddingBottom?, paddingLeft?, justify?, align?}` — emitted only on a real
+     auto-layout frame (`stackMode` HORIZONTAL/VERTICAL → row/column, per the §4
+     table); absent ⇒ children are absolutely positioned (use `box.absX/absY`).
+   This extraction is a pure function of the bytes and always runs (no `--theme`).
+
    **If a code theme exists**, run `build-ir … --theme <path>`: it maps every IR
-   `color.hex` and text `font.size` to a code token **by value, within its own
-   kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact` /
+   **unbound** `color.hex` and text `font.size` to a code token **by value, within
+   its own kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact` /
    `nearest(Δ)` / `none` — never name-matched, never cross-kind, so a 16px font
-   never binds a `spacing` token). The build then writes two small review files:
+   never binds a `spacing` token). Value-matching never touches a bound color — its
+   `match` stays `"bound"`. The build then writes two small review files:
    **`issues.json`** (the automated *ask, don't ship* list — unmapped fonts,
    `match:none`/unconfirmed `nearest` colors, reconciliation conflicts, the
    token name-collision trap) and **`intent.json`** (placeholders, repeated/
@@ -374,7 +401,9 @@ into implementation context, read the IR, not raw dumps.
      inspectable `<out>.html`.
    - `node codegen.mts ir-<name> <set> [--out f] [--framework rn|web]` — scaffold
      each component from its SYMBOL master: the variant union prop type + reconciled
-     default styles, with `// TODO`s on every placeholder/conflict/unmapped value.
+     styles for EVERY variant (per-variant `container_<key>`/`label_<key>` selected
+     by the variant prop, default as fallback), with variant-attributed `// TODO`s on
+     every placeholder/conflict/unmapped value.
    - `node diff-ir.mts ir-old ir-new` — when a **new `.fig` export arrives**, diff
      the two IRs (added/removed screens & components, changed tokens per mode,
      drifted type specs, per-screen node/color drift). It compares reconciled
@@ -445,14 +474,14 @@ into implementation context, read the IR, not raw dumps.
 | `resolve.mts` | `node resolve.mts <msg.json> <guidKey> [depth]` | compose master + symbolOverrides → the rendered instance tree |
 | `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg> [--png]` | vector → SVG (`--png` also rasterizes via headless Chrome @3×; degrades gracefully if Chrome is absent) |
 | `match-tokens.mts` | `node match-tokens.mts <msg.json> <theme.(ts\|json)> [guidKey]` | brownfield map mode: annotate fig values vs an existing code theme **by value, within kind** (`exact`/`nearest(Δ)`/`none`); never rewrites |
-| `render.mts` | `node render.mts <msg.json> <frame-guidKey> <out.png> [--images <dir>]`  •  **`--ir`:** `node render.mts --ir <ir-dir> <screen-id> <out.png> [--images <dir>]` | resolved frame → self-contained `<out>.html` + screenshot PNG; text uses the **reconciled** size; missing image → labeled placeholder, not a broken `<img>`. Not pixel-perfect — catches "obviously wrong". Writes the HTML even if Chrome is absent. **`--ir` mode** renders OVER an emitted IR (`screens/<…>.json`) in one step — **no re-resolve, no re-reconcile, no blob re-decode**; `<screen-id>` is a screen-file slug, a node `id`, or a `guid`; sidecar asset bytes (images via `--images`/sibling `images/`; pre-exported `vectors/<id>.svg`) fill image/vector slots, a missing asset → labeled placeholder |
+| `render.mts` | `node render.mts <msg.json> <frame-guidKey> <out.png> [--images <dir>]`  •  **`--ir`:** `node render.mts --ir <ir-dir> <screen-id> <out.png> [--images <dir>]` | resolved frame → self-contained `<out>.html` + screenshot PNG; text uses the **reconciled** size; missing image → labeled placeholder, not a broken `<img>`. Not pixel-perfect — catches "obviously wrong". Writes the HTML even if Chrome is absent. **`--ir` mode** renders OVER an emitted IR (`screens/<…>.json`) in one step — **no re-resolve, no re-reconcile, no blob re-decode**; `<screen-id>` is a screen-file slug, a node `id`, or a `guid`; it USES the node's `style` (solid/gradient background, `cornerRadius`→border-radius, `strokes`→border, `effects`→box-shadow, `opacity`) and `layout` (flex-direction/gap/padding/justify/align) for a faithful render; sidecar asset bytes (images via `--images`/sibling `images/`; pre-exported `vectors/<id>.svg`) fill image/vector slots, a missing asset → labeled placeholder |
 | `intent.mts` | `node intent.mts <msg.json> <screen-guidKey>` | one copy-pasteable designer-intent gap checklist: placeholders, denylisted/repeated strings, geometry/fontSize reconciliation conflicts, default-variant instances, mono-color icon fills |
 | `diff-frames.mts` | `node diff-frames.mts <msg.json> <guidA> <guidB>` | resolve both frames, align by name-path, report per-node property deltas (font/size/color/spacing/text). **Surfaces** drift; does **not** pick a canonical winner |
 | `icons.mts` | `node icons.mts <msg.json> <screen-guidKey>` | inventory icon instances under a screen, resolve each to its library export name (Phosphor `MagnifyingGlass`…), emit the exact `AppIconName` union additions so no name is imported unmapped |
-| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--decisions <p>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` (source hash/path + scope + counts) + `raw-map.json` (IR id → raw guidKey) + `fonts.json` (families + empty `appFamily` substitution slots) + `tokens/*` (alias chains collapsed) + `components/*` (variant matrix + proposed TS prop API) + `screens/<page>/<screen>.json` (resolved instances, reconciled `font.size`+`sizeSource`+`conflicts[]`, `letterSpacingPx`, placeholder detection, `box.absX/absY`, path-derived `id` + `guid` per node). With `--theme <p>`: maps each `color.hex`/`font.size` to a code token **by value, within kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`) and emits **`issues.json`** (ask-don't-ship: unmapped fonts, `match:none`/unconfirmed `nearest`, reconciliation conflicts, token name-collisions) + **`intent.json`** (placeholders/repeated/denylist/default-variant/mono-icon, aggregated). `--decisions <p>` folds a `decisions.json` overlay back in (`fontMap`/`tokenConfirms`/`tokenRejects`/`placeholders`) and suppresses the resolved issues. Re-runs with the same source+decisions are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
+| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--decisions <p>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` (source hash/path + scope + counts) + `raw-map.json` (IR id → raw guidKey) + `fonts.json` (families + empty `appFamily` substitution slots) + `tokens/*` (alias chains collapsed) + `components/*` (variant matrix + proposed TS prop API) + `screens/<page>/<screen>.json` (resolved instances, reconciled `font.size`+`sizeSource`+`conflicts[]`, `letterSpacingPx`, placeholder detection, `box.absX/absY`, path-derived `id` + `guid` per node, plus per-node **`style`** (fills incl. gradient `stops`/image `imageHash`, `cornerRadius`, `strokes`, `effects`, `opacity`) + **`layout`** (auto-layout flex: `mode`/`gap`/paddings/`justify`/`align`) for full box-styling parity with §4). Fills **bound to a Figma variable** carry the design token directly (GROUND TRUTH, always — no `--theme` needed): `color.var` = token name, `color.varGuid` = variable guidKey, `color.match = "bound"`; `color.hex` stays the concrete value. With `--theme <p>`: maps each **unbound** `color.hex`/`font.size` to a code token **by value, within kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`; bound colors are left as `"bound"`) and emits **`issues.json`** (ask-don't-ship: unmapped fonts, `match:none`/unconfirmed `nearest`, reconciliation conflicts, token name-collisions) + **`intent.json`** (placeholders/repeated/denylist/default-variant/mono-icon, aggregated). `--decisions <p>` folds a `decisions.json` overlay back in (`fontMap`/`tokenConfirms`/`tokenRejects`/`placeholders`) and suppresses the resolved issues. Re-runs with the same source+decisions are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
 | `diff-ir.mts` | `node diff-ir.mts <ir-old> <ir-new>` | design-version diff over two emitted IRs (no decode): added/removed screens & components, changed tokens per mode, drifted type specs (family/size/weight/lineHeight/letterSpacing), per-screen node + color drift (aligned by `path`, never `guid`). Compares reconciled **truth vs truth** and **surfaces** drift — never picks a canonical export; refuses to diff an IR against itself (same dir / equal `sourceHash`); re-hashes each manifest's recorded source if still present and **warns** on staleness, else skips |
-| `ir-validate.mts` | `node ir-validate.mts <ir-dir>` | the **ship gate** (exits non-zero on failure — CI/pre-ship). Asserts from the IR alone: every color adjudicated against the theme (`exact`/confirmed/rejected; skipped when greenfield — every `match:null`), every font has a non-null `appFamily` (always), no unresolved `placeholder:true`, no open `conflicts[]`, no missing `source`/`match` provenance. Each failure names the node `guid` + the `decisions.json` entry that resolves it |
-| `codegen.mts` | `node codegen.mts <ir-dir> <set-name> [--out <file>] [--framework rn\|web]` | typed component **scaffold** from `components/<set>.json`: the variant union as the prop type (`proposePropApi`) + the default variant's reconciled default styles (`font.size`/`lineHeightPx`/`letterSpacingPx`, token refs, colors, box) located in the screens IR by guid; leaves `// TODO` on every `placeholder:true` text, open conflict, or `match:none`/unmapped value — never bakes an unconfirmed value silently. Default framework React Native |
+| `ir-validate.mts` | `node ir-validate.mts <ir-dir>` | the **ship gate** (exits non-zero on failure — CI/pre-ship). Asserts from the IR alone: every color adjudicated against the theme (`exact`/confirmed/rejected; skipped when greenfield — every `match:null`; a variable-**bound** color `match:"bound"` is ground truth and ALWAYS passes), every font has a non-null `appFamily` (always), no unresolved `placeholder:true`, no open `conflicts[]`, no missing `source`/`match` provenance. Each failure names the node `guid` + the `decisions.json` entry that resolves it |
+| `codegen.mts` | `node codegen.mts <ir-dir> <set-name> [--out <file>] [--framework rn\|web]` | typed component **scaffold** from `components/<set>.json`: the variant union as the prop type (`proposePropApi`) + **EVERY variant's** own reconciled styles — per-variant `container_<key>`/`label_<key>` entries (box w/h, Phase B background/cornerRadius/strokes/effects/opacity + auto-layout, and the primary text `font.size`/`lineHeightPx`/`letterSpacingPx`/`appFamily`/color) located in the screens IR by guid and selected at runtime via the variant prop (default variant is the fallback); leaves `// TODO` (variant-attributed) on every `placeholder:true` text, open conflict, or `match:none`/unmapped value — never bakes an unconfirmed value silently. Default framework React Native |
 | `ir.mts` | `node ir.mts <ir-dir> <query>` | dumb reader over an emitted IR (no decode) for cross-cutting questions: `"fonts where appFamily is empty"`, `"colors with match=none"` (token-level `tokens/colors.json`; node-level `match:none` lives in `issues.json`), `"nodes with conflicts"` (walks `screens/<page>/*.json` for reconciled `font.conflicts`). Default access is a direct read of the small per-screen JSON |
 
 All scripts import `lib.mts` (tree index + color helpers) — copy the whole

@@ -125,6 +125,17 @@ console.error("pass 2a: variable tokens (alias chains collapsed)");
 const resolvedVars = resolveVariables(index);
 const { colors, spacing, radius } = splitTokens(resolvedVars);
 
+// Variable-binding index (improvement A-variables / spec #3): variable guidKey →
+// design-token name, built ONCE from the resolved COLOR variables. buildScreen
+// reads it to attach the design token DIRECTLY on every variable-bound fill
+// (paint.colorVar ALIAS) as GROUND TRUTH — never re-resolved per node. SCOPED to
+// COLOR bindings (fill/text colorVar); numeric bindings (cornerRadius/stackSpacing
+// via variableConsumptionMap) are a clear TODO — that map's structure is ambiguous
+// and would be a guess here.
+const varIndex = new Map<string, string>();
+for (const t of resolvedVars) if (t.type === "COLOR") varIndex.set(t.guid, t.name);
+console.error(`  variable-binding index: ${varIndex.size} color variable(s)`);
+
 // --- pass 2b: composite styles ---------------------------------------------
 console.error("pass 2b: composite typography + effects");
 const typography = assembleTypography(index);
@@ -234,7 +245,7 @@ for (const { page, root } of screenRoots) {
   let resolved: ResolvedNode;
   try {
     resolved = resolveScreen(index, rootKey);
-    irRoot = buildScreen(resolved, absMat(index, rootKey), appFamily);
+    irRoot = buildScreen(resolved, absMat(index, rootKey), appFamily, varIndex);
   } catch (e) {
     console.error(`  ⚠ screen ${rootKey} (${root.name}): ${(e as Error).message} — skipped`);
     continue;
