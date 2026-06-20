@@ -20,7 +20,9 @@
     "variables": "node scripts/variables.mts",
     "dump": "node scripts/dump.mts",
     "overrides": "node scripts/overrides.mts",
-    "export-svg": "node scripts/export-svg.mts"
+    "export-svg": "node scripts/export-svg.mts",
+    "selftest": "node scripts/selftest.mts",
+    "test": "node scripts/selftest.mts"
   },
   "engines": {
     "node": ">=22.18"
