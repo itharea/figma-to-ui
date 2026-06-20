@@ -17,6 +17,13 @@ message.json
 ex/
 out.svg
 out.png
+out.html
+
+# Compiled Design IR output (build-ir.mts --out ir-<name>)
+ir-*/
+
+# Source design files (large binaries — keep out of git)
+*.fig
 
 # Logs / editor
 *.log

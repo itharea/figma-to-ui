@@ -2,10 +2,15 @@
 // where per-instance text/colors live (instances have no children in the tree).
 // Usage: node overrides.mts <message.json> <guidKey>
 import { load, key, colorStr } from "./lib.mts";
+import { letterSpacingStr } from "./reconcile-lib.mts";
 
 const { byKey, children } = load(process.argv[2]);
 const target = process.argv[3];
-if (!target) throw new Error("usage: overrides.mts <message.json> <guidKey>");
+const full = process.argv.includes("--full"); // tolerant scan; value-print collapsed fields (P1-4)
+if (!target) throw new Error("usage: overrides.mts <message.json> <guidKey> [--full]");
+
+const lhStr = (lh: any) =>
+  lh?.value !== undefined ? `${lh.value}${lh.units === "PERCENT" ? "%" : lh.units === "PIXELS" ? "px" : ""}` : "auto";
 
 function summarizeOverride(o: any): string {
   const bits: string[] = [];
@@ -19,6 +24,17 @@ function summarizeOverride(o: any): string {
   if (o.visible !== undefined) bits.push(`visible=${o.visible}`);
   if (o.size) bits.push(`sz=${Math.round(o.size.x)}x${Math.round(o.size.y)}`);
   const known = new Set(["guidPath", "textData", "fillPaints", "strokePaints", "fontName", "fontSize", "visible", "size"]);
+  // --full: value-print the otherwise-collapsed fields (lineHeight, letterSpacing
+  // with computed px, textCase, cornerRadius, the stack paddings).
+  if (full) {
+    if (o.lineHeight !== undefined) { bits.push(`lineHeight=${lhStr(o.lineHeight)}`); known.add("lineHeight"); }
+    if (o.letterSpacing !== undefined) { bits.push(`letterSpacing=${letterSpacingStr(o.letterSpacing, o.fontSize)}`); known.add("letterSpacing"); }
+    if (o.textCase !== undefined) { bits.push(`case=${o.textCase}`); known.add("textCase"); }
+    if (o.cornerRadius !== undefined) { bits.push(`r=${o.cornerRadius}`); known.add("cornerRadius"); }
+    for (const f of ["stackSpacing", "stackVerticalPadding", "stackHorizontalPadding", "stackPaddingBottom", "stackPaddingRight"]) {
+      if (o[f] !== undefined) { bits.push(`${f}=${o[f]}`); known.add(f); }
+    }
+  }
   const other = Object.keys(o).filter((k2) => !known.has(k2));
   if (other.length) bits.push(`other=[${other.join(",")}]`);
   return bits.join(" ");

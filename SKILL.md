@@ -44,6 +44,13 @@ manager (`npm i` / `pnpm add` / `yarn add` / `bun add`). The only hard floor is
 the work dir; **never load `message.json` into context** (~80MB for a 20MB fig)
 — query it with the scripts.
 
+**Work-dir hygiene (one named file per fig).** Parse each `.fig` into a
+**named** message — `msg-<name>.json` — and compile it into a matching
+`ir-<name>/` directory; **never reuse a bare `message.json` across files** (two
+designs collide and you can't tell which decode you're reading). The IR build
+derives `ir-<name>` from the message filename, so `parse … msg-checkout.json`
+→ `build-ir msg-checkout.json … --out ir-checkout/`.
+
 ## 1. Container format
 
 A `.fig` file is a **ZIP archive** (first bytes `PK\x03\x04`):
@@ -144,6 +151,19 @@ page: designers leave notes there about undecided content.
 - Mixed-style runs live in `textData.styleOverrideTable` — rare in app UI;
   flag if styling looks inconsistent within one string.
 
+**Four-source reconciliation (encode for every text value).** Cross-check four
+sources; on conflict prefer in this order:
+
+1. **Rendered geometry** — `size.y` of an auto-height text node (a 20px box ≈
+   16px font; it rarely lies).
+2. **Instance override** values (resolved, incl. `styleOverrideTable` runs).
+3. **Node-level** `fontSize`/`lineHeight`/`fontName`.
+4. **Layer-name label** ("• 28px") — weakest; routinely stale.
+
+If geometry (1) and the node font (3) disagree, **stop and flag** — do not
+silently pick. `dump.mts` does this for you: it prints `⚠ stale-style? box.y=20
+< lh=36 → size likely ~16` when a declared line-height cannot fit the box.
+
 ## 5. Components, instances, and overrides
 
 - Masters are `type: "SYMBOL"` nodes; their subtree is regular nodes.
@@ -156,13 +176,38 @@ page: designers leave notes there about undecided content.
   `size`, `visible`, …). This is where per-instance text lives.
 
 ```sh
-node overrides.mts $WORK/message.json <screen-guidKey>
+node overrides.mts $WORK/message.json <screen-guidKey>          # raw override list
+node overrides.mts $WORK/message.json <screen-guidKey> --full   # value-print lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings
+node resolve.mts   $WORK/message.json <instance-guidKey>        # composed master + overrides = the rendered tree
 ```
+
+`resolve.mts` composes `master subtree + symbolOverrides` into the rendered tree
+(the algorithm above), so instances no longer dead-end at `instanceOf=`; it tags
+overridden text `[overridden]` and un-overridden text
+`[MASTER DEFAULT ⚠ likely placeholder]`. `dump.mts --resolve` does the same in the
+per-screen dump (the default dump stays raw/fast).
 
 **Designer-intent signal:** an instance with *no* `textData` override renders
 the master's placeholder text (e.g. every CTA button on a screen showing the
 master's default label = copy never decided). Detect this and **ask the user
 instead of shipping placeholders**.
+
+**Component sets** group variant masters of one component. `components.mts` lists
+them and derives a typed prop API:
+
+```sh
+node components.mts $WORK/message.json [nameRegex]   # list sets + variants + proposed prop type
+node find.mts $WORK/message.json "Version=" SYMBOL --under Header   # scope a search to one subtree
+```
+
+Detection is **structural first**: a frame whose visible direct children are all
+`type: "SYMBOL"` named `prop=value[, prop2=value2]` sharing one axis set is a set
+(`[structural, high]`). The `#9747ff` dashed stroke is only a **labeled fallback**
+(`[stroke-hint, medium]`) — it is an editor render hint, not a format guarantee,
+so never rely on it alone. A single-axis set proposes a prop named `variant`
+regardless of the axis's own name; multi-axis sets get one prop per axis.
+`components.mts` lists only component *sets*; a standalone master (a lone SYMBOL
+with no variant siblings) is still found via `find … SYMBOL` (§3).
 
 ## 6. Vector geometry → SVG (logos, illustrations, custom icons)
 
@@ -212,25 +257,83 @@ centers the SVG on the brand background, screenshotted at 3×.)
 
 ## 8. Recommended extraction workflow
 
+0.5. **Detect an existing design system first.** Before implementing anything,
+   look for a `theme`/`tokens`/`design-system` module in the consuming repo. If
+   one exists, switch to **map mode**: the job is **diff-and-reconcile, respect
+   intentional divergence** — not implement-from-scratch. Map fig values to the
+   code's tokens **by value, never by name** (`match-tokens.mts`). Before changing
+   existing code to match the fig, check whether the divergence is intentional (a
+   comment, a token alias, a repo-wide pattern) — **prefer asking over
+   overwriting**. `match-tokens.mts` annotates `exact`/`nearest(Δ)`/`none` and
+   never rewrites; the `nearest`/`none` rows are the "ask, don't overwrite" list.
+
 1. **Unzip + parse** (§1–2); build the index. Query with scripts; never load
    `message.json` into context.
 2. **Print the skeleton** (`tree.mts`). Identify canonical pages vs trials;
    confirm scope with the user. Read any `todo`/notes page.
+2.5. **(Optional) Compile the IR** once scope is confirmed:
+   `node build-ir.mts msg-<name>.json --scope <pages> --out ir-<name>` emits a
+   small, provenance-stamped `ir-<name>/` (manifest + raw-map + fonts + tokens/* +
+   components/* + **`screens/<page>/<screen>.json`** — resolved, reconciled,
+   placeholder-detected, absolute-coordinated). Read those per-screen IR files
+   **directly** — they are ~2–500KB (vs the 80MB blob), so load them into context
+   instead of re-querying the blob; **trust the IR's reconciled `font.size` +
+   `sizeSource`, not the raw `fontSize`** (a 28px `fontSize` whose box says 16
+   carries `size:16, sizeSource:"geometry"` + a `conflicts[]` entry). After
+   compiling, **render-and-eyeball over the IR** (Phase 9's render consumes the
+   resolved screen directly). `ir.mts ir-<name> "nodes with conflicts"` /
+   `"fonts where appFamily is empty"` answer cross-cutting questions. The IR is
+   **additive** — the raw tools (`find`/`tree`/`dump`/`overrides`/`node`/
+   `export-svg`) remain the verifier and escape hatch, and `raw-map.json` drops any
+   IR node id back to its raw `{guid, path}`.
+
+   **If a code theme exists**, run `build-ir … --theme <path>`: it maps every IR
+   `color.hex` and text `font.size` to a code token **by value, within its own
+   kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact` /
+   `nearest(Δ)` / `none` — never name-matched, never cross-kind, so a 16px font
+   never binds a `spacing` token). The build then writes two small review files:
+   **`issues.json`** (the automated *ask, don't ship* list — unmapped fonts,
+   `match:none`/unconfirmed `nearest` colors, reconciliation conflicts, the
+   token name-collision trap) and **`intent.json`** (placeholders, repeated/
+   denylisted strings, default-variant instances, mono-color icon fills,
+   aggregated across all scoped screens). Read both, then resolve them into a
+   **`decisions.json`** overlay and re-run `build-ir … --theme … --decisions
+   decisions.json` — the IR is now reproducible (same source hash + same
+   decisions hash = a no-op). Keep the diff-and-reconcile, **respect intentional
+   divergence** framing: `decisions.json` is where you say "yes, same token"
+   (`tokenConfirms`), "deliberately new, stop warning" (`tokenRejects`), map a
+   font (`fontMap`), or correct a placeholder — **never overwrite by name**.
 3. **Extract tokens first.** Check for Figma variables (`variables.mts`) —
    `type: "VARIABLE"` nodes carry exact values per mode (light/dark) under
    `variableDataValues.entries`, grouped by `VARIABLE_SET`; when present they
    are the canonical token source. Otherwise scrape the colors/typography
    pages: colors often live in swatch-component instances → read
    `symbolOverrides` text (name + hex pairs). Typography pages give the full
-   ramp — *trust node values over label text*; labels go stale (a label
-   saying "28px" on a 36px node is real).
+   ramp — node properties are the **starting point**, but box geometry can
+   override them: reconcile (see §4's four-source heuristic). A label saying
+   "28px" is the weakest source; the node `fontSize` is stronger, yet a 36px
+   line-height in a 20px auto-height box means the real size is ~16 — geometry
+   wins. Labels go stale; resized boxes make node `fontSize` stale too.
 4. **Dump each canonical screen** (`dump.mts`) — a 50–150-line indented
    summary. This per-screen dump is the artifact that goes into
    implementation context; it is complete and unambiguous, unlike a
    screenshot.
-5. **Dump component masters** referenced by instances (cards, tab bars,
-   buttons, checkboxes) — these become the reusable components; variant
-   names (`Style=Filled, State=Active`) document the API.
+5. **Build the component library first.** For "build a component", enumerate the
+   component *sets* with `components.mts` and derive the prop API *before*
+   dumping screens — mirror the SYMBOL masters into reusable components, then
+   compose screens from them. `components.mts` lists only sets (variant groups);
+   standalone masters (a lone SYMBOL, no variant siblings) are still enumerated
+   via `find … SYMBOL` (§3) — it complements, not replaces, that. Then **dump
+   the masters** referenced by instances (cards, tab bars, buttons, checkboxes);
+   variant names (`Style=Filled, State=Active`) document the API. **Resolve
+   instances, then render-and-eyeball** (`render.mts`) **before trusting any
+   derived text value** (`resolve.mts` / `dump.mts --resolve` tag placeholders;
+   `render.mts` rasterizes the resolved frame so an obviously-wrong size/font/
+   position is caught visually, with the **reconciled** size baked into the
+   inspectable `<out>.html`). Dump deep + `overrides --full` on the first pass
+   (depth 8–10) so placeholder copy and overridden styles are both visible. Run
+   `intent.mts` for a single copy-pasteable gap checklist (placeholders, stale
+   sizes, default-variant instances, mono-color icons).
 6. **Map the icon set**: icon layer names usually identify a public library
    (e.g. Phosphor: `MagnifyingGlass`, `CaretUpDown`, `HouseSimple`) — use the
    library package instead of exporting every icon.
@@ -238,7 +341,30 @@ centers the SVG on the brand background, screenshotted at 3×.)
 8. **Diff duplicated frames** (screens often appear both on a consistency-
    test page and their own page) — duplicates with the highest `sessionID`s
    are usually newest.
-9. **Implement** against the dumps, mapping auto-layout per the §4 table and
+9. **Map masters ↔ code components** (P2-10). Before editing, write the explicit
+   **master ↔ existing-code-component map** plus the two **no-counterpart lists**:
+   fig masters with no code component (to build) and code components with no fig
+   master (leave alone / confirm). This scopes codegen and prevents re-building
+   what already exists.
+10. **Run the IR ship gate, then implement.** When an IR exists (step 2.5):
+   - `node ir-validate.mts ir-<name>` — the **ship gate** (exits non-zero on any
+     unresolved token/font/placeholder/conflict/provenance). A failing gate *is*
+     the automated "ask, don't ship" list: each line names the node `guid` (drop
+     back to `node.mts`) and the `decisions.json` entry that resolves it. Drive it
+     to green by authoring `decisions.json`, then re-build.
+   - `node render.mts --ir ir-<name> <screen-id> <out.png>` — **eyeball** the
+     resolved IR in one step (no re-resolve, no blob re-decode); the reconciled
+     `font.size`/`appFamily`/`letterSpacingPx`/`lineHeightPx` are baked into the
+     inspectable `<out>.html`.
+   - `node codegen.mts ir-<name> <set> [--out f] [--framework rn|web]` — scaffold
+     each component from its SYMBOL master: the variant union prop type + reconciled
+     default styles, with `// TODO`s on every placeholder/conflict/unmapped value.
+   - `node diff-ir.mts ir-old ir-new` — when a **new `.fig` export arrives**, diff
+     the two IRs (added/removed screens & components, changed tokens per mode,
+     drifted type specs, per-screen node/color drift). It compares reconciled
+     **truth vs truth** and *surfaces* drift — it never picks a canonical export,
+     and refuses to diff an IR against itself.
+11. **Implement** against the dumps, mapping auto-layout per the §4 table and
    theme-tokenizing every color/size from step 3 — no hardcoded values.
 
 ## 9. Pitfalls checklist
@@ -249,12 +375,44 @@ centers the SVG on the brand background, screenshotted at 3×.)
 - [ ] Colors are 0–1 floats; alpha may be a separate `opacity` on the paint.
 - [ ] `stackVerticalPadding`/`stackHorizontalPadding` are **top/left**, with
       separate `stackPaddingBottom`/`stackPaddingRight`.
-- [ ] Label text in design-system pages can be stale; node properties are truth.
-- [ ] Un-overridden instance text = placeholder copy → ask, don't ship.
+- [ ] Label text in design-system pages can be stale; node properties are the
+      **starting point** — but box geometry can override them, so reconcile (§4).
+- [ ] Declared `fontSize`/`lineHeight` can be **stale on a resized box**: under
+      `textAutoResize`, geometry beats the font property — a 36px line in a 20px
+      box means ~16px. Flag, don't assume (`dump.mts` prints `⚠ stale-style?`).
+- [ ] `letterSpacing`/`lineHeight` carry a **unit** and are **font-size-relative**
+      (`PERCENT → value/100 × fontSize`); px differs per font size and platform
+      (CSS `em` scales, RN bakes px). Never read the raw value as px — `dump.mts`
+      prints both (`ls=4%→0.64px@16`).
+- [ ] `styleOverrideTable` is usually rare but **invisible to the tools** when
+      present — node-level font can be wrong; flag non-empty tables.
+- [ ] Un-overridden instance text = **placeholder** — flag it; confirm copy,
+      don't ship `Test`/`Placeholder`/master defaults. `resolve.mts` (and
+      `dump.mts --resolve`) tag these `[MASTER DEFAULT ⚠ likely placeholder]`.
 - [ ] Hidden nodes (`visible: false`) and trial pages must be excluded.
 - [ ] `strokeGeometry` is pre-outlined: render as a **fill** with the stroke paint.
 - [ ] Fonts in the file may be commercial — check licensing before bundling;
       substitute behind a single token if absent.
+- [ ] Match design tokens to code tokens by **value, not name** — variable sets
+      can share a name (`praline`) with a different ramp, so a by-name sync
+      silently overwrites a deliberately-different value. Match by resolved
+      hex/px **within the same domain** (a 16px font size ≠ a 16px gap), and
+      treat `nearest`/`none` as "ask, don't overwrite" (`match-tokens.mts`).
+- [ ] A screen drawn in **multiple frames** (own page + a consistency-test page)
+      may carry **conflicting specs** (designer drift — `cart total` is `Regular
+      16` in one, `Medium 20` in another). Diff them (`diff-frames.mts`); it
+      **surfaces** the conflict and reminds you to confirm which export/frame is
+      canonical — it does **not** pick silently.
+- [ ] Auto-layout `SPACE_EVENLY` vs `SPACE_BETWEEN` **read alike on a 2-item row**
+      (both push the two items apart), so a 2-item sample can't tell them apart —
+      check a 3+-item row. In RN they differ: `justifyContent: 'space-evenly'`
+      adds equal space *around* every item (incl. the ends), `'space-between'`
+      pins the ends and only spaces the gaps.
+- [ ] **State the font-substitution map up front** — fig families are often
+      commercial/unavailable; pick the app-family per fig-family before coding so
+      sizes/line-heights stay consistent (e.g. `Neulis Sans → Figtree`, keep
+      `Geist Mono`, keep `Lora`). `render.mts` renders the fig family name as-is —
+      a missing font silently falls back, so a wrong substitution shows up there.
 
 ## Scripts reference
 
@@ -262,11 +420,53 @@ centers the SVG on the brand background, screenshotted at 3×.)
 |---|---|---|
 | `parse.mts` | `node parse.mts <canvas.fig> <out.json>` | fig-kiwi → message.json |
 | `tree.mts` | `node tree.mts <msg.json>` | page/frame skeleton with guid keys |
-| `find.mts` | `node find.mts <msg.json> <regex> [type]` | locate nodes by name |
-| `variables.mts` | `node variables.mts <msg.json>` | design tokens from Figma variables |
-| `dump.mts` | `node dump.mts <msg.json> <guidKey> [depth]` | per-screen implementation dump |
-| `overrides.mts` | `node overrides.mts <msg.json> <guidKey>` | instance text/color overrides |
-| `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg>` | vector → SVG |
+| `find.mts` | `node find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under <name>` scopes to a subtree whose ancestor matches) |
+| `components.mts` | `node components.mts <msg.json> [nameRegex]` | list component sets + variant masters + proposed TS prop API |
+| `node.mts` | `node node.mts <msg.json> <guidKey> [field …]` | raw single-node JSON (confirm a field exists before relying on it) |
+| `variables.mts` | `node variables.mts <msg.json>` | design tokens from Figma variables (resolves alias chains transitively → concrete value inline, e.g. `→ 18 (alias Numbers/18)`) |
+| `dump.mts` | `node dump.mts <msg.json> <guidKey> [depth] [--abs] [--resolve]` | per-screen implementation dump (`--abs` adds absolute coords; `--resolve` composes instances + tags placeholder/overridden text) |
+| `overrides.mts` | `node overrides.mts <msg.json> <guidKey> [--full]` | instance text/color overrides (`--full` value-prints lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings) |
+| `resolve.mts` | `node resolve.mts <msg.json> <guidKey> [depth]` | compose master + symbolOverrides → the rendered instance tree |
+| `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg> [--png]` | vector → SVG (`--png` also rasterizes via headless Chrome @3×; degrades gracefully if Chrome is absent) |
+| `match-tokens.mts` | `node match-tokens.mts <msg.json> <theme.(ts\|json)> [guidKey]` | brownfield map mode: annotate fig values vs an existing code theme **by value, within kind** (`exact`/`nearest(Δ)`/`none`); never rewrites |
+| `render.mts` | `node render.mts <msg.json> <frame-guidKey> <out.png> [--images <dir>]`  •  **`--ir`:** `node render.mts --ir <ir-dir> <screen-id> <out.png> [--images <dir>]` | resolved frame → self-contained `<out>.html` + screenshot PNG; text uses the **reconciled** size; missing image → labeled placeholder, not a broken `<img>`. Not pixel-perfect — catches "obviously wrong". Writes the HTML even if Chrome is absent. **`--ir` mode** renders OVER an emitted IR (`screens/<…>.json`) in one step — **no re-resolve, no re-reconcile, no blob re-decode**; `<screen-id>` is a screen-file slug, a node `id`, or a `guid`; sidecar asset bytes (images via `--images`/sibling `images/`; pre-exported `vectors/<id>.svg`) fill image/vector slots, a missing asset → labeled placeholder |
+| `intent.mts` | `node intent.mts <msg.json> <screen-guidKey>` | one copy-pasteable designer-intent gap checklist: placeholders, denylisted/repeated strings, geometry/fontSize reconciliation conflicts, default-variant instances, mono-color icon fills |
+| `diff-frames.mts` | `node diff-frames.mts <msg.json> <guidA> <guidB>` | resolve both frames, align by name-path, report per-node property deltas (font/size/color/spacing/text). **Surfaces** drift; does **not** pick a canonical winner |
+| `icons.mts` | `node icons.mts <msg.json> <screen-guidKey>` | inventory icon instances under a screen, resolve each to its library export name (Phosphor `MagnifyingGlass`…), emit the exact `AppIconName` union additions so no name is imported unmapped |
+| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--decisions <p>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` (source hash/path + scope + counts) + `raw-map.json` (IR id → raw guidKey) + `fonts.json` (families + empty `appFamily` substitution slots) + `tokens/*` (alias chains collapsed) + `components/*` (variant matrix + proposed TS prop API) + `screens/<page>/<screen>.json` (resolved instances, reconciled `font.size`+`sizeSource`+`conflicts[]`, `letterSpacingPx`, placeholder detection, `box.absX/absY`, path-derived `id` + `guid` per node). With `--theme <p>`: maps each `color.hex`/`font.size` to a code token **by value, within kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`) and emits **`issues.json`** (ask-don't-ship: unmapped fonts, `match:none`/unconfirmed `nearest`, reconciliation conflicts, token name-collisions) + **`intent.json`** (placeholders/repeated/denylist/default-variant/mono-icon, aggregated). `--decisions <p>` folds a `decisions.json` overlay back in (`fontMap`/`tokenConfirms`/`tokenRejects`/`placeholders`) and suppresses the resolved issues. Re-runs with the same source+decisions are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
+| `diff-ir.mts` | `node diff-ir.mts <ir-old> <ir-new>` | design-version diff over two emitted IRs (no decode): added/removed screens & components, changed tokens per mode, drifted type specs (family/size/weight/lineHeight/letterSpacing), per-screen node + color drift (aligned by `path`, never `guid`). Compares reconciled **truth vs truth** and **surfaces** drift — never picks a canonical export; refuses to diff an IR against itself (same dir / equal `sourceHash`); re-hashes each manifest's recorded source if still present and **warns** on staleness, else skips |
+| `ir-validate.mts` | `node ir-validate.mts <ir-dir>` | the **ship gate** (exits non-zero on failure — CI/pre-ship). Asserts from the IR alone: every color adjudicated against the theme (`exact`/confirmed/rejected; skipped when greenfield — every `match:null`), every font has a non-null `appFamily` (always), no unresolved `placeholder:true`, no open `conflicts[]`, no missing `source`/`match` provenance. Each failure names the node `guid` + the `decisions.json` entry that resolves it |
+| `codegen.mts` | `node codegen.mts <ir-dir> <set-name> [--out <file>] [--framework rn\|web]` | typed component **scaffold** from `components/<set>.json`: the variant union as the prop type (`proposePropApi`) + the default variant's reconciled default styles (`font.size`/`lineHeightPx`/`letterSpacingPx`, token refs, colors, box) located in the screens IR by guid; leaves `// TODO` on every `placeholder:true` text, open conflict, or `match:none`/unmapped value — never bakes an unconfirmed value silently. Default framework React Native |
+| `ir.mts` | `node ir.mts <ir-dir> <query>` | dumb reader over an emitted IR (no decode) for cross-cutting questions: `"fonts where appFamily is empty"`, `"colors with match=none"` (token-level `tokens/colors.json`; node-level `match:none` lives in `issues.json`), `"nodes with conflicts"` (walks `screens/<page>/*.json` for reconciled `font.conflicts`). Default access is a direct read of the small per-screen JSON |
 
 All scripts import `lib.mts` (tree index + color helpers) — copy the whole
 `scripts/` directory together.
+
+### `decisions.json` — the only non-deterministic IR input
+
+Everything `build-ir.mts` emits is a **pure function of the `.fig` bytes** except
+the values it reads from a `--decisions <decisions.json>` overlay. That file is
+the single judgment slot: a human/LLM authors it by reading `issues.json` +
+`intent.json`, and once authored the build is reproducible — **same source hash +
+same decisions hash = a no-op** (the manifest records both hashes). Never let the
+LLM build the IR; it only writes `decisions.json`. Schema:
+
+```json
+{
+  "fontMap":       { "Neulis Sans": "Figtree" },
+  "tokenConfirms": { "color:#bda799": "theme.colors.praline300", "fontSize:16": "theme.fontSize.md" },
+  "tokenRejects":  ["color:#5a3a2a"],
+  "placeholders":  { "1273:19842": { "placeholder": false, "text": "Heirloom" } },
+  "canonicalPages": ["Screens", "Components"]
+}
+```
+
+- `fontMap` → fills every matching node's `font.appFamily` (and clears its
+  unmapped-font issue). `tokenConfirms` keys are **`kind:value`** (one of
+  `color|fontSize|spacing|radius|strokeWidth|other`) — only `color`/`fontSize`
+  bind into IR nodes (the kinds the IR carries a token field for); it upgrades a
+  `nearest`/`none` to a confirmed `exact` + token. `tokenRejects` (same key
+  shape) confirms "deliberately new" — keeps the literal, marks `match:"rejected"`,
+  suppresses the issue. `placeholders` overrides `text.placeholder`/`value` per
+  guid. **Value normalization:** hex is lower-cased 6-digit `#rrggbb`; numbers are
+  bare/unit-less — the build canonicalizes the key and the IR value the same way.

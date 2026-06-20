@@ -3,54 +3,27 @@
 // per-screen implementation artifact — complete and unambiguous.
 // Usage: node dump.mts <message.json> <guidKey> [maxDepth]
 // (guidKey like "735:14256" — get it from tree.mts or find.mts)
-import { load, key, colorStr } from "./lib.mts";
+import { load, key, absCoords } from "./lib.mts";
+import { describeNode } from "./describe-lib.mts";
+import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
 
-const { byKey, children } = load(process.argv[2]);
-const target = process.argv[3];
-const maxDepth = parseInt(process.argv[4] ?? "99", 10);
-if (!target) throw new Error("usage: dump.mts <message.json> <guidKey> [maxDepth]");
+const argv = process.argv;
+const abs = argv.includes("--abs"); // scan for the flag; keep maxDepth positional
+const resolve = argv.includes("--resolve"); // opt-in instance resolution (Phase 2 Task 2)
+const index = load(argv[2]);
+const { byKey, children } = index;
+const target = argv[3];
+const maxDepthArg = argv.slice(4).find((a) => !a.startsWith("--") && /^\d+$/.test(a));
+const maxDepth = parseInt(maxDepthArg ?? "99", 10);
+if (!target) throw new Error("usage: dump.mts <message.json> <guidKey> [maxDepth] [--abs] [--resolve]");
 
-function paintStr(p: any): string {
-  if (!p) return "";
-  if (p.type === "SOLID") return `solid ${colorStr(p.color)}${p.opacity !== undefined && p.opacity < 1 ? ` op=${p.opacity.toFixed(2)}` : ""}`;
-  if (p.type === "IMAGE") return `image hash=${p.image?.hash ? Buffer.from(p.image.hash).toString("hex") : p.image?.name ?? "?"} mode=${p.imageScaleMode ?? ""}`;
-  if (p.type?.startsWith("GRADIENT")) {
-    const stops = (p.stops ?? []).map((s: any) => `${colorStr(s.color)}@${s.position?.toFixed(2)}`).join(",");
-    return `${p.type} [${stops}]`;
-  }
-  return p.type;
-}
+const absFn = (n: any) => absCoords(byKey, key(n.guid));
 
-function describe(n: any): string {
-  const bits: string[] = [];
-  bits.push(`${n.type}${n.visible === false ? "(HIDDEN)" : ""} "${n.name}"`);
-  if (n.size) bits.push(`${Math.round(n.size.x)}x${Math.round(n.size.y)}`);
-  if (n.transform) bits.push(`@(${Math.round(n.transform.m02)},${Math.round(n.transform.m12)})`);
-  if (n.fillPaints?.length) bits.push(`fill[${n.fillPaints.filter((p: any) => p.visible !== false).map(paintStr).join("; ")}]`);
-  if (n.strokePaints?.length) bits.push(`stroke[${n.strokePaints.filter((p: any) => p.visible !== false).map(paintStr).join("; ")} w=${n.strokeWeight ?? 1}]`);
-  if (n.cornerRadius) bits.push(`r=${n.cornerRadius}`);
-  if (n.rectangleTopLeftCornerRadius !== undefined)
-    bits.push(`r=[${n.rectangleTopLeftCornerRadius},${n.rectangleTopRightCornerRadius},${n.rectangleBottomRightCornerRadius},${n.rectangleBottomLeftCornerRadius}]`);
-  if (n.stackMode && n.stackMode !== "NONE") {
-    bits.push(`autolayout=${n.stackMode} gap=${n.stackSpacing ?? 0} pad[t,l,b,r]=[${n.stackVerticalPadding ?? 0},${n.stackHorizontalPadding ?? 0},${n.stackPaddingBottom ?? 0},${n.stackPaddingRight ?? 0}] align=${n.stackPrimaryAlignItems ?? ""}/${n.stackCounterAlignItems ?? ""}`);
-  }
-  if (n.fontName) bits.push(`font=${n.fontName.family} ${n.fontName.style} ${n.fontSize}px ls=${n.letterSpacing?.value ?? 0} lh=${n.lineHeight?.value !== undefined ? n.lineHeight.value + (n.lineHeight.units === "PERCENT" ? "%" : "px") : "auto"}`);
-  if (n.textAlignHorizontal && n.textAlignHorizontal !== "LEFT") bits.push(`align=${n.textAlignHorizontal}`);
-  if (n.type === "TEXT") {
-    const chars = n.textData?.characters ?? "";
-    bits.push(`text=${JSON.stringify(chars.length > 120 ? chars.slice(0, 120) + "…" : chars)}`);
-  }
-  if (n.effects?.length) bits.push(`effects=[${n.effects.map((e: any) => `${e.type} ${colorStr(e.color)} off=(${e.offset?.x ?? 0},${e.offset?.y ?? 0}) blur=${e.radius}`).join("; ")}]`);
-  if (n.opacity !== undefined && n.opacity < 1) bits.push(`opacity=${n.opacity.toFixed(2)}`);
-  if (n.symbolData?.symbolID) bits.push(`instanceOf=${key(n.symbolData.symbolID)}`);
-  if (n.componentKey) bits.push(`componentKey=${n.componentKey}`);
-  return bits.join(" ");
-}
-
+// Default fast path: raw tree, no resolution (the "raw tools stay" principle).
 function walk(k: string, depth: number, prefix: string) {
   const n = byKey.get(k);
   if (!n) return;
-  console.log(prefix + describe(n) + ` [${k}]`);
+  console.log(prefix + describeNode(n, { abs: abs ? absFn : undefined }) + ` [${k}]`);
   if (depth >= maxDepth) return;
   for (const c of children.get(k) ?? []) {
     if (c.visible === false) continue;
@@ -58,4 +31,20 @@ function walk(k: string, depth: number, prefix: string) {
   }
 }
 
-walk(target, 0, "");
+// --resolve: compose master + overrides, tag placeholder/overridden text.
+function walkResolved(n: ResolvedNode, depth: number, prefix: string) {
+  if (depth > maxDepth) return;
+  const tags: string[] = [];
+  if (n.fromInstance) tags.push(`[from ${n.fromInstance}]`);
+  if (n.overrideApplied) tags.push(`[overridden: ${Object.keys(n.overrideApplied).join(",")}]`);
+  if (n.unresolved) tags.push(`⚠ unresolved (${n.unresolved})`);
+  if (n.unresolvedOverrides?.length) tags.push(`⚠ stale overrides: ${n.unresolvedOverrides.join("; ")}`);
+  console.log(prefix + describeNode(n as any, { placeholderTag: true }) + ` [${n.guid}]` + (tags.length ? " " + tags.join(" ") : ""));
+  for (const c of n.children ?? []) {
+    if ((c as any).visible === false) continue;
+    walkResolved(c, depth + 1, prefix + "  ");
+  }
+}
+
+if (resolve) walkResolved(resolveScreen(index, target), 0, "");
+else walk(target, 0, "");

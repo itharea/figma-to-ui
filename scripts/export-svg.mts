@@ -1,13 +1,18 @@
 // Export a vector node (logo, illustration, custom icon) as an SVG file by
 // decoding fillGeometry/strokeGeometry blobs and composing transforms.
-// Usage: node export-svg.mts <message.json> <guidKey> <out.svg>
+// Usage: node export-svg.mts <message.json> <guidKey> <out.svg> [--png]
 import * as fs from "fs";
-import { load, key, colorStr } from "./lib.mts";
+import { rasterizeFile } from "./raster-lib.mts";
+import { load, key, colorStr, type Mat, I, mul, nodeMat } from "./lib.mts";
 
 const { msg, byKey, children } = load(process.argv[2]);
-const target = process.argv[3];
-const outFile = process.argv[4];
-if (!target || !outFile) throw new Error("usage: export-svg.mts <message.json> <guidKey> <out.svg>");
+// --png is parsed tolerantly (scan argv); the SVG out path is the first non-flag
+// positional after the guidKey, so default (SVG-only) behavior is unchanged.
+const png = process.argv.includes("--png");
+const positional = process.argv.slice(3).filter((a) => !a.startsWith("--"));
+const target = positional[0];
+const outFile = positional[1];
+if (!target || !outFile) throw new Error("usage: export-svg.mts <message.json> <guidKey> <out.svg> [--png]");
 const blobs = msg.blobs;
 
 // blob byte stream: [uint8 opcode][float32 LE args…]
@@ -34,23 +39,7 @@ function decodePath(blobIdx: number): string {
   return parts.join("");
 }
 
-type Mat = [number, number, number, number, number, number]; // m00 m01 m02 m10 m11 m12
-const I: Mat = [1, 0, 0, 0, 1, 0];
-function mul(a: Mat, b: Mat): Mat {
-  return [
-    a[0] * b[0] + a[1] * b[3],
-    a[0] * b[1] + a[1] * b[4],
-    a[0] * b[2] + a[1] * b[5] + a[2],
-    a[3] * b[0] + a[4] * b[3],
-    a[3] * b[1] + a[4] * b[4],
-    a[3] * b[2] + a[4] * b[5] + a[5],
-  ];
-}
-function nodeMat(n: any): Mat {
-  const t = n.transform;
-  return t ? [t.m00, t.m01, t.m02, t.m10, t.m11, t.m12] : I;
-}
-
+// Mat / I / mul / nodeMat now live in lib.mts (one matrix impl, reused).
 const paths: string[] = [];
 
 function emit(n: any, mat: Mat) {
@@ -95,3 +84,13 @@ const h = Math.ceil(root.size?.y ?? 0);
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n${paths.join("\n")}\n</svg>\n`;
 fs.writeFileSync(outFile, svg);
 console.log(`wrote ${outFile}: ${w}x${h}, ${paths.length} paths, ${(svg.length / 1024).toFixed(1)}KB`);
+
+// --png: rasterize the just-written SVG with the SKILL.md §6 headless-Chrome
+// trick (window-size = the SVG's natural px; @3x). Degrades gracefully: if Chrome
+// is absent the .svg above still stands and we note the skipped PNG.
+if (png) {
+  const pngOut = outFile.replace(/\.svg$/i, "") + ".png";
+  const r = rasterizeFile(outFile, pngOut, w, h, 3);
+  if (r.ok) console.log(`wrote ${pngOut}: ${w * 3}x${h * 3} (@3x)`);
+  else console.error(`⚠ PNG skipped (${r.reason}); ${outFile} written`);
+}
