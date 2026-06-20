@@ -15,6 +15,11 @@ yet).
 Ready-to-run scripts live in the `scripts/` directory. Verified
 against fig-kiwi format version 106 (2026).
 
+**Read via the Design IR by default:** for any real task, compile the scoped,
+reconciled, provenance-stamped IR (§8 step 2.5) and read its per-screen JSON as
+your source of truth — the raw scripts are the quick-query path and the verifier
+it is checked against.
+
 ## 0. Setup
 
 ```sh
