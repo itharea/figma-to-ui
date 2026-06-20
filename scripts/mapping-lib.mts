@@ -62,7 +62,10 @@ export function mapNodeTokens(
   confirms: Record<string, string>,
   rejects: Set<string>
 ): void {
-  if (node.color && node.color.hex) {
+  // A color BOUND to a Figma variable (match:"bound", var!=null) is GROUND TRUTH
+  // from the bytes — value-matching applies to UNBOUND literals only, so never
+  // clobber a bound color's token/match (A-variables / spec #3).
+  if (node.color && node.color.hex && node.color.var == null) {
     apply(node.color, theme, "color", node.color.hex, confirms, rejects, "token", "match");
   }
   if (node.font && typeof node.font.size === "number") {

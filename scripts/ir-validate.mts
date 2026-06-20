@@ -71,8 +71,12 @@ function walk(n: IRNode, screenRel: string) {
       detail: `text ${JSON.stringify(n.text.value)} is an un-confirmed placeholder (${n.text.reason})`,
       fix: `decisions.placeholders["${n.guid}"] = { "placeholder": false }  (or set real "text")`,
     });
-  // gate 1: color adjudication (theme only)
-  if (themeUsed && n.color?.hex) {
+  // gate 1: color adjudication. A color BOUND to a Figma variable (match:"bound",
+  // var!=null) is ADJUDICATED by the bytes themselves (ground truth) — it ALWAYS
+  // PASSES, greenfield or themed; never fail a bound color. (A-variables / spec #3.)
+  if (n.color?.var != null || n.color?.match === "bound") {
+    // bound — pass, no gate. fall through (no theme check below).
+  } else if (themeUsed && n.color?.hex) {
     const m = n.color.match;
     if (m != null) sawThemedColor = true;
     // match:null ⇒ greenfield (no theme bound) — not a failure. exact/rejected/a

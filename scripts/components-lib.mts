@@ -148,7 +148,9 @@ function kebab(s: string): string {
     .toLowerCase();
 }
 
-const mapValue = (v: string) => VALUE_SYNONYMS[v] ?? kebab(v);
+// Map one axis VALUE to its prop-union literal (synonym, else kebab-case). Exported
+// so codegen can compute the SAME per-variant prop value the union type uses.
+export const mapValue = (v: string) => VALUE_SYNONYMS[v] ?? kebab(v);
 const union = (values: string[]) =>
   values.map((v) => `'${mapValue(v)}'`).join(" | ");
 

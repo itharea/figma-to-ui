@@ -42,7 +42,34 @@ export type IRFont = {
   letterSpacingRaw: { value: number; units: string };
   conflicts: Conflict[];
 };
-export type IRColor = { hex: string | null; token: string | null; match: string | null };
+// `var`/`varGuid`: the design-system token a fill is BOUND to via a Figma variable
+// alias (paint.colorVar). This is GROUND TRUTH from the bytes (not value-matching):
+// when set, `match` is "bound". `token`/`match` value-matching (Phase 8 --theme)
+// stays for UNBOUND literals only. `hex` is always the resolved concrete value.
+export type IRColor = {
+  hex: string | null;
+  token: string | null;
+  match: string | null;
+  var: string | null; // bound design-token name, or null for a literal fill
+  varGuid: string | null; // the variable guidKey, or null
+};
+
+// Side-effect-free resolver: given a paint and a variable index (guidKey →
+// tokenName), return the bound token if the paint carries a colorVar ALIAS that
+// resolves in the index, else null. Confirmed field shape (node.mts):
+//   paint.colorVar = { value:{ alias:{ guid:{sessionID,localID} } }, dataType:"ALIAS", resolvedDataType:"COLOR" }
+export function colorVarToken(
+  paint: any,
+  varIndex: Map<string, string>
+): { var: string; varGuid: string } | null {
+  const alias = paint?.colorVar?.value?.alias;
+  const g = alias?.guid;
+  if (!g || g.sessionID === undefined || g.localID === undefined) return null;
+  const varGuid = `${g.sessionID}:${g.localID}`;
+  const name = varIndex.get(varGuid);
+  if (name === undefined) return null;
+  return { var: name, varGuid };
+}
 export type IRBox = {
   x: number;
   y: number;
@@ -51,6 +78,54 @@ export type IRBox = {
   absX: number;
   absY: number;
 };
+
+// --- full box styling + auto-layout (improvement B-style-layout / spec #2) ----
+// Carries the COMPLETE box-styling and auto-layout picture so the IR alone
+// suffices for a 1:1 implementation (parity with the raw dump / SKILL §4). Blocks
+// are OMITTED when a node has none, so files stay lean. Bound fill/stroke colors
+// carry their design token (var/varGuid) via Phase A's resolver — GROUND TRUTH.
+export type IRFill = {
+  type: "solid" | "gradient" | "image";
+  hex?: string | null; // solid: resolved concrete value
+  var?: string | null; // bound design-token name (solid), else absent/null
+  varGuid?: string | null; // the variable guidKey, else absent/null
+  stops?: { position: number; hex: string }[]; // gradient
+  imageHash?: string; // image: hash bytes → hex (filename in images/, §7)
+  opacity?: number; // paint opacity when < 1
+};
+export type IRStroke = {
+  weight: number;
+  align: string; // INSIDE | CENTER | OUTSIDE
+  hex: string | null;
+  var?: string | null;
+  varGuid?: string | null;
+};
+export type IREffect = {
+  type: string; // DROP_SHADOW | INNER_SHADOW | LAYER_BLUR | BACKGROUND_BLUR | …
+  hex: string | null;
+  offsetX: number;
+  offsetY: number;
+  radius: number;
+  spread?: number;
+};
+export type IRStyle = {
+  fills?: IRFill[];
+  cornerRadius?: number | { tl: number; tr: number; br: number; bl: number };
+  strokes?: IRStroke[];
+  effects?: IREffect[];
+  opacity?: number;
+};
+export type IRLayout = {
+  mode: "row" | "column";
+  gap?: number;
+  paddingTop?: number;
+  paddingRight?: number;
+  paddingBottom?: number;
+  paddingLeft?: number;
+  justify?: string;
+  align?: string;
+};
+
 export type IRNode = {
   id: string;
   path: string;
@@ -61,6 +136,8 @@ export type IRNode = {
   font?: IRFont;
   color?: IRColor;
   box: IRBox;
+  style?: IRStyle;
+  layout?: IRLayout;
   autoResize?: string | null;
   styleRuns?: number;
   unresolved?: string;
@@ -78,15 +155,156 @@ export function idForPath(path: string): string {
   return "n_" + crypto.createHash("sha256").update(path).digest("hex").slice(0, 10);
 }
 
-// First visible solid fill → hex (the node's own color). Mirrors describe-lib's
+// First visible solid fill (the node's own color paint). Mirrors describe-lib's
 // paintStr SOLID branch so IR `color.hex` and the raw dump render identically.
-function solidHex(node: any): string | null {
+function firstSolidFill(node: any): any | null {
   const fills: any[] = node.fillPaints ?? [];
   for (const p of fills) {
     if (p?.visible === false) continue;
-    if (p?.type === "SOLID" && p.color) return colorStr(p.color);
+    if (p?.type === "SOLID" && p.color) return p;
   }
   return null;
+}
+
+// Build the IRColor for a node from its first visible solid fill. `hex` stays the
+// resolved concrete value (unchanged). When that fill is BOUND to a variable
+// (paint.colorVar ALIAS resolving in `varIndex`), attach the design token directly:
+// var/varGuid set and match="bound". A literal fill keeps var/varGuid null and
+// match null (Phase 8 --theme value-matching fills token/match for literals).
+function buildColor(node: any, varIndex: Map<string, string>): IRColor {
+  const p = firstSolidFill(node);
+  const hex = p ? colorStr(p.color) : null;
+  const bound = p ? colorVarToken(p, varIndex) : null;
+  return {
+    hex,
+    token: null,
+    match: bound ? "bound" : null,
+    var: bound ? bound.var : null,
+    varGuid: bound ? bound.varGuid : null,
+  };
+}
+
+// --- style + layout extraction (improvement B-style-layout / spec #2) --------
+// All PURE functions of the raw node fields (confirmed against the decode with
+// node.mts), mirroring describe-lib/render's SOLID/GRADIENT/IMAGE/effect handling
+// so the IR and the raw dump agree. Numbers are emitted bare/rounded; hex is the
+// lower-cased colorStr value. A block is OMITTED when the node has none of it.
+
+// One fillPaint → IRFill (or null to drop a non-visible / unrecognized paint).
+// SOLID carries hex + bound var (Phase A resolver); GRADIENT_* carries stops[];
+// IMAGE carries imageHash. paint.opacity (< 1) is preserved.
+function fillToIR(p: any, varIndex: Map<string, string>): IRFill | null {
+  if (!p || p.visible === false) return null;
+  const op = typeof p.opacity === "number" && p.opacity < 1 ? { opacity: p.opacity } : {};
+  const t: string = p.type ?? "";
+  if (t === "SOLID") {
+    const bound = colorVarToken(p, varIndex);
+    return {
+      type: "solid",
+      hex: p.color ? colorStr(p.color) : null,
+      ...(bound ? { var: bound.var, varGuid: bound.varGuid } : {}),
+      ...op,
+    };
+  }
+  if (t.startsWith("GRADIENT")) {
+    const stops = (p.stops ?? [])
+      .filter((s: any) => s && s.color)
+      .map((s: any) => ({ position: s.position ?? 0, hex: colorStr(s.color) }));
+    return { type: "gradient", stops, ...op };
+  }
+  if (t === "IMAGE") {
+    const h = p.image?.hash;
+    const imageHash = Array.isArray(h) ? Buffer.from(h).toString("hex") : typeof h === "string" ? h : undefined;
+    return { type: "image", ...(imageHash ? { imageHash } : {}), ...op };
+  }
+  return null;
+}
+
+// Per-corner radii → uniform number when all four agree, else the {tl,tr,br,bl}
+// object. Falls back to the uniform `cornerRadius`. Returns undefined when none.
+function cornerRadiusOf(n: any): IRStyle["cornerRadius"] {
+  const tl = n.rectangleTopLeftCornerRadius;
+  const tr = n.rectangleTopRightCornerRadius;
+  const br = n.rectangleBottomRightCornerRadius;
+  const bl = n.rectangleBottomLeftCornerRadius;
+  if ([tl, tr, br, bl].every((v) => typeof v === "number")) {
+    if (tl === tr && tr === br && br === bl) return tl || undefined;
+    return { tl, tr, br, bl };
+  }
+  if (typeof n.cornerRadius === "number" && n.cornerRadius) return n.cornerRadius;
+  return undefined;
+}
+
+// Build the IRStyle block for a node, or null when it carries no styling. fills =
+// ALL visible fillPaints (solid/gradient/image — the complete picture; IRColor.hex
+// stays the single-hex convenience). strokes carry weight/align/hex + bound var.
+function buildStyle(n: any, varIndex: Map<string, string>): IRStyle | null {
+  const s: IRStyle = {};
+
+  const fills = (n.fillPaints ?? []).map((p: any) => fillToIR(p, varIndex)).filter(Boolean) as IRFill[];
+  if (fills.length) s.fills = fills;
+
+  const cr = cornerRadiusOf(n);
+  if (cr !== undefined) s.cornerRadius = cr;
+
+  const strokePaints: any[] = (n.strokePaints ?? []).filter((p: any) => p && p.visible !== false);
+  if (strokePaints.length) {
+    const weight = typeof n.strokeWeight === "number" ? n.strokeWeight : 1;
+    const align = n.strokeAlign ?? "INSIDE";
+    s.strokes = strokePaints.map((p: any) => {
+      const bound = p.type === "SOLID" ? colorVarToken(p, varIndex) : null;
+      return {
+        weight,
+        align,
+        hex: p.color ? colorStr(p.color) : null,
+        ...(bound ? { var: bound.var, varGuid: bound.varGuid } : {}),
+      };
+    });
+  }
+
+  const effects: any[] = (n.effects ?? []).filter((e: any) => e && e.visible !== false);
+  if (effects.length) {
+    s.effects = effects.map((e: any) => ({
+      type: e.type ?? "",
+      hex: e.color ? colorStr(e.color) : null,
+      offsetX: e.offset?.x ?? 0,
+      offsetY: e.offset?.y ?? 0,
+      radius: e.radius ?? 0,
+      ...(typeof e.spread === "number" ? { spread: e.spread } : {}),
+    }));
+  }
+
+  if (typeof n.opacity === "number" && n.opacity < 1) s.opacity = n.opacity;
+
+  return Object.keys(s).length ? s : null;
+}
+
+// fig stackPrimaryAlignItems / stackCounterAlignItems → CSS justify/align value.
+const STACK_ALIGN: Record<string, string> = {
+  MIN: "flex-start",
+  CENTER: "center",
+  MAX: "flex-end",
+  SPACE_BETWEEN: "space-between",
+  SPACE_EVENLY: "space-evenly",
+  BASELINE: "baseline",
+  STRETCH: "stretch",
+};
+
+// Build the IRLayout block ONLY when the node carries a real stackMode
+// (HORIZONTAL/VERTICAL → row/column). NONE/absent → absolute positioning → no
+// layout block. Paddings/gap omitted when 0; justify/align only when explicit.
+function buildLayout(n: any): IRLayout | null {
+  const sm = n.stackMode;
+  if (sm !== "HORIZONTAL" && sm !== "VERTICAL") return null;
+  const l: IRLayout = { mode: sm === "HORIZONTAL" ? "row" : "column" };
+  if (n.stackSpacing) l.gap = n.stackSpacing;
+  if (n.stackVerticalPadding) l.paddingTop = n.stackVerticalPadding;
+  if (n.stackPaddingRight) l.paddingRight = n.stackPaddingRight;
+  if (n.stackPaddingBottom) l.paddingBottom = n.stackPaddingBottom;
+  if (n.stackHorizontalPadding) l.paddingLeft = n.stackHorizontalPadding;
+  if (n.stackPrimaryAlignItems) l.justify = STACK_ALIGN[n.stackPrimaryAlignItems] ?? n.stackPrimaryAlignItems;
+  if (n.stackCounterAlignItems) l.align = STACK_ALIGN[n.stackCounterAlignItems] ?? n.stackCounterAlignItems;
+  return l;
 }
 
 // Reconcile one resolved TEXT node into the IR `font`/`text`/`color` provenance
@@ -94,7 +312,8 @@ function solidHex(node: any): string | null {
 // until decided in Phase 8).
 function reconcileText(
   n: ResolvedNode,
-  appFamilyOf: (family: string | null) => string | null
+  appFamilyOf: (family: string | null) => string | null,
+  varIndex: Map<string, string>
 ): { text: IRTextField; font: IRFont; color: IRColor; styleRuns: number } {
   const rec = reconcileTextSize(n as any); // {size, source, conflicts[]} — verbatim
   const conflicts: Conflict[] = [...rec.conflicts];
@@ -148,7 +367,7 @@ function reconcileText(
     reason: cls.reason,
   };
 
-  const color: IRColor = { hex: solidHex(n), token: null, match: null };
+  const color: IRColor = buildColor(n, varIndex);
   return { text, font, color, styleRuns };
 }
 
@@ -162,7 +381,8 @@ function reconcileText(
 function toIR(
   n: ResolvedNode,
   acc: Mat,
-  appFamilyOf: (family: string | null) => string | null
+  appFamilyOf: (family: string | null) => string | null,
+  varIndex: Map<string, string>
 ): IRNode {
   const size = (n as any).size ?? { x: 0, y: 0 };
   const t = (n as any).transform;
@@ -186,16 +406,24 @@ function toIR(
   };
 
   if ((n as any).type === "TEXT") {
-    const { text, font, color, styleRuns } = reconcileText(n, appFamilyOf);
+    const { text, font, color, styleRuns } = reconcileText(n, appFamilyOf, varIndex);
     node.text = text;
     node.font = font;
     node.color = color;
     node.styleRuns = styleRuns;
     node.autoResize = (n as any).textAutoResize ?? null;
   } else {
-    const hex = solidHex(n);
-    if (hex) node.color = { hex, token: null, match: null };
+    const color = buildColor(n, varIndex);
+    if (color.hex) node.color = color;
   }
+
+  // Full box-styling + auto-layout (B-style-layout / spec #2) on EVERY node type
+  // (TEXT included — a text node can carry effects/opacity). Blocks are omitted
+  // when absent so files stay lean.
+  const style = buildStyle(n as any, varIndex);
+  if (style) node.style = style;
+  const layout = buildLayout(n as any);
+  if (layout) node.layout = layout;
 
   // unresolved (remote/library master absent, or cycle): emit the node carrying
   // its string and STOP recursing here (§5 / §6 step 1) — never drop it.
@@ -207,7 +435,7 @@ function toIR(
   for (const c of n.children ?? []) {
     if ((c as any).visible === false) continue;
     const childAcc = mul(acc, nodeMat(c as any));
-    node.children.push(toIR(c, childAcc, appFamilyOf));
+    node.children.push(toIR(c, childAcc, appFamilyOf, varIndex));
   }
   return node;
 }
@@ -216,14 +444,18 @@ function toIR(
 // from the page root down to (and including) the screen root (lib.absMat(root)) —
 // the screen frame is a direct raw node, so absMat is valid for that seed (§6
 // step 3). `appFamily` maps raw family → decided appFamily slot (or null).
+// `varIndex` maps a variable guidKey → its design-token name; build it ONCE in
+// build-ir (from the resolved color variables) and pass it in — buildColor uses it
+// to attach the bound token directly on every variable-bound fill (GROUND TRUTH).
 export function buildScreen(
   resolvedRoot: ResolvedNode,
   rootAbsMat: Mat,
-  appFamily: Record<string, string> = {}
+  appFamily: Record<string, string> = {},
+  varIndex: Map<string, string> = new Map()
 ): IRNode {
   const appFamilyOf = (family: string | null): string | null =>
     family != null && appFamily[family] ? appFamily[family] : null;
-  return toIR(resolvedRoot, rootAbsMat, appFamilyOf);
+  return toIR(resolvedRoot, rootAbsMat, appFamilyOf, varIndex);
 }
 
 // Walk an IR tree, registering every node id → {guid, path} into `out`.
@@ -248,6 +480,8 @@ export function provenanceViolations(node: IRNode, acc: string[] = []): string[]
   if (node.color) {
     if (!("match" in node.color)) acc.push(`${node.id}: color.match missing`);
     if (!("token" in node.color)) acc.push(`${node.id}: color.token missing`);
+    if (!("var" in node.color)) acc.push(`${node.id}: color.var missing`);
+    if (!("varGuid" in node.color)) acc.push(`${node.id}: color.varGuid missing`);
   }
   for (const c of node.children) provenanceViolations(c, acc);
   return acc;
