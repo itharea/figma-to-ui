@@ -132,6 +132,8 @@ page: designers leave notes there about undecided content.
 | `transform` | 2×3 matrix `{m00,m01,m02,m10,m11,m12}`; `m02`,`m12` = x,y relative to parent |
 | `fillPaints[]` / `strokePaints[]` | `type: "SOLID"` with `color` as **0–1 floats** `{r,g,b,a}` (×255 → hex); `type: "IMAGE"` with `image.hash` (bytes → hex = filename in `images/`, §7); gradients carry `stops[]` |
 | `strokeWeight`, `strokeAlign` | border width / position |
+| `borderStrokeWeightsIndependent` + `borderTop/Right/Bottom/LeftWeight` | **per-side** border widths (when independent these apply INSTEAD of `strokeWeight`; absent side = 0). Lets a **bottom-only divider** survive. IR `style.borderWidths {top,right,bottom,left}` → `border-<side>-width` |
+| `strokeCap`, `strokeJoin`, `dashPattern` | optional stroke detail: `cap`/`join` lower-cased (`join:MITER` is default → omitted), `dashPattern` (`number[]`, e.g. `[10,5]`) → **dashed** stroke (`border-style:dashed` / SVG `stroke-dasharray`). IR per-stroke `cap?`/`join?`/`dash?` |
 | `cornerRadius` or `rectangleTopLeftCornerRadius` (×4) | border radius |
 | `effects[]` | shadows/blurs (`type`, `color`, `offset`, `radius`) |
 | `opacity` | layer opacity |
@@ -145,7 +147,20 @@ page: designers leave notes there about undecided content.
 | `stackVerticalPadding`, `stackHorizontalPadding`, `stackPaddingBottom`, `stackPaddingRight` | `paddingTop`, `paddingLeft`, `paddingBottom`, `paddingRight` (yes — the first two are **top/left**) |
 | `stackPrimaryAlignItems` | `justifyContent` (`MIN`/`CENTER`/`MAX`/`SPACE_EVENLY`/`SPACE_BETWEEN`) |
 | `stackCounterAlignItems` | `alignItems` |
+| `stackPrimarySizing` / `stackCounterSizing` | container self-sizing on the main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (`width`/`height: auto`, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug` |
+| `stackWrap: "WRAP"` | `flexWrap: wrap`. IR `layout.wrap = true` |
 | absent/`NONE` | absolute positioning via child `transform` |
+
+**Per-child sizing & constraints** (on the child node, not the container):
+
+| fig field | CSS / RN equivalent |
+|---|---|
+| `stackChildPrimaryGrow` (number) | `flexGrow` (`1` → `flex: 1`). IR node `grow` |
+| `stackChildAlignSelf` (`MIN`/`CENTER`/`MAX`/`STRETCH`) | `alignSelf` (`flex-start`/`center`/`flex-end`/`stretch`). IR node `alignSelf` |
+| `stackPositioning: "ABSOLUTE"` | child absolutely positioned **inside** an auto-layout parent (out of flow, placed by `transform`/abs coords). IR node `positioning: "absolute"` |
+| `horizontalConstraint` / `verticalConstraint` (`MIN`/`MAX`/`CENTER`/`STRETCH`/`SCALE`) | resize constraints for non-auto (absolute) layouts → pin/stretch/scale on resize. IR node `constraints: {h, v}` (lower-cased) |
+| `minSize: {value:{x,y}}` | `minWidth`/`minHeight` (emit when > 0). IR node `minW`/`minH` (`maxSize`→`maxW`/`maxH`, absent in current decodes) |
+| `targetAspectRatio: {value:{x,y}}` | `aspectRatio = x / y`. IR node `aspectRatio` |
 
 **Text** (`type: "TEXT"`):
 
@@ -153,6 +168,18 @@ page: designers leave notes there about undecided content.
 - `fontName: {family, style}`, `fontSize`, `lineHeight: {value, units}`
   (`PIXELS` or `PERCENT`), `letterSpacing: {value, units}`,
   `textAlignHorizontal`.
+- **Text transform & alignment** (IR `text.case` / `text.align` /
+  `text.alignVertical` / `text.leadingTrim`; emitted only when non-default).
+  Pure pass-throughs of the resolved bytes, mapped fig→CSS:
+
+  | fig field | value(s) (this decode) | IR field | CSS |
+  |---|---|---|---|
+  | `textCase` | `UPPER`/`LOWER`/`TITLE`/`SMALL_CAPS`/`ORIGINAL` (here: `TITLE`, `UPPER`) | `text.case` | `text-transform` — UPPER→`uppercase`, LOWER→`lowercase`, TITLE→`capitalize`, SMALL_CAPS→`uppercase` (no exact CSS; TODO `font-variant`), ORIGINAL/absent→omitted |
+  | `textAlignHorizontal` | `LEFT`/`CENTER`/`RIGHT`/`JUSTIFIED` (here: `CENTER`) | `text.align` | `text-align` — CENTER→`center`, RIGHT→`right`, JUSTIFIED→`justify`, LEFT/absent→omitted (default) |
+  | `textAlignVertical` | `TOP`/`CENTER`/`BOTTOM` (here: `TOP`, `CENTER`) | `text.alignVertical` | vertical alignment (no single CSS prop — center via flex); raw enum lower-cased, TOP/absent→omitted |
+  | `leadingTrim` | `CAP_HEIGHT`/`NONE` (here: `CAP_HEIGHT`) | `text.leadingTrim` | optional; raw enum lower-cased, NONE/absent→omitted |
+
+  `render.mts --ir` applies `text.case`→`text-transform` and `text.align`→`text-align`.
 - Mixed-style runs live in `textData.styleOverrideTable` — rare in app UI;
   flag if styling looks inconsistent within one string.
 
@@ -312,14 +339,21 @@ into implementation context, read the IR, not raw dumps.
    Every IR node also carries the **full box-styling + auto-layout** so the IR alone
    suffices for a 1:1 implementation (parity with the raw dump / §4) — emitted only
    when present so files stay lean:
-   - `style?`: `{ fills?, cornerRadius?, strokes?, effects?, opacity? }`.
+   - `style?`: `{ fills?, cornerRadius?, strokes?, borderWidths?, effects?, opacity? }`.
      `fills[]` is the COMPLETE paint list (`color.hex` stays the single-hex
      convenience): each is `{type:"solid"|"gradient"|"image", hex?, var?, varGuid?,
      stops?:[{position,hex}], imageHash?, opacity?}` — gradients keep their `stops`,
      images their `imageHash` (bytes→hex, the `images/` filename, §7), and solids
      their bound `var`/`varGuid` (GROUND TRUTH, same resolver as `color`).
      `cornerRadius` is a bare number (uniform) or `{tl,tr,br,bl}` (per-corner).
-     `strokes[]` = `{weight, align, hex, var?, varGuid?}`. `effects[]` =
+     `strokes[]` = `{weight, align, hex, var?, varGuid?, cap?, join?, dash?}` —
+     `cap`/`join` lower-cased pass-throughs (default `MITER` join omitted), `dash`
+     = `dashPattern` verbatim (non-empty ⇒ a dashed stroke). `borderWidths?
+     {top,right,bottom,left}` is emitted ONLY when the node sets
+     `borderStrokeWeightsIndependent` — then the **per-side** weights apply INSTEAD
+     of the single `strokes[].weight` (absent side = 0), so a bottom-only divider
+     survives; consumers map it to `border-<side>-width`. When NOT independent the
+     IR keeps the single `strokes[].weight` only (no `borderWidths`). `effects[]` =
      `{type, hex, offsetX, offsetY, radius, spread?}` (DROP_SHADOW/INNER_SHADOW/
      *_BLUR). `opacity` only when < 1.
    - `layout?`: `{mode:"row"|"column", gap?, paddingTop?, paddingRight?,
@@ -474,11 +508,11 @@ into implementation context, read the IR, not raw dumps.
 | `resolve.mts` | `node resolve.mts <msg.json> <guidKey> [depth]` | compose master + symbolOverrides → the rendered instance tree |
 | `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg> [--png]` | vector → SVG (`--png` also rasterizes via headless Chrome @3×; degrades gracefully if Chrome is absent) |
 | `match-tokens.mts` | `node match-tokens.mts <msg.json> <theme.(ts\|json)> [guidKey]` | brownfield map mode: annotate fig values vs an existing code theme **by value, within kind** (`exact`/`nearest(Δ)`/`none`); never rewrites |
-| `render.mts` | `node render.mts <msg.json> <frame-guidKey> <out.png> [--images <dir>]`  •  **`--ir`:** `node render.mts --ir <ir-dir> <screen-id> <out.png> [--images <dir>]` | resolved frame → self-contained `<out>.html` + screenshot PNG; text uses the **reconciled** size; missing image → labeled placeholder, not a broken `<img>`. Not pixel-perfect — catches "obviously wrong". Writes the HTML even if Chrome is absent. **`--ir` mode** renders OVER an emitted IR (`screens/<…>.json`) in one step — **no re-resolve, no re-reconcile, no blob re-decode**; `<screen-id>` is a screen-file slug, a node `id`, or a `guid`; it USES the node's `style` (solid/gradient background, `cornerRadius`→border-radius, `strokes`→border, `effects`→box-shadow, `opacity`) and `layout` (flex-direction/gap/padding/justify/align) for a faithful render; sidecar asset bytes (images via `--images`/sibling `images/`; pre-exported `vectors/<id>.svg`) fill image/vector slots, a missing asset → labeled placeholder |
+| `render.mts` | `node render.mts <msg.json> <frame-guidKey> <out.png> [--images <dir>]`  •  **`--ir`:** `node render.mts --ir <ir-dir> <screen-id> <out.png> [--images <dir>]` | resolved frame → self-contained `<out>.html` + screenshot PNG; text uses the **reconciled** size; missing image → labeled placeholder, not a broken `<img>`. Not pixel-perfect — catches "obviously wrong". Writes the HTML even if Chrome is absent. **`--ir` mode** renders OVER an emitted IR (`screens/<…>.json`) in one step — **no re-resolve, no re-reconcile, no blob re-decode**; `<screen-id>` is a screen-file slug, a node `id`, or a `guid`; it USES the node's `style` (solid/gradient background, `cornerRadius`→border-radius, `strokes`→border (per-side `borderWidths`→`border-<side>-width`, `dash`→`border-style:dashed`), `effects`→box-shadow, `opacity`), `layout` (flex-direction/gap/padding/justify/align), and TEXT `text.case`→`text-transform` / `text.align`→`text-align` for a faithful render; sidecar asset bytes (images via `--images`/sibling `images/`; pre-exported `vectors/<id>.svg`) fill image/vector slots, a missing asset → labeled placeholder |
 | `intent.mts` | `node intent.mts <msg.json> <screen-guidKey>` | one copy-pasteable designer-intent gap checklist: placeholders, denylisted/repeated strings, geometry/fontSize reconciliation conflicts, default-variant instances, mono-color icon fills |
 | `diff-frames.mts` | `node diff-frames.mts <msg.json> <guidA> <guidB>` | resolve both frames, align by name-path, report per-node property deltas (font/size/color/spacing/text). **Surfaces** drift; does **not** pick a canonical winner |
 | `icons.mts` | `node icons.mts <msg.json> <screen-guidKey>` | inventory icon instances under a screen, resolve each to its library export name (Phosphor `MagnifyingGlass`…), emit the exact `AppIconName` union additions so no name is imported unmapped |
-| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--decisions <p>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` (source hash/path + scope + counts) + `raw-map.json` (IR id → raw guidKey) + `fonts.json` (families + empty `appFamily` substitution slots) + `tokens/*` (alias chains collapsed) + `components/*` (variant matrix + proposed TS prop API) + `screens/<page>/<screen>.json` (resolved instances, reconciled `font.size`+`sizeSource`+`conflicts[]`, `letterSpacingPx`, placeholder detection, `box.absX/absY`, path-derived `id` + `guid` per node, plus per-node **`style`** (fills incl. gradient `stops`/image `imageHash`, `cornerRadius`, `strokes`, `effects`, `opacity`) + **`layout`** (auto-layout flex: `mode`/`gap`/paddings/`justify`/`align`) for full box-styling parity with §4). Fills **bound to a Figma variable** carry the design token directly (GROUND TRUTH, always — no `--theme` needed): `color.var` = token name, `color.varGuid` = variable guidKey, `color.match = "bound"`; `color.hex` stays the concrete value. With `--theme <p>`: maps each **unbound** `color.hex`/`font.size` to a code token **by value, within kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`; bound colors are left as `"bound"`) and emits **`issues.json`** (ask-don't-ship: unmapped fonts, `match:none`/unconfirmed `nearest`, reconciliation conflicts, token name-collisions) + **`intent.json`** (placeholders/repeated/denylist/default-variant/mono-icon, aggregated). `--decisions <p>` folds a `decisions.json` overlay back in (`fontMap`/`tokenConfirms`/`tokenRejects`/`placeholders`) and suppresses the resolved issues. Re-runs with the same source+decisions are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
+| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--decisions <p>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` (source hash/path + scope + counts) + `raw-map.json` (IR id → raw guidKey) + `fonts.json` (families + empty `appFamily` substitution slots) + `tokens/*` (alias chains collapsed) + `components/*` (variant matrix + proposed TS prop API) + `screens/<page>/<screen>.json` (resolved instances, reconciled `font.size`+`sizeSource`+`conflicts[]`, `letterSpacingPx`, placeholder detection, `box.absX/absY`, path-derived `id` + `guid` per node, plus per-node **`style`** (fills incl. gradient `stops`/image `imageHash`, `cornerRadius`, `strokes` incl. `cap`/`join`/`dash`, per-side `borderWidths {top,right,bottom,left}` when `borderStrokeWeightsIndependent`, `effects`, `opacity`) + **`layout`** (auto-layout flex: `mode`/`gap`/paddings/`justify`/`align`, plus `primarySizing`/`counterSizing` = `fixed`\|`hug` and `wrap`) plus per-node responsive fields (`grow`, `alignSelf`, `positioning:"absolute"`, `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`) for full box-styling parity with §4, plus TEXT transform/alignment (`text.case`→`text-transform`, `text.align`→`text-align`, `text.alignVertical`, `text.leadingTrim` — pass-throughs, emitted only when non-default; fig→CSS map in §4 Text)). Fills **bound to a Figma variable** carry the design token directly (GROUND TRUTH, always — no `--theme` needed): `color.var` = token name, `color.varGuid` = variable guidKey, `color.match = "bound"`; `color.hex` stays the concrete value. With `--theme <p>`: maps each **unbound** `color.hex`/`font.size` to a code token **by value, within kind** (`color.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`; bound colors are left as `"bound"`) and emits **`issues.json`** (ask-don't-ship: unmapped fonts, `match:none`/unconfirmed `nearest`, reconciliation conflicts, token name-collisions) + **`intent.json`** (placeholders/repeated/denylist/default-variant/mono-icon, aggregated). `--decisions <p>` folds a `decisions.json` overlay back in (`fontMap`/`tokenConfirms`/`tokenRejects`/`placeholders`) and suppresses the resolved issues. Re-runs with the same source+decisions are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
 | `diff-ir.mts` | `node diff-ir.mts <ir-old> <ir-new>` | design-version diff over two emitted IRs (no decode): added/removed screens & components, changed tokens per mode, drifted type specs (family/size/weight/lineHeight/letterSpacing), per-screen node + color drift (aligned by `path`, never `guid`). Compares reconciled **truth vs truth** and **surfaces** drift — never picks a canonical export; refuses to diff an IR against itself (same dir / equal `sourceHash`); re-hashes each manifest's recorded source if still present and **warns** on staleness, else skips |
 | `ir-validate.mts` | `node ir-validate.mts <ir-dir>` | the **ship gate** (exits non-zero on failure — CI/pre-ship). Asserts from the IR alone: every color adjudicated against the theme (`exact`/confirmed/rejected; skipped when greenfield — every `match:null`; a variable-**bound** color `match:"bound"` is ground truth and ALWAYS passes), every font has a non-null `appFamily` (always), no unresolved `placeholder:true`, no open `conflicts[]`, no missing `source`/`match` provenance. Each failure names the node `guid` + the `decisions.json` entry that resolves it |
 | `codegen.mts` | `node codegen.mts <ir-dir> <set-name> [--out <file>] [--framework rn\|web]` | typed component **scaffold** from `components/<set>.json`: the variant union as the prop type (`proposePropApi`) + **EVERY variant's** own reconciled styles — per-variant `container_<key>`/`label_<key>` entries (box w/h, Phase B background/cornerRadius/strokes/effects/opacity + auto-layout, and the primary text `font.size`/`lineHeightPx`/`letterSpacingPx`/`appFamily`/color) located in the screens IR by guid and selected at runtime via the variant prop (default variant is the fallback); leaves `// TODO` (variant-attributed) on every `placeholder:true` text, open conflict, or `match:none`/unmapped value — never bakes an unconfirmed value silently. Default framework React Native |

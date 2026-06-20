@@ -32,7 +32,7 @@ const FIELD_KEYS = [
   "textData", "fillPaints", "strokePaints", "fontName", "fontSize",
   "size", "visible", "lineHeight", "letterSpacing", "textCase",
   "cornerRadius", "opacity", "strokeWeight", "effects", "textAlignHorizontal",
-  "textAlignVertical", "textAutoResize",
+  "textAlignVertical", "textAutoResize", "leadingTrim",
 ] as const;
 
 const DEPTH_CAP = 24;
@@ -114,7 +114,7 @@ function resolveInstanceInto(
   // If the master root frame carries layout/visual props the instance lacks,
   // adopt them (instances usually mirror these). Confirmed harmless: only fill
   // gaps, never clobber the instance's own values.
-  for (const f of ["stackMode", "stackSpacing", "stackVerticalPadding", "stackHorizontalPadding", "stackPaddingBottom", "stackPaddingRight", "stackPrimaryAlignItems", "stackCounterAlignItems", "cornerRadius"]) {
+  for (const f of ["stackMode", "stackSpacing", "stackVerticalPadding", "stackHorizontalPadding", "stackPaddingBottom", "stackPaddingRight", "stackPrimaryAlignItems", "stackCounterAlignItems", "stackPrimarySizing", "stackCounterSizing", "stackWrap", "cornerRadius"]) {
     if (r[f] === undefined && master[f] !== undefined) r[f] = master[f];
   }
   if (!r.fillPaints?.length && master.fillPaints?.length) r.fillPaints = master.fillPaints;
