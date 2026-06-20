@@ -27,6 +27,24 @@ export type IRTextField = {
   source: "override" | "master-default";
   placeholder: boolean;
   reason: string;
+  // text transform & alignment (improvement 2-text) — PURE pass-throughs of the
+  // resolved bytes, emitted ONLY when present/non-default so per-screen files stay
+  // lean. resolve-lib FIELD_KEYS already carries textCase/textAlignHorizontal/
+  // textAlignVertical through instance overrides, so they are correct on the
+  // resolved node. fig→CSS mapping (see textCaseToCss / textAlignToCss):
+  //   textCase UPPER→"uppercase", LOWER→"lowercase", TITLE→"capitalize",
+  //     SMALL_CAPS→"uppercase" (CSS has no exact equivalent; font-variant TODO),
+  //     ORIGINAL→omitted. Confirmed enum in this decode: TITLE, UPPER.
+  //   textAlignHorizontal LEFT→omitted (CSS default), CENTER→"center",
+  //     RIGHT→"right", JUSTIFIED→"justify". Confirmed enum: CENTER only.
+  //   textAlignVertical TOP→omitted (default), CENTER→"center", BOTTOM→"bottom"
+  //     (vertical alignment — no single CSS prop; consumers map via flex). Raw
+  //     enum lower-cased. Confirmed enum: TOP, CENTER.
+  //   leadingTrim (optional) raw enum lower-cased (e.g. CAP_HEIGHT→"cap_height").
+  case?: string; // CSS text-transform value (uppercase|lowercase|capitalize)
+  align?: string; // CSS text-align value (center|right|justify)
+  alignVertical?: string; // vertical alignment (center|bottom), lower-cased raw
+  leadingTrim?: string; // raw leadingTrim enum, lower-cased (optional)
 };
 export type IRFont = {
   family: string | null;
@@ -99,7 +117,25 @@ export type IRStroke = {
   hex: string | null;
   var?: string | null;
   varGuid?: string | null;
+  // optional stroke detail (improvement 3-borders) — PURE pass-throughs, emitted
+  // only when present/non-default. fig→CSS map (see strokeDetailOf):
+  //   strokeCap (BUTT/ROUND/SQUARE/…) → lower-cased; SVG/RN line-cap hint. Confirmed
+  //     enum in this decode: ROUND.
+  //   strokeJoin (MITER/BEVEL/ROUND) → lower-cased; MITER is the default → omitted.
+  //     Confirmed enum: MITER, BEVEL, ROUND.
+  //   dash (number[]) → dashPattern verbatim; non-empty → a dashed stroke (CSS
+  //     border-style:dashed / SVG stroke-dasharray). Confirmed shape: number[] e.g. [10,5].
+  cap?: string;
+  join?: string;
+  dash?: number[];
 };
+// Per-side border widths (improvement 3-borders): emitted ONLY when the raw node
+// sets borderStrokeWeightsIndependent — then the four borderTop/Right/Bottom/Left
+// Weight fields apply INSTEAD of the single strokeWeight, so bottom-only dividers
+// etc. survive. Missing sides default to 0 (a side with no weight = no border on
+// that edge). When NOT independent the IR keeps the single IRStroke.weight (no
+// borderWidths block). fig→CSS: {top,right,bottom,left} → border-*-width.
+export type IRBorderWidths = { top: number; right: number; bottom: number; left: number };
 export type IREffect = {
   type: string; // DROP_SHADOW | INNER_SHADOW | LAYER_BLUR | BACKGROUND_BLUR | …
   hex: string | null;
@@ -112,9 +148,17 @@ export type IRStyle = {
   fills?: IRFill[];
   cornerRadius?: number | { tl: number; tr: number; br: number; bl: number };
   strokes?: IRStroke[];
+  borderWidths?: IRBorderWidths; // per-side widths (improvement 3-borders); see type doc
   effects?: IREffect[];
   opacity?: number;
 };
+// IRLayout carries the auto-layout CONTAINER picture. sizing & wrap (improvement
+// 1-sizing / spec sizing) describe how the container sizes itself on each axis and
+// whether it wraps — emitted only when the raw stackPrimarySizing/stackCounterSizing/
+// stackWrap are present (non-default). fig→CSS sizing map:
+//   stackPrimarySizing/stackCounterSizing "FIXED" → "fixed" (CSS: a real width/height),
+//   "RESIZE_TO_FIT…"/"RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" → "hug" (CSS: width/height:auto,
+//   i.e. content-driven). stackWrap "WRAP" → wrap:true (CSS flex-wrap:wrap).
 export type IRLayout = {
   mode: "row" | "column";
   gap?: number;
@@ -124,7 +168,26 @@ export type IRLayout = {
   paddingLeft?: number;
   justify?: string;
   align?: string;
+  primarySizing?: "fixed" | "hug"; // main-axis self-sizing
+  counterSizing?: "fixed" | "hug"; // cross-axis self-sizing
+  wrap?: boolean; // stackWrap = WRAP → flex-wrap:wrap
 };
+
+// Per-node responsive picture (improvement 1-sizing / spec sizing): these apply to
+// the node AS A FLEX CHILD / sized box (NOT the container — that's IRLayout). Each
+// is a PURE pass-through of the bytes, emitted only when present/non-default so
+// per-screen files stay lean. fig→CSS/RN map:
+//   stackChildPrimaryGrow (number) → grow (CSS flex-grow; 1 → flex:1).
+//   stackChildAlignSelf  (MIN/CENTER/MAX/STRETCH/…) → alignSelf (CSS align-self via
+//     STACK_ALIGN: flex-start/center/flex-end/stretch).
+//   stackPositioning "ABSOLUTE" → positioning:"absolute" (absolutely positioned
+//     INSIDE an auto-layout parent — taken out of flow).
+//   horizontalConstraint/verticalConstraint (MIN/MAX/CENTER/STRETCH/SCALE) → resize
+//     constraints {h,v}, lower-cased, for non-auto (absolute) layouts.
+//   minSize {value:{x,y}} → minW/minH (emit each only when > 0). maxSize is ABSENT
+//     in this decode (TODO: wire maxW/maxH if a future export carries maxSize).
+//   targetAspectRatio {value:{x,y}} → aspectRatio = x / y (CSS aspect-ratio).
+export type IRConstraints = { h: string; v: string };
 
 export type IRNode = {
   id: string;
@@ -138,6 +201,16 @@ export type IRNode = {
   box: IRBox;
   style?: IRStyle;
   layout?: IRLayout;
+  // --- per-node sizing/constraints (improvement 1-sizing) — see IRConstraints doc.
+  grow?: number; // stackChildPrimaryGrow → flex-grow
+  alignSelf?: string; // stackChildAlignSelf → CSS align-self
+  positioning?: "absolute"; // stackPositioning ABSOLUTE inside an auto-layout parent
+  constraints?: IRConstraints; // {h,v} resize constraints (lower-cased)
+  minW?: number;
+  minH?: number;
+  maxW?: number;
+  maxH?: number;
+  aspectRatio?: number; // targetAspectRatio x/y
   autoResize?: string | null;
   styleRuns?: number;
   unresolved?: string;
@@ -235,6 +308,38 @@ function cornerRadiusOf(n: any): IRStyle["cornerRadius"] {
   return undefined;
 }
 
+// Per-side border widths (improvement 3-borders). Returns {top,right,bottom,left}
+// ONLY when the raw node sets borderStrokeWeightsIndependent === true — then the
+// four borderTop/Right/Bottom/LeftWeight fields apply INSTEAD of the single
+// strokeWeight (a side with no weight defaults to 0 = no border that edge). When
+// NOT independent, returns undefined so the IR keeps the single IRStroke.weight
+// (no duplication). Confirmed shapes (node.mts): boolean flag + numeric per-side
+// weights (absent side === 0).
+function borderWidthsOf(n: any): IRBorderWidths | undefined {
+  if (n.borderStrokeWeightsIndependent !== true) return undefined;
+  const num = (v: any) => (typeof v === "number" ? v : 0);
+  return {
+    top: num(n.borderTopWeight),
+    right: num(n.borderRightWeight),
+    bottom: num(n.borderBottomWeight),
+    left: num(n.borderLeftWeight),
+  };
+}
+
+// Optional stroke detail (improvement 3-borders): cap/join/dash, each emitted only
+// when present/non-default. strokeCap & strokeJoin lower-cased; MITER (the join
+// default) is omitted; dashPattern passed through verbatim (non-empty → dashed).
+// These live per-stroke (the raw fields are node-level, shared by every paint).
+function strokeDetailOf(n: any): { cap?: string; join?: string; dash?: number[] } {
+  const out: { cap?: string; join?: string; dash?: number[] } = {};
+  if (typeof n.strokeCap === "string" && n.strokeCap && n.strokeCap !== "NONE")
+    out.cap = n.strokeCap.toLowerCase();
+  if (typeof n.strokeJoin === "string" && n.strokeJoin && n.strokeJoin !== "MITER")
+    out.join = n.strokeJoin.toLowerCase();
+  if (Array.isArray(n.dashPattern) && n.dashPattern.length) out.dash = n.dashPattern;
+  return out;
+}
+
 // Build the IRStyle block for a node, or null when it carries no styling. fills =
 // ALL visible fillPaints (solid/gradient/image — the complete picture; IRColor.hex
 // stays the single-hex convenience). strokes carry weight/align/hex + bound var.
@@ -251,6 +356,7 @@ function buildStyle(n: any, varIndex: Map<string, string>): IRStyle | null {
   if (strokePaints.length) {
     const weight = typeof n.strokeWeight === "number" ? n.strokeWeight : 1;
     const align = n.strokeAlign ?? "INSIDE";
+    const detail = strokeDetailOf(n);
     s.strokes = strokePaints.map((p: any) => {
       const bound = p.type === "SOLID" ? colorVarToken(p, varIndex) : null;
       return {
@@ -258,8 +364,14 @@ function buildStyle(n: any, varIndex: Map<string, string>): IRStyle | null {
         align,
         hex: p.color ? colorStr(p.color) : null,
         ...(bound ? { var: bound.var, varGuid: bound.varGuid } : {}),
+        ...detail,
       };
     });
+    // per-side widths (improvement 3-borders): when independent, the four side
+    // weights apply INSTEAD of the single weight. Emit a borderWidths block so a
+    // bottom-only divider survives. NOT independent → keep the single weight only.
+    const bw = borderWidthsOf(n);
+    if (bw) s.borderWidths = bw;
   }
 
   const effects: any[] = (n.effects ?? []).filter((e: any) => e && e.visible !== false);
@@ -304,7 +416,103 @@ function buildLayout(n: any): IRLayout | null {
   if (n.stackHorizontalPadding) l.paddingLeft = n.stackHorizontalPadding;
   if (n.stackPrimaryAlignItems) l.justify = STACK_ALIGN[n.stackPrimaryAlignItems] ?? n.stackPrimaryAlignItems;
   if (n.stackCounterAlignItems) l.align = STACK_ALIGN[n.stackCounterAlignItems] ?? n.stackCounterAlignItems;
+  // sizing & wrap (improvement 1-sizing): fixed vs hug self-sizing per axis, wrap.
+  const ps = sizingOf(n.stackPrimarySizing);
+  if (ps) l.primarySizing = ps;
+  const cs = sizingOf(n.stackCounterSizing);
+  if (cs) l.counterSizing = cs;
+  if (n.stackWrap === "WRAP") l.wrap = true;
   return l;
+}
+
+// fig stack*Sizing enum → "fixed" | "hug" (or undefined for an unknown/absent
+// value). FIXED → fixed (real px); any RESIZE_TO_FIT* (incl. the implicit-size
+// variant) → hug (content-driven). Pure pass-through of the confirmed enum.
+function sizingOf(v: any): "fixed" | "hug" | undefined {
+  if (v === "FIXED") return "fixed";
+  if (typeof v === "string" && v.startsWith("RESIZE_TO_FIT")) return "hug";
+  return undefined;
+}
+
+// Normalize a raw resize-constraint enum (MIN/MAX/CENTER/STRETCH/SCALE) to a
+// lower-cased CSS-friendly token. Pure pass-through; unknown values pass as-is.
+function constraintOf(v: any): string | undefined {
+  return typeof v === "string" && v ? v.toLowerCase() : undefined;
+}
+
+// Per-node sizing/constraints (improvement 1-sizing). Mutates `node` in place,
+// attaching only the fields the raw node actually carries (lean files). All are
+// pure pass-throughs of the bytes — they ALWAYS run (no heuristic). See
+// IRConstraints doc for the fig→CSS/RN mapping.
+function applySizing(node: IRNode, n: any) {
+  if (typeof n.stackChildPrimaryGrow === "number" && n.stackChildPrimaryGrow)
+    node.grow = n.stackChildPrimaryGrow;
+  if (n.stackChildAlignSelf)
+    node.alignSelf = STACK_ALIGN[n.stackChildAlignSelf] ?? n.stackChildAlignSelf;
+  if (n.stackPositioning === "ABSOLUTE") node.positioning = "absolute";
+
+  const h = constraintOf(n.horizontalConstraint);
+  const v = constraintOf(n.verticalConstraint);
+  if (h || v) node.constraints = { h: h ?? "min", v: v ?? "min" };
+
+  const min = n.minSize?.value;
+  if (min) {
+    if (typeof min.x === "number" && min.x > 0) node.minW = min.x;
+    if (typeof min.y === "number" && min.y > 0) node.minH = min.y;
+  }
+  // maxSize is ABSENT in this decode (confirmed: 0 occurrences). Wire maxW/maxH
+  // here once a future export carries it (same {value:{x,y}} shape expected).
+  const max = n.maxSize?.value;
+  if (max) {
+    if (typeof max.x === "number" && max.x > 0) node.maxW = max.x;
+    if (typeof max.y === "number" && max.y > 0) node.maxH = max.y;
+  }
+
+  const ar = n.targetAspectRatio?.value;
+  if (ar && typeof ar.x === "number" && typeof ar.y === "number" && ar.y)
+    node.aspectRatio = Math.round((ar.x / ar.y) * 1000) / 1000;
+}
+
+// fig textCase enum → CSS text-transform value, or undefined when default
+// (ORIGINAL/absent) or unknown. Confirmed enum in this decode: TITLE, UPPER.
+// SMALL_CAPS maps to "uppercase" (CSS text-transform has no small-caps; a
+// faithful render would need font-variant — TODO if a future export carries it).
+function textCaseToCss(v: any): string | undefined {
+  switch (v) {
+    case "UPPER":
+      return "uppercase";
+    case "LOWER":
+      return "lowercase";
+    case "TITLE":
+      return "capitalize";
+    case "SMALL_CAPS":
+      return "uppercase";
+    default:
+      return undefined; // ORIGINAL / absent / unknown → omit (CSS default)
+  }
+}
+
+// fig textAlignHorizontal enum → CSS text-align value, or undefined for the LEFT
+// default / absent. Confirmed enum in this decode: CENTER only.
+function textAlignToCss(v: any): string | undefined {
+  switch (v) {
+    case "CENTER":
+      return "center";
+    case "RIGHT":
+      return "right";
+    case "JUSTIFIED":
+      return "justify";
+    default:
+      return undefined; // LEFT / absent / unknown → omit (CSS default)
+  }
+}
+
+// fig textAlignVertical enum → lower-cased vertical alignment token, or undefined
+// for the TOP default / absent. No single CSS prop maps it (consumers center via
+// flex); raw enum lower-cased. Confirmed enum in this decode: TOP, CENTER.
+function textAlignVerticalToIR(v: any): string | undefined {
+  if (typeof v !== "string" || !v || v === "TOP") return undefined;
+  return v.toLowerCase();
 }
 
 // Reconcile one resolved TEXT node into the IR `font`/`text`/`color` provenance
@@ -366,6 +574,16 @@ function reconcileText(
     placeholder: cls.placeholder,
     reason: cls.reason,
   };
+  // text transform & alignment (improvement 2-text): PURE pass-throughs of the
+  // resolved bytes, attached only when non-default/present (lean files).
+  const tCase = textCaseToCss((n as any).textCase);
+  if (tCase) text.case = tCase;
+  const tAlign = textAlignToCss((n as any).textAlignHorizontal);
+  if (tAlign) text.align = tAlign;
+  const tAlignV = textAlignVerticalToIR((n as any).textAlignVertical);
+  if (tAlignV) text.alignVertical = tAlignV;
+  const lt = (n as any).leadingTrim;
+  if (typeof lt === "string" && lt && lt !== "NONE") text.leadingTrim = lt.toLowerCase();
 
   const color: IRColor = buildColor(n, varIndex);
   return { text, font, color, styleRuns };
@@ -424,6 +642,10 @@ function toIR(
   if (style) node.style = style;
   const layout = buildLayout(n as any);
   if (layout) node.layout = layout;
+
+  // per-node sizing/constraints (improvement 1-sizing): grow/alignSelf/positioning/
+  // constraints/min/max/aspectRatio — pure pass-throughs, attached when present.
+  applySizing(node, n as any);
 
   // unresolved (remote/library master absent, or cycle): emit the node carrying
   // its string and STOP recursing here (§5 / §6 step 1) — never drop it.

@@ -157,7 +157,22 @@ async function renderOverIR() {
     const r = radiusCss(st.cornerRadius);
     if (r) decls.push(r);
     const stroke = (st.strokes ?? [])[0];
-    if (stroke && stroke.hex) decls.push(`border:${stroke.weight ?? 1}px solid ${stroke.hex}`);
+    if (stroke && stroke.hex) {
+      // dashed stroke (3-borders): a non-empty dash → border-style:dashed.
+      const lineStyle = Array.isArray(stroke.dash) && stroke.dash.length ? "dashed" : "solid";
+      // per-side border widths (3-borders): when style.borderWidths is present the
+      // four side weights apply INSTEAD of a uniform border, so a bottom-only
+      // divider survives. Emit border-<side>-width for each side, plus a shared
+      // style+color. Graceful: absent borderWidths → the uniform border as before.
+      const bw = st.borderWidths;
+      if (bw && (bw.top || bw.right || bw.bottom || bw.left)) {
+        decls.push(`border-style:${lineStyle}`, `border-color:${stroke.hex}`);
+        for (const [side, val] of [["top", bw.top], ["right", bw.right], ["bottom", bw.bottom], ["left", bw.left]] as const)
+          decls.push(`border-${side}-width:${val ?? 0}px`);
+      } else {
+        decls.push(`border:${stroke.weight ?? 1}px ${lineStyle} ${stroke.hex}`);
+      }
+    }
     const shadows = (st.effects ?? [])
       .filter((e: any) => e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW")
       .map((e: any) => `${e.type === "INNER_SHADOW" ? "inset " : ""}${e.offsetX ?? 0}px ${e.offsetY ?? 0}px ${e.radius ?? 0}px ${e.spread ?? 0}px ${e.hex ?? "#0000"}`);
@@ -176,6 +191,39 @@ async function renderOverIR() {
     if (pt || pr || pb || pl) out.push(`padding:${pt}px ${pr}px ${pb}px ${pl}px`);
     if (l.justify) out.push(`justify-content:${l.justify}`);
     if (l.align) out.push(`align-items:${l.align}`);
+    if (l.wrap) out.push("flex-wrap:wrap");
+    return out;
+  };
+
+  // hug sizing → let content drive that axis (width/height:auto). Returns the
+  // axis names ("width"/"height") the layout HUGS on, so irNode can drop the
+  // forced fixed px on those axes (graceful — fixed/absent keeps the box px).
+  const hugAxes = (n: any): { width: boolean; height: boolean } => {
+    const l = n.layout;
+    if (!l) return { width: false, height: false };
+    // primary axis = main (row→width, column→height); counter = the other.
+    const row = l.mode === "row";
+    const primaryHug = l.primarySizing === "hug";
+    const counterHug = l.counterSizing === "hug";
+    return {
+      width: row ? primaryHug : counterHug,
+      height: row ? counterHug : primaryHug,
+    };
+  };
+
+  // Per-node sizing as a flex CHILD / sized box (1-sizing): grow→flex-grow,
+  // alignSelf, aspect-ratio, min/max. grow/alignSelf only bite when the node flows
+  // inside an auto-layout parent (parentFlow); aspect-ratio/min/max apply always.
+  // stackPositioning:absolute is handled in irNode's `pos` (kept out of flow).
+  const childSizingCss = (n: any, parentFlow: boolean): string[] => {
+    const out: string[] = [];
+    if (parentFlow && typeof n.grow === "number" && n.grow) out.push(`flex-grow:${n.grow}`);
+    if (parentFlow && n.alignSelf) out.push(`align-self:${n.alignSelf}`);
+    if (typeof n.aspectRatio === "number" && n.aspectRatio) out.push(`aspect-ratio:${n.aspectRatio}`);
+    if (typeof n.minW === "number") out.push(`min-width:${n.minW}px`);
+    if (typeof n.minH === "number") out.push(`min-height:${n.minH}px`);
+    if (typeof n.maxW === "number") out.push(`max-width:${n.maxW}px`);
+    if (typeof n.maxH === "number") out.push(`max-height:${n.maxH}px`);
     return out;
   };
 
@@ -189,9 +237,13 @@ async function renderOverIR() {
     const b = n.box ?? { x: 0, y: 0, w: 0, h: 0, absX: 0, absY: 0 };
     const w = Math.round(b.w ?? 0);
     const h = Math.round(b.h ?? 0);
-    const pos = parentFlow
-      ? "position:relative"
-      : `position:absolute;left:${Math.round((b.absX ?? 0) - rootAbsX)}px;top:${Math.round((b.absY ?? 0) - rootAbsY)}px`;
+    // stackPositioning:absolute (1-sizing) → absolutely positioned INSIDE an
+    // auto-layout parent, out of flow, placed from the baked abs coords.
+    const absInFlow = n.positioning === "absolute";
+    const pos =
+      parentFlow && !absInFlow
+        ? "position:relative"
+        : `position:absolute;left:${Math.round((b.absX ?? 0) - rootAbsX)}px;top:${Math.round((b.absY ?? 0) - rootAbsY)}px`;
     const base = `${pos};box-sizing:border-box`;
 
     if (n.type === "text" && n.font) {
@@ -207,9 +259,13 @@ async function renderOverIR() {
       if (/italic|oblique/i.test(f.weight ?? "")) ts.push("font-style:italic");
       if (f.lineHeightPx) ts.push(`line-height:${f.lineHeightPx}px`);
       if (f.letterSpacingPx) ts.push(`letter-spacing:${f.letterSpacingPx}px`);
+      // text transform & alignment (2-text): IRTextField.case/align are already
+      // CSS values (uppercase/capitalize/…, center/right/justify).
+      if (n.text?.case) ts.push(`text-transform:${n.text.case}`);
+      if (n.text?.align) ts.push(`text-align:${n.text.align}`);
       if (n.color?.hex) ts.push(`color:${n.color.hex}`);
       const { decls } = styleCss(n); // text-level effects/opacity (no bg)
-      ts.push(...decls);
+      ts.push(...decls, ...childSizingCss(n, parentFlow)); // grow/alignSelf/min/max
       return `<div data-id="${n.id}" data-recon="${f.sizeSource}" style="${ts.join(";")}">${esc(n.text?.value ?? "")}</div>`;
     }
 
@@ -221,7 +277,12 @@ async function renderOverIR() {
     }
 
     const flow = !!n.layout;
-    const style = [base, `width:${w}px`, `height:${h}px`, ...styleCss(n).decls, ...layoutCss(n)];
+    // hug sizing (1-sizing): on a hugged axis emit auto (content-driven) instead of
+    // the forced fixed px. Fixed/absent axes keep their box px (graceful fallback).
+    const hug = hugAxes(n);
+    const wDecl = hug.width ? "width:auto" : `width:${w}px`;
+    const hDecl = hug.height ? "height:auto" : `height:${h}px`;
+    const style = [base, wDecl, hDecl, ...styleCss(n).decls, ...layoutCss(n), ...childSizingCss(n, parentFlow)];
     // IRColor.hex convenience fallback when style.fills had no solid (kept for parity)
     const { imageHash } = styleCss(n);
     const hasBg = style.some((s) => s.startsWith("background-color") || s.startsWith("background-image"));
