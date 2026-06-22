@@ -15,7 +15,14 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { load, absMat } from "./lib.mts";
 import { resolveVariables, loadTheme, type ThemeEntry } from "./tokens-lib.mts";
-import { findComponentSets, parseVariantMatrix, proposePropApi } from "./components-lib.mts";
+import {
+  findComponentSets,
+  parseVariantMatrix,
+  proposePropApi,
+  extractComponentProps,
+  sameNodeGroups,
+  extractVariantBindings,
+} from "./components-lib.mts";
 import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
 import { buildScreen, registerRawMap, provenanceViolations, type IRNode } from "./screens-lib.mts";
 import {
@@ -195,6 +202,19 @@ const taken = new Set<string>();
 for (const set of sets) {
   const slug = uniqueSlug(set.name, taken);
   const matrix = parseVariantMatrix(set);
+  // Non-variant prop API (improvement A-props): text/boolean/instanceSwap defs on
+  // the set frame, with their bindings into a representative master subtree, plus
+  // same-node groupings so Phase-B codegen can collapse bool-visible+text pairs.
+  const props = extractComponentProps(index, set.guid);
+  // Per-variant bindings (improvement B-codegen): the multi-file codegen renders
+  // EACH variant's own subtree, so each variant master must resolve the set props
+  // onto ITS OWN node guids (props[].bindings only address the default master).
+  // Keyed by variant guidKey; joined to props[] by defKey.
+  const variantBindings = extractVariantBindings(
+    index,
+    set.guid,
+    set.variants.map((v) => v.guid)
+  );
   const rec = {
     id: `component:${set.guid}`,
     name: set.name,
@@ -204,12 +224,17 @@ for (const set of sets) {
     size: set.size ?? null,
     axes: matrix.axes,
     propApi: proposePropApi(matrix),
+    props,
+    propGroups: sameNodeGroups(props),
     variants: set.variants.map((v) => ({
       id: `variant:${v.guid}`,
       props: v.props,
       rawName: v.rawName,
       guidKey: v.guid,
       size: v.size ?? null,
+      // bindings resolved against THIS variant's own subtree (improvement B-codegen);
+      // [] when the variant exposes none of the set props. Joined to props[] by defKey.
+      bindings: variantBindings[v.guid] ?? [],
       subtree: null as null, // TODO(phase-7): resolved variant subtree
     })),
   };
