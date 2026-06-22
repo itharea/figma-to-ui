@@ -17,7 +17,7 @@ import { load, absMat } from "./lib.mts";
 import { resolveVariables, loadTheme, type ThemeEntry } from "./tokens-lib.mts";
 import { findComponentSets, parseVariantMatrix, proposePropApi } from "./components-lib.mts";
 import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
-import { buildScreen, registerRawMap, provenanceViolations, type IRNode } from "./screens-lib.mts";
+import { buildScreen, registerRawMap, provenanceViolations, type IRNode, type VarIndex } from "./screens-lib.mts";
 import {
   fontMapOf,
   decisionKey,
@@ -126,14 +126,18 @@ const resolvedVars = resolveVariables(index);
 const { colors, spacing, radius } = splitTokens(resolvedVars);
 
 // Variable-binding index (improvement A-variables / spec #3): variable guidKey →
-// design-token name, built ONCE from the resolved COLOR variables. buildScreen
-// reads it to attach the design token DIRECTLY on every variable-bound fill
+// { name, value }, built ONCE from the resolved COLOR variables. `value` is the
+// variable's RESOLVED concrete hex (single-mode in this decode → that mode's value;
+// alias chains already collapsed by resolveVariables). buildScreen's shared
+// resolver reads it to attach the design token AND substitute the resolved value
+// for the (possibly stale) cached paint.color on every variable-bound fill/stroke
 // (paint.colorVar ALIAS) as GROUND TRUTH — never re-resolved per node. SCOPED to
 // COLOR bindings (fill/text colorVar); numeric bindings (cornerRadius/stackSpacing
 // via variableConsumptionMap) are a clear TODO — that map's structure is ambiguous
 // and would be a guess here.
-const varIndex = new Map<string, string>();
-for (const t of resolvedVars) if (t.type === "COLOR") varIndex.set(t.guid, t.name);
+const varIndex: VarIndex = new Map();
+for (const t of resolvedVars)
+  if (t.type === "COLOR") varIndex.set(t.guid, { name: t.name, value: Object.values(t.modes)[0] ?? null });
 console.error(`  variable-binding index: ${varIndex.size} color variable(s)`);
 
 // --- pass 2b: composite styles ---------------------------------------------

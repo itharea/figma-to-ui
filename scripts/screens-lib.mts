@@ -72,21 +72,57 @@ export type IRColor = {
   varGuid: string | null; // the variable guidKey, or null
 };
 
-// Side-effect-free resolver: given a paint and a variable index (guidKey →
-// tokenName), return the bound token if the paint carries a colorVar ALIAS that
-// resolves in the index, else null. Confirmed field shape (node.mts):
+// Variable-binding index entry: a COLOR variable's design-token NAME plus its
+// RESOLVED concrete value (the variable's hex for the single mode in this decode;
+// alias chains already collapsed by tokens-lib resolveVariables). `value` is the
+// GROUND-TRUTH hex a bound paint must render — the cached paint.color literal can
+// be STALE (instance-override paints bake a literal that drifts from the live
+// variable). `value` can be null only if the variable failed to resolve.
+export type VarIndexEntry = { name: string; value: string | null };
+// The build-ir variable index: variable guidKey → { name, value }.
+export type VarIndex = Map<string, VarIndexEntry>;
+
+// Side-effect-free resolver: given a paint and the variable index, return the
+// bound token (name + guidKey) if the paint carries a colorVar ALIAS that resolves
+// in the index, else null. Confirmed field shape (node.mts):
 //   paint.colorVar = { value:{ alias:{ guid:{sessionID,localID} } }, dataType:"ALIAS", resolvedDataType:"COLOR" }
 export function colorVarToken(
   paint: any,
-  varIndex: Map<string, string>
-): { var: string; varGuid: string } | null {
+  varIndex: VarIndex
+): { var: string; varGuid: string; value: string | null } | null {
   const alias = paint?.colorVar?.value?.alias;
   const g = alias?.guid;
   if (!g || g.sessionID === undefined || g.localID === undefined) return null;
   const varGuid = `${g.sessionID}:${g.localID}`;
-  const name = varIndex.get(varGuid);
-  if (name === undefined) return null;
-  return { var: name, varGuid };
+  const entry = varIndex.get(varGuid);
+  if (entry === undefined) return null;
+  return { var: entry.name, varGuid, value: entry.value };
+}
+
+// THE single shared paint-color resolver. Collapses the three previously
+// independent hex+var derivations (node main color, style.fills[], style.strokes[])
+// into ONE so `hex` and `var` can never disagree:
+//   • BOUND paint (colorVar ALIAS resolving in the index): var/varGuid = the bound
+//     token; hex = the bound variable's RESOLVED value (GROUND TRUTH) — NOT the
+//     cached, possibly-stale paint.color literal. If the index entry carries no
+//     resolved value (should not happen for COLOR vars here), fall back to the
+//     cached literal so hex is never silently dropped.
+//   • UNBOUND paint: var/varGuid = null; hex = colorStr(paint.color) (unchanged).
+// Pure: no side effects, no mutation of `paint`.
+export function resolvePaintColor(
+  paint: any,
+  varIndex: VarIndex
+): { hex: string | null; var: string | null; varGuid: string | null } {
+  const literal = paint?.color ? colorStr(paint.color) : null;
+  const bound = colorVarToken(paint, varIndex);
+  if (bound) {
+    return {
+      hex: bound.value ?? literal,
+      var: bound.var,
+      varGuid: bound.varGuid,
+    };
+  }
+  return { hex: literal, var: null, varGuid: null };
 }
 export type IRBox = {
   x: number;
@@ -239,21 +275,23 @@ function firstSolidFill(node: any): any | null {
   return null;
 }
 
-// Build the IRColor for a node from its first visible solid fill. `hex` stays the
-// resolved concrete value (unchanged). When that fill is BOUND to a variable
-// (paint.colorVar ALIAS resolving in `varIndex`), attach the design token directly:
-// var/varGuid set and match="bound". A literal fill keeps var/varGuid null and
-// match null (Phase 8 --theme value-matching fills token/match for literals).
-function buildColor(node: any, varIndex: Map<string, string>): IRColor {
+// Build the IRColor for a node from its first visible solid fill, via the shared
+// resolvePaintColor resolver. When that fill is BOUND to a variable
+// (paint.colorVar ALIAS resolving in `varIndex`), `hex` is the bound variable's
+// RESOLVED value (GROUND TRUTH — never the stale cached literal), var/varGuid are
+// set and match="bound". A literal fill keeps `hex`=colorStr(paint.color), var/
+// varGuid null and match null (Phase 8 --theme value-matching fills token/match
+// for literals).
+function buildColor(node: any, varIndex: VarIndex): IRColor {
   const p = firstSolidFill(node);
-  const hex = p ? colorStr(p.color) : null;
-  const bound = p ? colorVarToken(p, varIndex) : null;
+  if (!p) return { hex: null, token: null, match: null, var: null, varGuid: null };
+  const c = resolvePaintColor(p, varIndex);
   return {
-    hex,
+    hex: c.hex,
     token: null,
-    match: bound ? "bound" : null,
-    var: bound ? bound.var : null,
-    varGuid: bound ? bound.varGuid : null,
+    match: c.var ? "bound" : null,
+    var: c.var,
+    varGuid: c.varGuid,
   };
 }
 
@@ -266,16 +304,16 @@ function buildColor(node: any, varIndex: Map<string, string>): IRColor {
 // One fillPaint → IRFill (or null to drop a non-visible / unrecognized paint).
 // SOLID carries hex + bound var (Phase A resolver); GRADIENT_* carries stops[];
 // IMAGE carries imageHash. paint.opacity (< 1) is preserved.
-function fillToIR(p: any, varIndex: Map<string, string>): IRFill | null {
+function fillToIR(p: any, varIndex: VarIndex): IRFill | null {
   if (!p || p.visible === false) return null;
   const op = typeof p.opacity === "number" && p.opacity < 1 ? { opacity: p.opacity } : {};
   const t: string = p.type ?? "";
   if (t === "SOLID") {
-    const bound = colorVarToken(p, varIndex);
+    const c = resolvePaintColor(p, varIndex);
     return {
       type: "solid",
-      hex: p.color ? colorStr(p.color) : null,
-      ...(bound ? { var: bound.var, varGuid: bound.varGuid } : {}),
+      hex: c.hex,
+      ...(c.var ? { var: c.var, varGuid: c.varGuid } : {}),
       ...op,
     };
   }
@@ -343,7 +381,7 @@ function strokeDetailOf(n: any): { cap?: string; join?: string; dash?: number[] 
 // Build the IRStyle block for a node, or null when it carries no styling. fills =
 // ALL visible fillPaints (solid/gradient/image — the complete picture; IRColor.hex
 // stays the single-hex convenience). strokes carry weight/align/hex + bound var.
-function buildStyle(n: any, varIndex: Map<string, string>): IRStyle | null {
+function buildStyle(n: any, varIndex: VarIndex): IRStyle | null {
   const s: IRStyle = {};
 
   const fills = (n.fillPaints ?? []).map((p: any) => fillToIR(p, varIndex)).filter(Boolean) as IRFill[];
@@ -358,12 +396,18 @@ function buildStyle(n: any, varIndex: Map<string, string>): IRStyle | null {
     const align = n.strokeAlign ?? "INSIDE";
     const detail = strokeDetailOf(n);
     s.strokes = strokePaints.map((p: any) => {
-      const bound = p.type === "SOLID" ? colorVarToken(p, varIndex) : null;
+      // Route SOLID strokes through the shared resolver so a bound stroke's hex is
+      // the variable's RESOLVED value (not the stale cached literal). Non-SOLID
+      // strokes keep the literal hex with no var.
+      const c =
+        p.type === "SOLID"
+          ? resolvePaintColor(p, varIndex)
+          : { hex: p.color ? colorStr(p.color) : null, var: null as string | null, varGuid: null as string | null };
       return {
         weight,
         align,
-        hex: p.color ? colorStr(p.color) : null,
-        ...(bound ? { var: bound.var, varGuid: bound.varGuid } : {}),
+        hex: c.hex,
+        ...(c.var ? { var: c.var, varGuid: c.varGuid } : {}),
         ...detail,
       };
     });
@@ -376,6 +420,11 @@ function buildStyle(n: any, varIndex: Map<string, string>): IRStyle | null {
 
   const effects: any[] = (n.effects ?? []).filter((e: any) => e && e.visible !== false);
   if (effects.length) {
+    // Shadow/blur colors are pure LITERALS in this decode — confirmed zero effects
+    // carry a colorVar (no alias on effect.color). So effect hex stays the cached
+    // literal and IREffect has no var/varGuid. FORWARD NOTE: if a future export
+    // binds a shadow color to a variable, route e.color through resolvePaintColor
+    // here too (and add var/varGuid to IREffect).
     s.effects = effects.map((e: any) => ({
       type: e.type ?? "",
       hex: e.color ? colorStr(e.color) : null,
@@ -521,7 +570,7 @@ function textAlignVerticalToIR(v: any): string | undefined {
 function reconcileText(
   n: ResolvedNode,
   appFamilyOf: (family: string | null) => string | null,
-  varIndex: Map<string, string>
+  varIndex: VarIndex
 ): { text: IRTextField; font: IRFont; color: IRColor; styleRuns: number } {
   const rec = reconcileTextSize(n as any); // {size, source, conflicts[]} — verbatim
   const conflicts: Conflict[] = [...rec.conflicts];
@@ -600,7 +649,7 @@ function toIR(
   n: ResolvedNode,
   acc: Mat,
   appFamilyOf: (family: string | null) => string | null,
-  varIndex: Map<string, string>
+  varIndex: VarIndex
 ): IRNode {
   const size = (n as any).size ?? { x: 0, y: 0 };
   const t = (n as any).transform;
@@ -666,14 +715,16 @@ function toIR(
 // from the page root down to (and including) the screen root (lib.absMat(root)) —
 // the screen frame is a direct raw node, so absMat is valid for that seed (§6
 // step 3). `appFamily` maps raw family → decided appFamily slot (or null).
-// `varIndex` maps a variable guidKey → its design-token name; build it ONCE in
-// build-ir (from the resolved color variables) and pass it in — buildColor uses it
-// to attach the bound token directly on every variable-bound fill (GROUND TRUTH).
+// `varIndex` maps a variable guidKey → { name, value } (the design-token name and
+// its RESOLVED concrete hex); build it ONCE in build-ir (from the resolved color
+// variables) and pass it in — the shared resolvePaintColor uses it to attach the
+// bound token AND substitute the variable's resolved value for the stale cached
+// literal on every variable-bound fill/stroke (GROUND TRUTH).
 export function buildScreen(
   resolvedRoot: ResolvedNode,
   rootAbsMat: Mat,
   appFamily: Record<string, string> = {},
-  varIndex: Map<string, string> = new Map()
+  varIndex: VarIndex = new Map()
 ): IRNode {
   const appFamilyOf = (family: string | null): string | null =>
     family != null && appFamily[family] ? appFamily[family] : null;

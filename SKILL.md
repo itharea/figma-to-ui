@@ -333,8 +333,13 @@ into implementation context, read the IR, not raw dumps.
    GROUND TRUTH (no theme needed): `color.var` = the variable's token name (e.g.
    `"Color/praline/950"`), `color.varGuid` = the variable guidKey, and
    `color.match = "bound"`. This is a pure function of the bytes (reads
-   `paint.colorVar`), always runs, and is never a value-matching guess; `color.hex`
-   stays the resolved concrete value. A literal (unbound) fill keeps `var:null`.
+   `paint.colorVar`), always runs, and is never a value-matching guess. **`color.hex`
+   FOLLOWS the binding:** for a bound fill it is the bound variable's RESOLVED value
+   (e.g. `"#2a1e1e"` for `Color/praline/950`), NOT the cached `paint.color` literal —
+   which can be STALE on instance-override paints. So `hex` and `var` can never
+   disagree. A literal (unbound) fill keeps `var:null` and `hex` = `paint.color`.
+   One shared resolver (`resolvePaintColor`) drives `color`, `style.fills[]`, and
+   `style.strokes[]` so all three stay consistent.
 
    Every IR node also carries the **full box-styling + auto-layout** so the IR alone
    suffices for a 1:1 implementation (parity with the raw dump / §4) — emitted only
