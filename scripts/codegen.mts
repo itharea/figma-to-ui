@@ -322,6 +322,16 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
   return lines.join("\n");
 }
 
+// An icon: a node whose rendered content is purely vector geometry (no text/image).
+// Codegen can't draw vector paths — these export via export-svg.mts — so an icon
+// renders as ONE sized placeholder + a TODO, never a tree of empty/recolored boxes.
+function isVectorOnly(n: IRNode): boolean {
+  if (n.type === "vector" || n.type === "boolean_operation") return true;
+  if (n.type === "text" || n.type === "image") return false;
+  const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
+  return kids.length > 0 && kids.every(isVectorOnly);
+}
+
 // --- the per-variant render: walk the subtree, emit JSX + collect style entries.
 type VariantRender = {
   v: any;
@@ -395,6 +405,17 @@ function renderVariant(v: any): VariantRender {
       usedProps.add(binds.slot.name);
       styles.push({ key: sk, body: nodeStyleBody(n, push) });
       const el = `${pad}<${Box} ${styleAttr}>{${binds.slot.name}}</${Box}>`;
+      return wrapConditional(el, binds, depth, n);
+    }
+
+    // vector art / an icon instance (subtree is purely vectors) → ONE sized
+    // placeholder + an export-svg TODO, NOT a tree of meaningless empty/recolored
+    // boxes (codegen can't draw vector paths; export-svg.mts does).
+    if (n.type === "vector" || n.type === "boolean_operation" || (n.type === "instance" && isVectorOnly(n))) {
+      const box = [n.box?.w ? `width: ${n.box.w},` : "", n.box?.h ? `height: ${n.box.h},` : ""].filter(Boolean).join("\n");
+      styles.push({ key: sk, body: box });
+      push(`icon/vector "${n.name}" (${n.guid}) — export via export-svg.mts and inline as <Svg>/<Image>`);
+      const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid}) */}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
 
