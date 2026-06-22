@@ -173,7 +173,14 @@ for (const p of props) {
     const lg: Logical = { name: uniqueName(p.name), tsType: "string", role: "text", defKey: p.defKey, figNames: [p.rawName], defText: typeof p.default === "string" ? p.default : null };
     logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
   } else if (p.kind === "boolean") {
-    const lg: Logical = { name: uniqueName(p.name), tsType: "boolean", role: "bool", defKey: p.defKey, figNames: [p.rawName] };
+    // a standalone BOOL binds a node's `visible` → name it show<Name> (idiomatic for a
+    // visibility toggle, and it frees the bare name for a content/text prop so a
+    // collapsed `Action`+`actionText` pair becomes `action`, not `action2`). Skip the
+    // prefix when the prop is already show/is/has-prefixed.
+    const showName = /^(show|is|has)[A-Z]/.test(p.name)
+      ? p.name
+      : "show" + p.name.charAt(0).toUpperCase() + p.name.slice(1);
+    const lg: Logical = { name: uniqueName(showName), tsType: "boolean", role: "bool", defKey: p.defKey, figNames: [p.rawName] };
     logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
   } else {
     const lg: Logical = { name: uniqueName(p.name), tsType: "React.ReactNode", role: "slot", defKey: p.defKey, figNames: [p.rawName] };
