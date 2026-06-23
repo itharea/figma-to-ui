@@ -353,11 +353,20 @@ function fillToIR(p: any, varIndex: VarIndex): IRFill | null {
 
 // Per-corner radii → uniform number when all four agree, else the {tl,tr,br,bl}
 // object. Falls back to the uniform `cornerRadius`. Returns undefined when none.
-function cornerRadiusOf(n: any): IRStyle["cornerRadius"] {
+export function cornerRadiusOf(n: any): IRStyle["cornerRadius"] {
   const tl = n.rectangleTopLeftCornerRadius;
   const tr = n.rectangleTopRightCornerRadius;
   const br = n.rectangleBottomRightCornerRadius;
   const bl = n.rectangleBottomLeftCornerRadius;
+  // Independent per-corner radii (CODEGEN_BUGS_v2 B): Figma flags this with
+  // rectangleCornerRadiiIndependent, and the corners that are 0 are simply ABSENT (e.g.
+  // a pill end rounded on the left only). Honor the flag even when not all four fields
+  // are present — default the missing corners to 0 — so a single-side rounding survives.
+  if (n.rectangleCornerRadiiIndependent === true) {
+    const num = (v: any) => (typeof v === "number" ? v : 0);
+    const o = { tl: num(tl), tr: num(tr), br: num(br), bl: num(bl) };
+    return o.tl === o.tr && o.tr === o.br && o.br === o.bl ? o.tl || undefined : o;
+  }
   if ([tl, tr, br, bl].every((v) => typeof v === "number")) {
     if (tl === tr && tr === br && br === bl) return tl || undefined;
     return { tl, tr, br, bl };

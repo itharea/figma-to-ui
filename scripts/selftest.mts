@@ -17,6 +17,7 @@ import {
   disambiguateJustify,
 } from "./reconcile-lib.mts";
 import { resolveInstance } from "./resolve-lib.mts";
+import { cornerRadiusOf } from "./screens-lib.mts";
 
 let pass = 0;
 let fail = 0;
@@ -146,6 +147,32 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
     [{ box: { x: 22.5, y: 0, w: 285.5, h: 40 } }, { box: { x: 308, y: 0, w: 62, h: 40 } }],
   );
   eq("dj offset > tol not flush → space-evenly", overTol, "space-evenly");
+}
+
+// ── screens-lib: cornerRadiusOf (CODEGEN_BUGS_v2 B — independent per-corner) ──
+{
+  // Independent corners, only the left pair set (slider fill 1153:1957): TR/BR absent
+  // (= 0) must NOT drop the radius — it's a left-rounded pill end.
+  eq(
+    "corner independent left-only → {9999,0,0,9999}",
+    cornerRadiusOf({ rectangleCornerRadiiIndependent: true, rectangleTopLeftCornerRadius: 9999, rectangleBottomLeftCornerRadius: 9999 }),
+    { tl: 9999, tr: 0, br: 0, bl: 9999 },
+  );
+  // Independent flag but all four equal → collapses to the uniform number.
+  eq(
+    "corner independent all-equal → number",
+    cornerRadiusOf({ rectangleCornerRadiiIndependent: true, rectangleTopLeftCornerRadius: 8, rectangleTopRightCornerRadius: 8, rectangleBottomRightCornerRadius: 8, rectangleBottomLeftCornerRadius: 8 }),
+    8,
+  );
+  // All four present, NOT independent, differing → object (existing behavior preserved).
+  eq(
+    "corner four-present differing → object",
+    cornerRadiusOf({ rectangleTopLeftCornerRadius: 4, rectangleTopRightCornerRadius: 8, rectangleBottomRightCornerRadius: 4, rectangleBottomLeftCornerRadius: 8 }),
+    { tl: 4, tr: 8, br: 4, bl: 8 },
+  );
+  // Uniform cornerRadius fallback, and the empty case.
+  eq("corner uniform fallback → number", cornerRadiusOf({ cornerRadius: 12 }), 12);
+  eq("corner none → undefined", cornerRadiusOf({}), undefined);
 }
 
 // ── resolve-lib: hand-built index guards (a real .fig cannot author these) ───

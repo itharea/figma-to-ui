@@ -251,13 +251,15 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
   if (imgFill) {
     const hash = (imgFill as any).imageHash as string;
     push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — export to images/ and wire the src`);
+    // Round 2 (C): do NOT emit an opaque placeholder bg. Image-fill nodes are often
+    // image-ONLY (no solid in the design) and the assets are transparent PNGs meant to
+    // composite over the parent surface — an opaque #eee would show through their alpha.
+    // Leave the background transparent; the TODO flags the node for wiring.
     if (web) {
       lines.push(`// TODO: image — backgroundImage: 'url(images/${hash.slice(0, 16)}…)'`);
-      lines.push(`backgroundColor: '#eee', // image placeholder`);
       lines.push(`backgroundSize: 'cover',`);
     } else {
       lines.push(`// TODO: image — render as <Image source={{ uri: '…/${hash.slice(0, 16)}…' }} />`);
-      lines.push(`backgroundColor: '#eee', // image placeholder`);
     }
   }
   if (s?.cornerRadius !== undefined) {
@@ -519,11 +521,20 @@ function renderVariant(v: any): VariantRender {
     // #9 z-index: detect a positioned child overlapping a sibling (strict). If any
     // overlap exists in the set, escalate the WHOLE overlapping set to absolute and
     // emit zIndex by child-array order (later children paint on top → Figma order).
-    const boxOf = (c: IRNode) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 });
+    // GATE (CODEGEN_BUGS_v2 A): only run this for children ALREADY out of flow. An
+    // auto-layout (flex) row places children by flexbox, so their stored bboxes are
+    // frozen snapshots — a sub-pixel bbox touch there is not a real z-overlap and must
+    // never pull a flex child absolute. positionsKids is true only for a non-auto-layout
+    // container or one with an explicitly-absolute child; positionPrefix establishes the
+    // containing block on exactly that condition, so any escalation here also gets a
+    // `position:relative` parent for free.
     const overlapping = new Set<IRNode>();
-    for (let i = 0; i < kids.length; i++)
-      for (let j = i + 1; j < kids.length; j++)
-        if (overlap(boxOf(kids[i]), boxOf(kids[j]))) { overlapping.add(kids[i]); overlapping.add(kids[j]); }
+    if (positionsKids) {
+      const boxOf = (c: IRNode) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 });
+      for (let i = 0; i < kids.length; i++)
+        for (let j = i + 1; j < kids.length; j++)
+          if (overlap(boxOf(kids[i]), boxOf(kids[j]))) { overlapping.add(kids[i]); overlapping.add(kids[j]); }
+    }
     const childIndex = new Map<IRNode, number>();
     (n.children ?? []).forEach((c, i) => childIndex.set(c, i));
     return kids
@@ -575,7 +586,15 @@ function renderVariant(v: any): VariantRender {
     // INSTANCE_SWAP slot node → render the ReactNode prop where the instance sits.
     if (binds?.slot) {
       usedProps.add(binds.slot.name);
-      styles.push({ key: sk, body: prefixBody(nodeStyleBody(n, push)) });
+      // #4 (round 2): an instance-swap slot is an icon/content placeholder — center the
+      // injected {prop} like a single-icon wrapper, else an inlined <svg>/{icon} aligns
+      // to the text baseline (the "Hepsi ›" caret floats). Skip when the slot defines its
+      // OWN auto-layout (that flow already positions the content).
+      const slotBody = nodeStyleBody(n, push);
+      const body = n.layout
+        ? slotBody
+        : [slotBody, `display: 'flex',`, `alignItems: 'center',`, `justifyContent: 'center',`].filter(Boolean).join("\n");
+      styles.push({ key: sk, body: prefixBody(body) });
       const el = `${pad}<${Box} ${styleAttr}>{${binds.slot.name}}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
