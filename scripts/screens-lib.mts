@@ -5,21 +5,26 @@
 //
 // Determinism contract (README): DETECTION always runs and is exact (instance
 // composition by explicit guidPath, conflict detection arithmetic, unit
-// conversion, abs coords). RESOLUTION is a labelled heuristic (geometry-16 over
-// declared-28, placeholder classification) — it sets `source`/`*Source` and
-// populates `conflicts[]`, and is NEVER presented as ground truth. Token slots
+// conversion, abs coords, and Figma's OWN render in `derivedTextData` — used as
+// ground truth for font family/size/lineHeight when the node-level fontName cache
+// is detectably stale, sizeSource="derived"). RESOLUTION is a labelled heuristic
+// (geometry-16 over declared-28, placeholder classification) — it sets `source`/
+// `*Source` and populates `conflicts[]`, and is NEVER presented as ground truth.
+// Token slots
 // (`color.{token,match}`, `font.{sizeToken,sizeMatch}`) stay null here; Phase 8's
 // --theme fills them.
 import * as crypto from "crypto";
 import { colorStr, mul, nodeMat, type Mat } from "./lib.mts";
 import {
   reconcileTextSize,
+  deriveFontFromRender,
   letterSpacingToPx,
   lineHeightPx,
   classifyPlaceholderText,
   type Conflict,
 } from "./reconcile-lib.mts";
 import type { ResolvedNode } from "./resolve-lib.mts";
+import type { IRTypography, TypeVars } from "./ir-lib.mts";
 
 // --- IR node shape (matches phase-07 §5) -----------------------------------
 export type IRTextField = {
@@ -51,11 +56,26 @@ export type IRFont = {
   appFamily: string | null;
   weight: string | null;
   size: number;
-  sizeSource: "fontSize" | "geometry";
+  // Where size/lineHeight came from, most-certain first: "style" = the applied text
+  // style (styleIdForText → typography token, designer intent); "derived" = Figma's own
+  // render (derivedTextData); "fontSize" = the node's declared cache, taken as-is;
+  // "geometry" = the box-vs-lineHeight HEURISTIC (last resort, only when no certain
+  // source covers the field).
+  sizeSource: "fontSize" | "geometry" | "derived" | "style";
   sizeToken: string | null;
   sizeMatch: string | null;
+  // The applied Figma text style (styleIdForText) — the typography DESIGN TOKEN this
+  // node binds to. GROUND TRUTH from the bytes, the typography analogue of a color's
+  // var/varGuid: a real implementation should reference this token instead of the
+  // hardcoded family/size/weight/lineHeight/textCase. null when no shared style applies.
+  styleName: string | null;
+  styleGuid: string | null;
+  // Per-property variable bindings carried from that style (family/size/lineHeight/…
+  // each → its own Figma variable name) — so each property can bind to a variable, not
+  // just the style as a whole. null when no shared style applies.
+  vars: TypeVars | null;
   lineHeightPx: number | null;
-  lineHeightSource: "fontSize";
+  lineHeightSource: "fontSize" | "derived" | "style";
   letterSpacingPx: number;
   letterSpacingRaw: { value: number; units: string };
   conflicts: Conflict[];
@@ -564,22 +584,78 @@ function textAlignVerticalToIR(v: any): string | undefined {
   return v.toLowerCase();
 }
 
+// The guidKey ("sessionID:localID") of the text style a node applies via
+// `styleIdForText`, or null when the node carries no shared text style. Used to look
+// the style up in the typography token map (the CERTAIN designer-intent source).
+function styleRefKey(n: ResolvedNode): string | null {
+  const g = (n as any).styleIdForText?.guid;
+  if (!g || g.sessionID === undefined || g.localID === undefined) return null;
+  return `${g.sessionID}:${g.localID}`;
+}
+
 // Reconcile one resolved TEXT node into the IR `font`/`text`/`color` provenance
 // objects. `appFamilyOf` maps a raw family → its decided appFamily slot (null
-// until decided in Phase 8).
+// until decided in Phase 8). `typeStyles` maps a text-style guidKey → its typography
+// token (the applied-style source for font/lineHeight/textCase).
 function reconcileText(
   n: ResolvedNode,
   appFamilyOf: (family: string | null) => string | null,
-  varIndex: VarIndex
+  varIndex: Map<string, string>,
+  typeStyles: Map<string, IRTypography>
 ): { text: IRTextField; font: IRFont; color: IRColor; styleRuns: number } {
-  const rec = reconcileTextSize(n as any); // {size, source, conflicts[]} — verbatim
-  const conflicts: Conflict[] = [...rec.conflicts];
-  const family = (n as any).fontName?.family ?? null;
-  const declaredSize = typeof (n as any).fontSize === "number" ? (n as any).fontSize : rec.size;
-  // lineHeightPx is the DECLARED line height converted at the reconciled size; it
-  // is NOT geometry-reconciled (an open size conflict marks it stale — §5 rules).
-  const lhPx = lineHeightPx((n as any).lineHeight, rec.size);
+  const rec = reconcileTextSize(n as any); // geometry HEURISTIC — the true last resort
+  const conflicts: Conflict[] = [];
+  const nodeFamily = (n as any).fontName?.family ?? null;
+  const nodeWeight = (n as any).fontName?.style ?? null;
+  const nodeSize = typeof (n as any).fontSize === "number" ? (n as any).fontSize : null;
   const lsRaw = (n as any).letterSpacing ?? { value: 0, units: "PIXELS" };
+
+  // Two CERTAIN sources from the bytes, both preferred over the geometry heuristic AND
+  // over the node-level fontName/fontSize/lineHeight/textCase cache — which goes STALE
+  // when a component variant re-styles a node (SingleLine header Title: cached
+  // Lora/28/TITLE, but the applied text style + render are Geist Mono/16/UPPER):
+  //   • style   = the applied text style (styleIdForText → typography token): designer
+  //               INTENT — clean family/size/weight/lineHeight/textCase.
+  //   • derived = derivedTextData: Figma's actual RENDER (effective values, so it honors
+  //               a LOCAL override layered on top of a style).
+  // Both defer to the node cache when an INSTANCE override set the font explicitly
+  // (overrideApplied.fontName/Size) — then the override on the node is the truth.
+  const fontOverridden =
+    !!(n as any).overrideApplied?.fontName || !!(n as any).overrideApplied?.fontSize;
+  const styleKey = styleRefKey(n);
+  const style = !fontOverridden && styleKey ? typeStyles.get(styleKey) ?? null : null;
+  const derived = fontOverridden ? null : deriveFontFromRender(n as any);
+
+  // family / weight / size: RENDER (effective) → STYLE (intent) → cache → geometry.
+  // `rec` (geometry) is only reached when neither certain source covers the node.
+  const family = derived?.family ?? style?.family ?? nodeFamily;
+  const weight = derived?.weight ?? style?.weight ?? nodeWeight;
+  let size: number;
+  let sizeSource: IRFont["sizeSource"];
+  if (derived?.size != null) { size = derived.size; sizeSource = "derived"; }
+  else if (style?.size != null) { size = style.size; sizeSource = "style"; }
+  else { size = rec.size; sizeSource = rec.source; }
+
+  // Is the node's cached text snapshot STALE? (font re-styled, cache not refreshed) —
+  // then its cached lineHeight/textCase are unreliable too and must come from the style.
+  const truthFamily = derived?.family ?? style?.family ?? null;
+  const truthSize = derived?.size ?? style?.size ?? null;
+  const stale =
+    (truthFamily != null && nodeFamily != null && truthFamily !== nodeFamily) ||
+    (truthSize != null && nodeSize != null && truthSize !== nodeSize);
+
+  // line height: the STYLE value is the most accurate — the render baseline OVER-counts
+  // font leading (16px Geist Mono → a 20.8 baseline for a 20px line box) and the cache
+  // can be stale. A FRESH cache is trusted first (it honors a local line-height override).
+  const cacheLh = lineHeightPx((n as any).lineHeight, size);
+  let lhPx: number | null;
+  let lineHeightSource: IRFont["lineHeightSource"];
+  if (!stale && cacheLh != null) { lhPx = cacheLh; lineHeightSource = "fontSize"; }
+  else if (style?.lineHeightPx != null) { lhPx = style.lineHeightPx; lineHeightSource = "style"; }
+  else { lhPx = cacheLh ?? derived?.lineHeightPx ?? null; lineHeightSource = cacheLh != null ? "fontSize" : "derived"; }
+
+  // geometry was a GUESS — surface its conflict ONLY when geometry actually won the size.
+  if (sizeSource === "geometry") conflicts.push(...rec.conflicts);
 
   // styleOverrideTable runs: a non-empty table means node-level font may not match
   // N runs — add a conflict (does not change `size`, only flags).
@@ -598,14 +674,17 @@ function reconcileText(
   const font: IRFont = {
     family,
     appFamily: appFamilyOf(family),
-    weight: (n as any).fontName?.style ?? null,
-    size: rec.size,
-    sizeSource: rec.source,
+    weight,
+    size,
+    sizeSource,
     sizeToken: null,
     sizeMatch: null,
+    styleName: style?.name ?? null,
+    styleGuid: style?.guid ?? null,
+    vars: style?.vars ?? null,
     lineHeightPx: lhPx,
-    lineHeightSource: "fontSize",
-    letterSpacingPx: letterSpacingToPx(lsRaw, rec.size),
+    lineHeightSource,
+    letterSpacingPx: letterSpacingToPx(lsRaw, size),
     letterSpacingRaw: {
       value: lsRaw.value ?? 0,
       units: lsRaw.units ?? "PIXELS",
@@ -623,9 +702,13 @@ function reconcileText(
     placeholder: cls.placeholder,
     reason: cls.reason,
   };
-  // text transform & alignment (improvement 2-text): PURE pass-throughs of the
-  // resolved bytes, attached only when non-default/present (lean files).
-  const tCase = textCaseToCss((n as any).textCase);
+  // text transform & alignment (improvement 2-text): pass-throughs of the resolved
+  // bytes, attached only when non-default/present (lean files). textCase is part of the
+  // node's text-style snapshot, so a STALE cache → take the applied style's case (the
+  // SingleLine header is UPPER per its Eyebrow style, not the cached TITLE); a fresh
+  // cache is trusted (it honors a local case override).
+  const rawCase = stale && style?.textCase != null ? style.textCase : (n as any).textCase;
+  const tCase = textCaseToCss(rawCase);
   if (tCase) text.case = tCase;
   const tAlign = textAlignToCss((n as any).textAlignHorizontal);
   if (tAlign) text.align = tAlign;
@@ -649,7 +732,8 @@ function toIR(
   n: ResolvedNode,
   acc: Mat,
   appFamilyOf: (family: string | null) => string | null,
-  varIndex: VarIndex
+  varIndex: Map<string, string>,
+  typeStyles: Map<string, IRTypography>
 ): IRNode {
   const size = (n as any).size ?? { x: 0, y: 0 };
   const t = (n as any).transform;
@@ -673,7 +757,7 @@ function toIR(
   };
 
   if ((n as any).type === "TEXT") {
-    const { text, font, color, styleRuns } = reconcileText(n, appFamilyOf, varIndex);
+    const { text, font, color, styleRuns } = reconcileText(n, appFamilyOf, varIndex, typeStyles);
     node.text = text;
     node.font = font;
     node.color = color;
@@ -706,7 +790,7 @@ function toIR(
   for (const c of n.children ?? []) {
     if ((c as any).visible === false) continue;
     const childAcc = mul(acc, nodeMat(c as any));
-    node.children.push(toIR(c, childAcc, appFamilyOf, varIndex));
+    node.children.push(toIR(c, childAcc, appFamilyOf, varIndex, typeStyles));
   }
   return node;
 }
@@ -724,11 +808,12 @@ export function buildScreen(
   resolvedRoot: ResolvedNode,
   rootAbsMat: Mat,
   appFamily: Record<string, string> = {},
-  varIndex: VarIndex = new Map()
+  varIndex: Map<string, string> = new Map(),
+  typeStyles: Map<string, IRTypography> = new Map()
 ): IRNode {
   const appFamilyOf = (family: string | null): string | null =>
     family != null && appFamily[family] ? appFamily[family] : null;
-  return toIR(resolvedRoot, rootAbsMat, appFamilyOf, varIndex);
+  return toIR(resolvedRoot, rootAbsMat, appFamilyOf, varIndex, typeStyles);
 }
 
 // Walk an IR tree, registering every node id → {guid, path} into `out`.
