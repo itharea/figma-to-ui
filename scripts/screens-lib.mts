@@ -5,15 +5,19 @@
 //
 // Determinism contract (README): DETECTION always runs and is exact (instance
 // composition by explicit guidPath, conflict detection arithmetic, unit
-// conversion, abs coords). RESOLUTION is a labelled heuristic (geometry-16 over
-// declared-28, placeholder classification) — it sets `source`/`*Source` and
-// populates `conflicts[]`, and is NEVER presented as ground truth. Token slots
+// conversion, abs coords, and Figma's OWN render in `derivedTextData` — used as
+// ground truth for font family/size/lineHeight when the node-level fontName cache
+// is detectably stale, sizeSource="derived"). RESOLUTION is a labelled heuristic
+// (geometry-16 over declared-28, placeholder classification) — it sets `source`/
+// `*Source` and populates `conflicts[]`, and is NEVER presented as ground truth.
+// Token slots
 // (`color.{token,match}`, `font.{sizeToken,sizeMatch}`) stay null here; Phase 8's
 // --theme fills them.
 import * as crypto from "crypto";
 import { colorStr, mul, nodeMat, type Mat } from "./lib.mts";
 import {
   reconcileTextSize,
+  deriveFontFromRender,
   letterSpacingToPx,
   lineHeightPx,
   classifyPlaceholderText,
@@ -51,11 +55,14 @@ export type IRFont = {
   appFamily: string | null;
   weight: string | null;
   size: number;
-  sizeSource: "fontSize" | "geometry";
+  // "derived" = Figma's own render (derivedTextData, ground truth) overrode a stale
+  // node-level fontName/fontSize cache; "geometry" = box-vs-lineHeight heuristic;
+  // "fontSize" = the node's declared fontSize, taken as-is.
+  sizeSource: "fontSize" | "geometry" | "derived";
   sizeToken: string | null;
   sizeMatch: string | null;
   lineHeightPx: number | null;
-  lineHeightSource: "fontSize";
+  lineHeightSource: "fontSize" | "derived";
   letterSpacingPx: number;
   letterSpacingRaw: { value: number; units: string };
   conflicts: Conflict[];
@@ -523,14 +530,55 @@ function reconcileText(
   appFamilyOf: (family: string | null) => string | null,
   varIndex: Map<string, string>
 ): { text: IRTextField; font: IRFont; color: IRColor; styleRuns: number } {
-  const rec = reconcileTextSize(n as any); // {size, source, conflicts[]} — verbatim
-  const conflicts: Conflict[] = [...rec.conflicts];
-  const family = (n as any).fontName?.family ?? null;
-  const declaredSize = typeof (n as any).fontSize === "number" ? (n as any).fontSize : rec.size;
-  // lineHeightPx is the DECLARED line height converted at the reconciled size; it
-  // is NOT geometry-reconciled (an open size conflict marks it stale — §5 rules).
-  const lhPx = lineHeightPx((n as any).lineHeight, rec.size);
+  const rec = reconcileTextSize(n as any); // geometry heuristic — the FALLBACK path
+  const conflicts: Conflict[] = [];
+  const nodeFamily = (n as any).fontName?.family ?? null;
+  const nodeWeight = (n as any).fontName?.style ?? null;
+  const nodeSize = typeof (n as any).fontSize === "number" ? (n as any).fontSize : null;
   const lsRaw = (n as any).letterSpacing ?? { value: 0, units: "PIXELS" };
+
+  // GROUND TRUTH over a STALE cache: derivedTextData is what Figma actually rendered.
+  // The node-level fontName/fontSize cache drifts when a variant re-styles a text node
+  // (SingleLine header Title: cached Lora/28, rendered Geist Mono/16). Trust the render
+  // ONLY when it disagrees with the cache on family or size — so every already-correct
+  // node keeps its clean cached values (incl. line height) untouched — and defer to the
+  // cache when an INSTANCE override set the font explicitly (then the override lives on
+  // the node and derivedTextData would be the master's stale render).
+  const fontOverridden =
+    !!(n as any).overrideApplied?.fontName || !!(n as any).overrideApplied?.fontSize;
+  const derived = fontOverridden ? null : deriveFontFromRender(n as any);
+  const stale =
+    derived != null &&
+    ((derived.family != null && nodeFamily != null && derived.family !== nodeFamily) ||
+      (derived.size != null && nodeSize != null && derived.size !== nodeSize));
+
+  let family: string | null;
+  let weight: string | null;
+  let size: number;
+  let sizeSource: IRFont["sizeSource"];
+  let lineHeightSource: IRFont["lineHeightSource"];
+  let lhPx: number | null;
+  if (stale && derived) {
+    // Authoritative render supersedes the geometry guess — drop rec.conflicts (the
+    // "confirm size" flag is not warranted; the size is KNOWN from the bytes' render).
+    family = derived.family ?? nodeFamily;
+    weight = derived.weight ?? nodeWeight;
+    size = derived.size ?? rec.size;
+    sizeSource = "derived";
+    lhPx = derived.lineHeightPx ?? lineHeightPx((n as any).lineHeight, size);
+    lineHeightSource = derived.lineHeightPx != null ? "derived" : "fontSize";
+  } else {
+    // Cache is fresh (or no derived render): node-level fontName + geometry, verbatim.
+    family = nodeFamily;
+    weight = nodeWeight;
+    size = rec.size;
+    sizeSource = rec.source;
+    // lineHeightPx is the DECLARED line height converted at the reconciled size; it
+    // is NOT geometry-reconciled (an open size conflict marks it stale — §5 rules).
+    lhPx = lineHeightPx((n as any).lineHeight, rec.size);
+    lineHeightSource = "fontSize";
+    conflicts.push(...rec.conflicts);
+  }
 
   // styleOverrideTable runs: a non-empty table means node-level font may not match
   // N runs — add a conflict (does not change `size`, only flags).
@@ -549,14 +597,14 @@ function reconcileText(
   const font: IRFont = {
     family,
     appFamily: appFamilyOf(family),
-    weight: (n as any).fontName?.style ?? null,
-    size: rec.size,
-    sizeSource: rec.source,
+    weight,
+    size,
+    sizeSource,
     sizeToken: null,
     sizeMatch: null,
     lineHeightPx: lhPx,
-    lineHeightSource: "fontSize",
-    letterSpacingPx: letterSpacingToPx(lsRaw, rec.size),
+    lineHeightSource,
+    letterSpacingPx: letterSpacingToPx(lsRaw, size),
     letterSpacingRaw: {
       value: lsRaw.value ?? 0,
       units: lsRaw.units ?? "PIXELS",

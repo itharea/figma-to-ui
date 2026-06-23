@@ -93,6 +93,52 @@ export function reconcileTextSize(
   };
 }
 
+// Ground-truth font from Figma's OWN resolved render (`derivedTextData`). The
+// node-level fontName/fontSize/lineHeight cache goes STALE when a component variant
+// re-styles a text node: Figma leaves the inherited values on the node (e.g. the
+// SingleLine header Title carries Lora/Bold/28) while the applied text style is what
+// actually renders (Geist Mono/Regular/16). `derivedTextData` is that real layout —
+// fontMetaData[].key is the rendered family/style, each glyph.fontSize is the
+// rendered size, baselines[].lineHeight is the rendered line height. This is DETECTION
+// (exact bytes), not a heuristic guess, so the caller may present it as truth.
+// Returns null when the node carries no usable derived render (caller falls back to
+// the cached fontName + the geometry heuristic above).
+export type DerivedFont = {
+  family: string | null;
+  weight: string | null; // fontMetaData[].key.style ("Regular", "Bold", …)
+  size: number | null; // dominant glyph fontSize
+  lineHeightPx: number | null; // rendered baseline line height (float noise rounded)
+  mixed: boolean; // >1 font run or >1 glyph size — the single family/size is a reduction
+};
+
+export function deriveFontFromRender(node: any): DerivedFont | null {
+  const dtd = node?.derivedTextData;
+  if (!dtd || typeof dtd !== "object") return null;
+  const metas: any[] = Array.isArray(dtd.fontMetaData) ? dtd.fontMetaData : [];
+  const glyphs: any[] = Array.isArray(dtd.glyphs) ? dtd.glyphs : [];
+  if (!metas.length && !glyphs.length) return null;
+
+  // family/weight: the first (dominant) font run's key.
+  const key0 = metas[0]?.key ?? {};
+  const family = typeof key0.family === "string" && key0.family ? key0.family : null;
+  const weight = typeof key0.style === "string" && key0.style ? key0.style : null;
+
+  // size: the MODE of glyph fontSizes so a stray glyph can't skew it.
+  const counts = new Map<number, number>();
+  for (const g of glyphs)
+    if (typeof g?.fontSize === "number") counts.set(g.fontSize, (counts.get(g.fontSize) ?? 0) + 1);
+  let size: number | null = null;
+  let best = -1;
+  for (const [sz, c] of counts) if (c > best) { best = c; size = sz; }
+
+  // line height: the rendered baseline (kill binary-decode float noise → 2dp).
+  const lhRaw = dtd.baselines?.[0]?.lineHeight;
+  const lineHeightPx = typeof lhRaw === "number" ? Math.round(lhRaw * 100) / 100 : null;
+
+  if (family == null && size == null) return null;
+  return { family, weight, size, lineHeightPx, mixed: metas.length > 1 || counts.size > 1 };
+}
+
 // Placeholder string classifier (the P0-3 string half; override-presence half is
 // wired in Phase 2). masterDefault may be undefined in Phase 1.
 //   placeholder=true iff !hasTextOverride AND
