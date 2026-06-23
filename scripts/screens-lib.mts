@@ -600,7 +600,7 @@ function styleRefKey(n: ResolvedNode): string | null {
 function reconcileText(
   n: ResolvedNode,
   appFamilyOf: (family: string | null) => string | null,
-  varIndex: Map<string, string>,
+  varIndex: VarIndex,
   typeStyles: Map<string, IRTypography>
 ): { text: IRTextField; font: IRFont; color: IRColor; styleRuns: number } {
   const rec = reconcileTextSize(n as any); // geometry HEURISTIC — the true last resort
@@ -732,7 +732,7 @@ function toIR(
   n: ResolvedNode,
   acc: Mat,
   appFamilyOf: (family: string | null) => string | null,
-  varIndex: Map<string, string>,
+  varIndex: VarIndex,
   typeStyles: Map<string, IRTypography>
 ): IRNode {
   const size = (n as any).size ?? { x: 0, y: 0 };
@@ -808,7 +808,7 @@ export function buildScreen(
   resolvedRoot: ResolvedNode,
   rootAbsMat: Mat,
   appFamily: Record<string, string> = {},
-  varIndex: Map<string, string> = new Map(),
+  varIndex: VarIndex = new Map(),
   typeStyles: Map<string, IRTypography> = new Map()
 ): IRNode {
   const appFamilyOf = (family: string | null): string | null =>
