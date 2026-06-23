@@ -24,7 +24,7 @@ import {
   type Conflict,
 } from "./reconcile-lib.mts";
 import type { ResolvedNode } from "./resolve-lib.mts";
-import type { IRTypography } from "./ir-lib.mts";
+import type { IRTypography, TypeVars } from "./ir-lib.mts";
 
 // --- IR node shape (matches phase-07 §5) -----------------------------------
 export type IRTextField = {
@@ -64,6 +64,16 @@ export type IRFont = {
   sizeSource: "fontSize" | "geometry" | "derived" | "style";
   sizeToken: string | null;
   sizeMatch: string | null;
+  // The applied Figma text style (styleIdForText) — the typography DESIGN TOKEN this
+  // node binds to. GROUND TRUTH from the bytes, the typography analogue of a color's
+  // var/varGuid: a real implementation should reference this token instead of the
+  // hardcoded family/size/weight/lineHeight/textCase. null when no shared style applies.
+  styleName: string | null;
+  styleGuid: string | null;
+  // Per-property variable bindings carried from that style (family/size/lineHeight/…
+  // each → its own Figma variable name) — so each property can bind to a variable, not
+  // just the style as a whole. null when no shared style applies.
+  vars: TypeVars | null;
   lineHeightPx: number | null;
   lineHeightSource: "fontSize" | "derived" | "style";
   letterSpacingPx: number;
@@ -620,6 +630,9 @@ function reconcileText(
     sizeSource,
     sizeToken: null,
     sizeMatch: null,
+    styleName: style?.name ?? null,
+    styleGuid: style?.guid ?? null,
+    vars: style?.vars ?? null,
     lineHeightPx: lhPx,
     lineHeightSource,
     letterSpacingPx: letterSpacingToPx(lsRaw, size),

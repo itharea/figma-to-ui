@@ -329,14 +329,21 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
   const lines: string[] = [];
   const f = n.font;
   if (f) {
-    if (f.size != null) lines.push(`fontSize: ${f.size},${f.sizeToken ? ` // token ${f.sizeToken}` : ""}`);
-    if (f.lineHeightPx != null) lines.push(`lineHeight: ${f.lineHeightPx},`);
-    if (f.letterSpacingPx) lines.push(`letterSpacing: ${f.letterSpacingPx},`);
-    if (f.appFamily) lines.push(`fontFamily: '${f.appFamily}',`);
-    else { lines.push(`// TODO: fontFamily — "${f.family}" unmapped (decisions.fontMap)`); push(`font "${f.family}" has no appFamily — set decisions.fontMap["${f.family}"]`); }
+    // Each typography property carries its own Figma variable (font.vars: the design
+    // token it binds to) — annotate every value with `// var <name>`, mirroring the
+    // color token comment, so a real implementation references variables not literals.
+    // The applied text style name heads the block (the whole-style token).
+    const v = f.vars;
+    const varc = (name: string | null | undefined) => (name ? ` // var ${name}` : "");
+    if (f.styleName) lines.push(`// token text-style: ${f.styleName}`);
+    if (f.size != null) lines.push(`fontSize: ${f.size},${v?.size ? ` // var ${v.size}` : f.sizeToken ? ` // token ${f.sizeToken}` : ""}`);
+    if (f.lineHeightPx != null) lines.push(`lineHeight: ${f.lineHeightPx},${varc(v?.lineHeight)}`);
+    if (f.letterSpacingPx || v?.letterSpacing) lines.push(`letterSpacing: ${f.letterSpacingPx},${varc(v?.letterSpacing)}`);
+    if (f.appFamily) lines.push(`fontFamily: '${f.appFamily}',${varc(v?.family)}`);
+    else { lines.push(`// TODO: fontFamily — "${f.family}" unmapped${v?.family ? ` (var ${v.family})` : ""} (decisions.fontMap)`); push(`font "${f.family}" has no appFamily — set decisions.fontMap["${f.family}"]`); }
     const fw = fontWeightValue(f.weight);
-    if (fw) lines.push(`fontWeight: '${fw}',${f.weight ? ` // ${f.weight}` : ""}`);
-    else if (f.weight) { lines.push(`// TODO: fontWeight — unmapped Figma weight "${f.weight}"`); push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`); }
+    if (fw) lines.push(`fontWeight: '${fw}',${v?.weight ? ` // var ${v.weight}` : f.weight ? ` // ${f.weight}` : ""}`);
+    else if (f.weight) { lines.push(`// TODO: fontWeight — unmapped Figma weight "${f.weight}"${v?.weight ? ` (var ${v.weight})` : ""}`); push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`); }
     for (const cf of f.conflicts ?? []) push(`font ${cf.field} ${cf.declared}→~${cf.chosen} reconciliation conflict (box.y=${cf.boxY} vs lh=${cf.lhPx}) — confirm size`);
   }
   const cref = colorRef(n.color as any, `${n.name} text`, push);
