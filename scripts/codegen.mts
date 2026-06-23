@@ -339,8 +339,11 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
     if (f.size != null) lines.push(`fontSize: ${f.size},${v?.size ? ` // var ${v.size}` : f.sizeToken ? ` // token ${f.sizeToken}` : ""}`);
     if (f.lineHeightPx != null) lines.push(`lineHeight: ${f.lineHeightPx},${varc(v?.lineHeight)}`);
     if (f.letterSpacingPx || v?.letterSpacing) lines.push(`letterSpacing: ${f.letterSpacingPx},${varc(v?.letterSpacing)}`);
-    if (f.appFamily) lines.push(`fontFamily: '${f.appFamily}',${varc(v?.family)}`);
-    else { lines.push(`// TODO: fontFamily — "${f.family}" unmapped${v?.family ? ` (var ${v.family})` : ""} (decisions.fontMap)`); push(`font "${f.family}" has no appFamily — set decisions.fontMap["${f.family}"]`); }
+    // Emit the font family straight from Figma. decisions.fontMap (appFamily) is an
+    // OPTIONAL override for when the app registers the face under a different name — it
+    // must never block generation, so the raw Figma family is the default.
+    const famName = f.appFamily ?? f.family;
+    if (famName) lines.push(`fontFamily: '${famName}',${varc(v?.family)}`);
     const fw = fontWeightValue(f.weight);
     if (fw) lines.push(`fontWeight: '${fw}',${v?.weight ? ` // var ${v.weight}` : f.weight ? ` // ${f.weight}` : ""}`);
     else if (f.weight) { lines.push(`// TODO: fontWeight — unmapped Figma weight "${f.weight}"${v?.weight ? ` (var ${v.weight})` : ""}`); push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`); }
