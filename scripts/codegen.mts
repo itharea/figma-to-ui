@@ -303,6 +303,27 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
   return lines.join("\n");
 }
 
+// Figma fontName.style (the weight-axis name) → the CSS/RN numeric fontWeight string
+// ('100'–'900'), valid for both React CSSProperties and React Native TextStyle. A
+// trailing italic/oblique qualifier is stripped (it belongs on fontStyle, not weight).
+// Returns null for an unrecognized name (caller leaves a TODO instead of guessing).
+function fontWeightValue(style: string | null): string | null {
+  if (!style) return null;
+  const w = style.toLowerCase().replace(/[\s_-]+/g, "").replace(/(italic|oblique)$/, "");
+  const map: Record<string, string> = {
+    thin: "100", hairline: "100",
+    extralight: "200", ultralight: "200",
+    light: "300",
+    "": "400", regular: "400", normal: "400", book: "400",
+    medium: "500",
+    semibold: "600", demibold: "600",
+    bold: "700",
+    extrabold: "800", ultrabold: "800",
+    black: "900", heavy: "900",
+  };
+  return map[w] ?? null;
+}
+
 // One TEXT node's typography style body, pushing TODOs for unmapped font / conflicts.
 function textStyleBody(n: IRNode, push: (m: string) => void): string {
   const lines: string[] = [];
@@ -313,6 +334,9 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
     if (f.letterSpacingPx) lines.push(`letterSpacing: ${f.letterSpacingPx},`);
     if (f.appFamily) lines.push(`fontFamily: '${f.appFamily}',`);
     else { lines.push(`// TODO: fontFamily — "${f.family}" unmapped (decisions.fontMap)`); push(`font "${f.family}" has no appFamily — set decisions.fontMap["${f.family}"]`); }
+    const fw = fontWeightValue(f.weight);
+    if (fw) lines.push(`fontWeight: '${fw}',${f.weight ? ` // ${f.weight}` : ""}`);
+    else if (f.weight) { lines.push(`// TODO: fontWeight — unmapped Figma weight "${f.weight}"`); push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`); }
     for (const cf of f.conflicts ?? []) push(`font ${cf.field} ${cf.declared}→~${cf.chosen} reconciliation conflict (box.y=${cf.boxY} vs lh=${cf.lhPx}) — confirm size`);
   }
   const cref = colorRef(n.color as any, `${n.name} text`, push);
