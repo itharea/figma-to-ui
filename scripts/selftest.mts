@@ -14,6 +14,7 @@ import {
   lineHeightPx,
   reconcileTextSize,
   classifyPlaceholderText,
+  disambiguateJustify,
 } from "./reconcile-lib.mts";
 import { resolveInstance } from "./resolve-lib.mts";
 
@@ -72,6 +73,79 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   // HEIGHT shorter than a single line — must flag.
   const r = reconcileTextSize({ type: "TEXT", fontSize: 16, size: { x: 200, y: 10 }, textAutoResize: "HEIGHT", lineHeight: { value: 24, units: "PIXELS" } });
   check("height shorter-than-line conflict", r.conflicts.length === 1);
+}
+
+// ── reconcile-lib: disambiguateJustify (space-evenly → space-between) ───────
+{
+  // 1. ROW, 2 children flush at both ends (header shape) → space-between.
+  const r = disambiguateJustify(
+    { mode: "row", justify: "space-evenly", paddingLeft: 20, paddingRight: 20 },
+    { w: 390, h: 40 },
+    [{ box: { x: 20, y: 0, w: 288, h: 40 } }, { box: { x: 308, y: 0, w: 62, h: 40 } }],
+  );
+  eq("dj row flush both ends → space-between", r, "space-between");
+}
+{
+  // 2. ROW, 2 children NOT flush (inset from both ends) → unchanged.
+  const r = disambiguateJustify(
+    { mode: "row", justify: "space-evenly", paddingLeft: 20, paddingRight: 20 },
+    { w: 390, h: 40 },
+    [{ box: { x: 80, y: 0, w: 60, h: 40 } }, { box: { x: 200, y: 0, w: 60, h: 40 } }],
+  );
+  eq("dj row inset → space-evenly", r, "space-evenly");
+}
+{
+  // 3. COLUMN flush top/bottom → space-between.
+  const r = disambiguateJustify(
+    { mode: "column", justify: "space-evenly", paddingTop: 4, paddingBottom: 4 },
+    { w: 60, h: 120 },
+    [{ box: { x: 0, y: 4, w: 20, h: 20 } }, { box: { x: 0, y: 84, w: 40, h: 32 } }],
+  );
+  eq("dj column flush top/bottom → space-between", r, "space-between");
+}
+{
+  // 4. justify not space-evenly → returned unchanged (helper only touches space-evenly).
+  const center = disambiguateJustify(
+    { mode: "row", justify: "center", paddingLeft: 20, paddingRight: 20 },
+    { w: 390, h: 40 },
+    [{ box: { x: 20, y: 0, w: 288, h: 40 } }, { box: { x: 308, y: 0, w: 62, h: 40 } }],
+  );
+  eq("dj center untouched", center, "center");
+  const flexStart = disambiguateJustify(
+    { mode: "row", justify: "flex-start", paddingLeft: 20, paddingRight: 20 },
+    { w: 390, h: 40 },
+    [{ box: { x: 20, y: 0, w: 288, h: 40 } }, { box: { x: 308, y: 0, w: 62, h: 40 } }],
+  );
+  eq("dj flex-start untouched", flexStart, "flex-start");
+}
+{
+  // 5. Absolute children excluded: 1 in-flow + 1 absolute → <2 in-flow → unchanged.
+  const r = disambiguateJustify(
+    { mode: "row", justify: "space-evenly", paddingLeft: 20, paddingRight: 20 },
+    { w: 390, h: 40 },
+    [
+      { box: { x: 20, y: 0, w: 288, h: 40 } },
+      { box: { x: 308, y: 0, w: 62, h: 40 }, positioning: "absolute" },
+    ],
+  );
+  eq("dj absolute excluded → space-evenly", r, "space-evenly");
+}
+{
+  // 6. Tolerance boundary (tol=1.5). First child offset from start by exactly tol,
+  // last child flush at end → still space-between.
+  const atTol = disambiguateJustify(
+    { mode: "row", justify: "space-evenly", paddingLeft: 20, paddingRight: 20 },
+    { w: 390, h: 40 },
+    [{ box: { x: 21.5, y: 0, w: 286.5, h: 40 } }, { box: { x: 308, y: 0, w: 62, h: 40 } }],
+  );
+  eq("dj offset == tol still flush → space-between", atTol, "space-between");
+  // Offset by tol+1 (2.5) → not flush → unchanged.
+  const overTol = disambiguateJustify(
+    { mode: "row", justify: "space-evenly", paddingLeft: 20, paddingRight: 20 },
+    { w: 390, h: 40 },
+    [{ box: { x: 22.5, y: 0, w: 285.5, h: 40 } }, { box: { x: 308, y: 0, w: 62, h: 40 } }],
+  );
+  eq("dj offset > tol not flush → space-evenly", overTol, "space-evenly");
 }
 
 // ── resolve-lib: hand-built index guards (a real .fig cannot author these) ───

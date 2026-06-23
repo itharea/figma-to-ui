@@ -38,6 +38,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type { IRNode } from "./screens-lib.mts";
 import { mapValue } from "./components-lib.mts";
+import { disambiguateJustify } from "./reconcile-lib.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];
@@ -243,6 +244,22 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
     const ref = colorRef({ hex: fill.hex ?? null, var: (fill as any).var ?? null, match: (fill as any).var ? "bound" : null }, `${n.name} background`, push);
     lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
   }
+  // image fill (improvement 5-image-fills): codegen can't embed bytes, so flag for
+  // export + leave a placeholder bg. Emitted AFTER the solid fill so a node with both
+  // keeps its solid bg AND still gets flagged.
+  const imgFill = s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
+  if (imgFill) {
+    const hash = (imgFill as any).imageHash as string;
+    push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — export to images/ and wire the src`);
+    if (web) {
+      lines.push(`// TODO: image — backgroundImage: 'url(images/${hash.slice(0, 16)}…)'`);
+      lines.push(`backgroundColor: '#eee', // image placeholder`);
+      lines.push(`backgroundSize: 'cover',`);
+    } else {
+      lines.push(`// TODO: image — render as <Image source={{ uri: '…/${hash.slice(0, 16)}…' }} />`);
+      lines.push(`backgroundColor: '#eee', // image placeholder`);
+    }
+  }
   if (s?.cornerRadius !== undefined) {
     if (typeof s.cornerRadius === "number") lines.push(`borderRadius: ${s.cornerRadius},`);
     else {
@@ -256,6 +273,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
   if (s?.strokes?.length) {
     const st = s.strokes[0];
     const cref = st.var ? `'${st.hex}' /* token ${st.var} */` : `'${st.hex ?? "transparent"}'`;
+    const lineStyle = st.dash?.length ? "dashed" : "solid";
     if (s.borderWidths) {
       const bw = s.borderWidths;
       if (bw.top) lines.push(`borderTopWidth: ${bw.top},`);
@@ -263,11 +281,14 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
       if (bw.bottom) lines.push(`borderBottomWidth: ${bw.bottom},`);
       if (bw.left) lines.push(`borderLeftWidth: ${bw.left},`);
       lines.push(`borderColor: ${cref}, // align ${st.align}`);
+      if (web) lines.push(`borderStyle: '${lineStyle}',`);
+      else if (st.dash?.length) lines.push(`borderStyle: 'dashed',`);
     } else {
       lines.push(`borderWidth: ${st.weight},`);
       lines.push(`borderColor: ${cref}, // align ${st.align}`);
+      if (web) lines.push(`borderStyle: '${lineStyle}',`);
+      else if (st.dash?.length) lines.push(`borderStyle: 'dashed',`);
     }
-    if (st.dash?.length) lines.push(web ? `// dashed stroke: ${JSON.stringify(st.dash)} (CSS border-style:dashed)` : `// dashed stroke: ${JSON.stringify(st.dash)} (RN borderStyle:'dashed')`);
   }
   if (s?.opacity !== undefined) lines.push(`opacity: ${s.opacity},`);
   if (s?.effects?.length) {
@@ -286,7 +307,10 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
     lines.push(`display: 'flex',`);
     lines.push(`flexDirection: '${l.mode}',`);
     if (l.gap !== undefined) lines.push(`gap: ${l.gap},`);
-    if (l.justify) lines.push(`justifyContent: '${l.justify}',`);
+    // SPACE_EVENLY→SPACE_BETWEEN disambiguation (improvement 8): the helper filters
+    // absolute/invisible children and requires >=2 in-flow.
+    const j = disambiguateJustify(l, n.box, n.children ?? []);
+    if (j) lines.push(`justifyContent: '${j}',`);
     if (l.align) lines.push(`alignItems: '${l.align}',`);
     if (l.paddingTop !== undefined) lines.push(`paddingTop: ${l.paddingTop},`);
     if (l.paddingRight !== undefined) lines.push(`paddingRight: ${l.paddingRight},`);
@@ -295,12 +319,21 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
     if (l.wrap) lines.push(`flexWrap: 'wrap',`);
   }
   // node as a flex child.
+  lines.push(...flexChildLines(n));
+  return lines.join("\n");
+}
+
+// A node's sizing AS A FLEX CHILD (improvement 3): grow/alignSelf/min/aspect. Shared
+// by nodeStyleBody (frames) and textStyleBody (text) — render.mts calls childSizingCss
+// for text too, so text nodes need the same grow/alignSelf/minW/minH.
+function flexChildLines(n: IRNode): string[] {
+  const lines: string[] = [];
   if (n.grow) lines.push(`flexGrow: ${n.grow},`);
   if (n.alignSelf) lines.push(`alignSelf: '${n.alignSelf}',`);
   if (n.minW) lines.push(`minWidth: ${n.minW},`);
   if (n.minH) lines.push(`minHeight: ${n.minH},`);
   if (n.aspectRatio) lines.push(`aspectRatio: ${n.aspectRatio},`);
-  return lines.join("\n");
+  return lines;
 }
 
 // Figma fontName.style (the weight-axis name) → the CSS/RN numeric fontWeight string
@@ -337,7 +370,9 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
     const varc = (name: string | null | undefined) => (name ? ` // var ${name}` : "");
     if (f.styleName) lines.push(`// token text-style: ${f.styleName}`);
     if (f.size != null) lines.push(`fontSize: ${f.size},${v?.size ? ` // var ${v.size}` : f.sizeToken ? ` // token ${f.sizeToken}` : ""}`);
-    if (f.lineHeightPx != null) lines.push(`lineHeight: ${f.lineHeightPx},${varc(v?.lineHeight)}`);
+    // line-height (improvement 2): web wants a string '36px' (React treats a unitless
+    // number as a multiplier); RN wants a bare number.
+    if (f.lineHeightPx != null) lines.push(`lineHeight: ${web ? `'${f.lineHeightPx}px'` : f.lineHeightPx},${varc(v?.lineHeight)}`);
     if (f.letterSpacingPx || v?.letterSpacing) lines.push(`letterSpacing: ${f.letterSpacingPx},${varc(v?.letterSpacing)}`);
     // Emit the font family straight from Figma. decisions.fontMap (appFamily) is an
     // OPTIONAL override for when the app registers the face under a different name — it
@@ -353,6 +388,8 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
   lines.push(`color: ${cref},`);
   if (n.text?.case) lines.push(`textTransform: '${n.text.case}',`);
   if (n.text?.align) lines.push(`textAlign: '${n.text.align}',`);
+  // text node as a flex child (improvement 3): same grow/alignSelf/minW/minH as frames.
+  lines.push(...flexChildLines(n));
   return lines.join("\n");
 }
 
@@ -364,6 +401,48 @@ function isVectorOnly(n: IRNode): boolean {
   if (n.type === "text" || n.type === "image") return false;
   const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
   return kids.length > 0 && kids.every(isVectorOnly);
+}
+
+// A single-icon WRAPPER: an instance/frame whose only visible child is itself a pure
+// vector subtree. These keep #4 flex-centering and must NOT switch to absolute (#6/#7).
+function isSingleIconWrapper(n: IRNode): boolean {
+  if (n.type !== "instance" && n.type !== "frame") return false;
+  const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
+  return kids.length === 1 && isVectorOnly(kids[0]);
+}
+
+// Strict bbox intersection (improvement 9): touching edges (==) do NOT count.
+function overlap(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number }
+): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+// Does THIS container position its children absolutely (improvements 6/7)?
+//   #7: a non-auto-layout container (no layout) positions children absolutely.
+//   #6: an auto-layout container positions children abs only when a child is absolute.
+// A single-icon wrapper keeps flex-centering (#4) — never positions absolutely.
+function containerPositionsChildren(n: IRNode, kids: IRNode[]): boolean {
+  if (!kids.length) return false;
+  if (isSingleIconWrapper(n)) return false;
+  if (!n.layout) return true; // #7
+  return kids.some((c) => c.positioning === "absolute"); // #6
+}
+
+// Interactive-archetype MARKER (improvement 10): a string TODO (no prop synthesis).
+function interactiveArchetype(n: IRNode): string | null {
+  const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
+  const named = (re: RegExp) => kids.some((c) => re.test(c.name ?? ""));
+  const slider =
+    /slider|track/i.test(n.name ?? "") ||
+    (named(/bar|track/i) && named(/thumb|fill|blue/i));
+  if (slider) return "slider — fill width is static; wire value/onChange";
+  const stepper =
+    /stepper|quantity/i.test(n.name ?? "") ||
+    (named(/minus|^-$/) && named(/plus|^\+$/));
+  if (stepper) return "stepper — count is static; wire value/onChange";
+  return null;
 }
 
 // --- the per-variant render: walk the subtree, emit JSX + collect style entries.
@@ -407,15 +486,74 @@ function renderVariant(v: any): VariantRender {
   const Box = web ? "div" : "View";
   const Txt = web ? "span" : "Text";
 
-  function emit(n: IRNode, depth: number): string {
+  // Compute the position/left/top/zIndex prefix for ONE node (improvements 6/7/9). A
+  // node is absolutely placed when it's stack-absolute, the parent positions all its
+  // children, or an overlap-group escalation (absOverride) forced it. We prepend these
+  // lines to the node's style body (emit holds the parent flag + the overlap decision).
+  function positionPrefix(
+    n: IRNode,
+    parentPositionsChildren: boolean,
+    absOverride: boolean,
+    zIndex: number | undefined,
+    kids: IRNode[]
+  ): string[] {
+    const placedAbs = n.positioning === "absolute" || parentPositionsChildren || absOverride;
+    const lines: string[] = [];
+    if (placedAbs) {
+      lines.push(`position: 'absolute',`);
+      lines.push(`left: ${n.box?.x ?? 0},`);
+      lines.push(`top: ${n.box?.y ?? 0},`);
+    } else if (containerPositionsChildren(n, kids) || kids.some((c) => c.positioning === "absolute")) {
+      // a container that positions descendants establishes a containing block — but
+      // 'absolute' already does that, so suppress 'relative' when itself abs-placed.
+      lines.push(`position: 'relative',`);
+    }
+    if (zIndex !== undefined) lines.push(`zIndex: ${zIndex},`);
+    return lines;
+  }
+
+  // Recurse into a node's visible children, computing per-child absolute/zIndex
+  // decisions (improvements 6/7/9). Returns the joined JSX of the children.
+  function emitChildren(n: IRNode, kids: IRNode[], depth: number): string {
+    const positionsKids = containerPositionsChildren(n, kids);
+    // #9 z-index: detect a positioned child overlapping a sibling (strict). If any
+    // overlap exists in the set, escalate the WHOLE overlapping set to absolute and
+    // emit zIndex by child-array order (later children paint on top → Figma order).
+    const boxOf = (c: IRNode) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 });
+    const overlapping = new Set<IRNode>();
+    for (let i = 0; i < kids.length; i++)
+      for (let j = i + 1; j < kids.length; j++)
+        if (overlap(boxOf(kids[i]), boxOf(kids[j]))) { overlapping.add(kids[i]); overlapping.add(kids[j]); }
+    const childIndex = new Map<IRNode, number>();
+    (n.children ?? []).forEach((c, i) => childIndex.set(c, i));
+    return kids
+      .map((c) => {
+        const inGroup = overlapping.has(c);
+        const absOverride = inGroup; // force abs for the whole overlapping set
+        const zIndex = inGroup ? childIndex.get(c) : undefined;
+        return emit(c, depth + 1, positionsKids, absOverride, zIndex);
+      })
+      .join("\n");
+  }
+
+  function emit(
+    n: IRNode,
+    depth: number,
+    parentPositionsChildren: boolean,
+    absOverride = false,
+    zIndex: number | undefined = undefined
+  ): string {
     const pad = "  ".repeat(depth);
     const sk = styleKey(n);
     const binds = bindingsOf.get(n.guid);
     const styleAttr = web ? `style={styles.${sk}}` : `style={styles.${sk}}`;
+    const kidsAll = (n.children ?? []).filter((c) => (c as any).visible !== false);
+    const posLines = positionPrefix(n, parentPositionsChildren, absOverride, zIndex, kidsAll);
+    const prefixBody = (body: string) => (posLines.length ? posLines.join("\n") + (body ? "\n" + body : "") : body);
 
     // TEXT node → <Text>/<span>. Bound text → prop (fallback to default), else literal.
     if (n.type === "text") {
-      styles.push({ key: sk, body: textStyleBody(n, push) });
+      styles.push({ key: sk, body: prefixBody(textStyleBody(n, push)) });
       const raw = n.text?.value ?? "";
       if (n.text?.placeholder) push(`text ${JSON.stringify(raw)} on "${n.name}" is a placeholder (${n.text.reason}) — confirm real copy`);
       let content: string;
@@ -437,26 +575,36 @@ function renderVariant(v: any): VariantRender {
     // INSTANCE_SWAP slot node → render the ReactNode prop where the instance sits.
     if (binds?.slot) {
       usedProps.add(binds.slot.name);
-      styles.push({ key: sk, body: nodeStyleBody(n, push) });
+      styles.push({ key: sk, body: prefixBody(nodeStyleBody(n, push)) });
       const el = `${pad}<${Box} ${styleAttr}>{${binds.slot.name}}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
 
     // vector art / an icon instance (subtree is purely vectors) → ONE sized
     // placeholder + an export-svg TODO, NOT a tree of meaningless empty/recolored
-    // boxes (codegen can't draw vector paths; export-svg.mts does).
+    // boxes (codegen can't draw vector paths; export-svg.mts does). The placeholder
+    // box flex-centers (improvement 4) so the inlined <svg>/<Image> ends up centered.
     if (n.type === "vector" || n.type === "boolean_operation" || (n.type === "instance" && isVectorOnly(n))) {
-      const box = [n.box?.w ? `width: ${n.box.w},` : "", n.box?.h ? `height: ${n.box.h},` : ""].filter(Boolean).join("\n");
-      styles.push({ key: sk, body: box });
+      const box = [
+        n.box?.w ? `width: ${n.box.w},` : "",
+        n.box?.h ? `height: ${n.box.h},` : "",
+        `display: 'flex',`,
+        `alignItems: 'center',`,
+        `justifyContent: 'center',`,
+      ].filter(Boolean).join("\n");
+      styles.push({ key: sk, body: prefixBody(box) });
       push(`icon/vector "${n.name}" (${n.guid}) — export via export-svg.mts and inline as <Svg>/<Image>`);
       const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid}) */}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
 
     // container / leaf box. Recurse into children.
-    styles.push({ key: sk, body: nodeStyleBody(n, push) });
-    const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
-    let inner = kids.map((c) => emit(c, depth + 1)).join("\n");
+    styles.push({ key: sk, body: prefixBody(nodeStyleBody(n, push)) });
+    const kids = kidsAll;
+    // interactive-archetype MARKER (improvement 10): a TODO in the variant block.
+    const arch = interactiveArchetype(n);
+    if (arch) push(`interactive: ${arch}`);
+    let inner = emitChildren(n, kids, depth);
     // a leaf box that has neither children nor binding: still emit (geometry/style).
     if (n.type === "instance" && !kids.length) {
       // an instance with no resolved children → leave a TODO (icon master placeholder).
@@ -481,7 +629,7 @@ function renderVariant(v: any): VariantRender {
     return `${pad}{${test} && (\n${ind(body, 2).replace(/^/, pad)}\n${pad})}`;
   }
 
-  const jsx = emit(subtree, 0);
+  const jsx = emit(subtree, 0, false);
   return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, todos };
 }
 

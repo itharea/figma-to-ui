@@ -11,7 +11,7 @@ import * as os from "os";
 import { spawnSync } from "child_process";
 import { load, key } from "./lib.mts";
 import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
-import { reconcileTextSize, letterSpacingToPx, lineHeightPx } from "./reconcile-lib.mts";
+import { reconcileTextSize, letterSpacingToPx, lineHeightPx, disambiguateJustify } from "./reconcile-lib.mts";
 import { rasterizeFile } from "./raster-lib.mts";
 
 const imagesFlagIdx = process.argv.indexOf("--images");
@@ -189,7 +189,8 @@ async function renderOverIR() {
     if (l.gap) out.push(`gap:${l.gap}px`);
     const pt = l.paddingTop ?? 0, pr = l.paddingRight ?? 0, pb = l.paddingBottom ?? 0, pl = l.paddingLeft ?? 0;
     if (pt || pr || pb || pl) out.push(`padding:${pt}px ${pr}px ${pb}px ${pl}px`);
-    if (l.justify) out.push(`justify-content:${l.justify}`);
+    const j = disambiguateJustify(l, n.box, n.children ?? []);
+    if (j) out.push(`justify-content:${j}`);
     if (l.align) out.push(`align-items:${l.align}`);
     if (l.wrap) out.push("flex-wrap:wrap");
     return out;

@@ -156,3 +156,45 @@ export function classifyPlaceholderText(
     return { placeholder: true, reason: "equals-master-default" };
   return { placeholder: false, reason: "looks-real" };
 }
+
+// SPACE_EVENLY-vs-SPACE_BETWEEN disambiguation (CODEGEN_BUGS #8: SPACE_EVENLY
+// emitted where the layout means SPACE_BETWEEN). Figma's primaryAxisAlignItems
+// reports SPACE_BETWEEN as "space-evenly" in some exports, but the two differ
+// geometrically: SPACE_BETWEEN pins the first child to the content start and the
+// last child to the content end (gaps only *between* children), while true
+// SPACE_EVENLY adds equal gaps *outside* the ends too. This is exact geometry
+// (no IO): if the first in-flow child starts at the padding edge and the last
+// ends at the opposite padding edge (within tol px), the intent is space-between.
+// Returns layout.justify unchanged in every other case.
+export function disambiguateJustify(
+  layout: { mode: "row" | "column"; justify?: string; paddingLeft?: number; paddingRight?: number; paddingTop?: number; paddingBottom?: number },
+  parentBox: { w?: number; h?: number } | undefined,
+  children: { box?: { x?: number; y?: number; w?: number; h?: number }; positioning?: string; visible?: boolean }[],
+  tol: number = 1.5
+): string | undefined {
+  if (layout.justify !== "space-evenly") return layout.justify;
+
+  // in-flow only: visible and laid-out by the auto-layout (not absolute)
+  const inFlow = children.filter((c) => c.visible !== false && c.positioning !== "absolute");
+  if (inFlow.length < 2) return layout.justify;
+
+  const row = layout.mode === "row";
+  const contentStart = (row ? layout.paddingLeft : layout.paddingTop) ?? 0;
+  const contentEnd = row
+    ? (parentBox?.w ?? 0) - (layout.paddingRight ?? 0)
+    : (parentBox?.h ?? 0) - (layout.paddingBottom ?? 0);
+
+  const start = (c: { box?: { x?: number; y?: number } }) => (row ? c.box?.x : c.box?.y) ?? 0;
+  const sorted = [...inFlow].sort((a, b) => start(a) - start(b));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+
+  const firstStart = row ? (first.box?.x ?? 0) : (first.box?.y ?? 0);
+  const lastEnd = row
+    ? (last.box?.x ?? 0) + (last.box?.w ?? 0)
+    : (last.box?.y ?? 0) + (last.box?.h ?? 0);
+
+  if (Math.abs(firstStart - contentStart) <= tol && Math.abs(lastEnd - contentEnd) <= tol)
+    return "space-between";
+  return layout.justify;
+}
