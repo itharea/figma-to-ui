@@ -93,6 +93,7 @@ export type IRTypography = {
   weight: string | null;
   lineHeightPx: number | null;
   "letterSpacingPx@size": number;
+  textCase: string | null; // raw fig textCase enum (UPPER/LOWER/TITLE/…) or null
   source: "text-style" | "grouped-variables";
   guid?: string;
 };
@@ -111,6 +112,7 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
         weight: n.fontName?.style ?? null,
         lineHeightPx: lineHeightPx(n.lineHeight, size ?? 0),
         "letterSpacingPx@size": letterSpacingToPx(n.letterSpacing, size ?? 0),
+        textCase: typeof n.textCase === "string" ? n.textCase : null,
         source: "text-style",
         guid: key(n.guid),
       };
@@ -141,6 +143,7 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
     weight: null,
     lineHeightPx: e.lh ?? null,
     "letterSpacingPx@size": e.ls != null && e.size != null ? letterSpacingToPx({ value: e.ls, units: "PIXELS" }, e.size) : 0,
+    textCase: null,
     source: "grouped-variables",
   }));
 }

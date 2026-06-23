@@ -47,6 +47,7 @@ import {
   scopedRawNodes,
   scopedScreenRoots,
   pageOf,
+  type IRTypography,
 } from "./ir-lib.mts";
 
 const IR_SCHEMA_VERSION = 1;
@@ -252,6 +253,11 @@ for (const set of sets) {
 console.error("pass 5: resolved screens (compose + reconcile + provenance)");
 const appFamily: Record<string, string> = {};
 for (const f of fonts) if (f.appFamily) appFamily[f.family] = f.appFamily;
+// Applied-text-style index: style guidKey → its typography token. reconcileText reads
+// it (via styleIdForText) as the CERTAIN designer-intent source for a node's
+// font/lineHeight/textCase, ahead of the geometry heuristic and a possibly-stale cache.
+const typeStyles = new Map<string, IRTypography>();
+for (const t of typography) if (t.guid) typeStyles.set(t.guid, t);
 
 const screenRoots = scopedScreenRoots(index, scopePages);
 const screenFiles: string[] = [];
@@ -270,7 +276,7 @@ for (const { page, root } of screenRoots) {
   let resolved: ResolvedNode;
   try {
     resolved = resolveScreen(index, rootKey);
-    irRoot = buildScreen(resolved, absMat(index, rootKey), appFamily, varIndex);
+    irRoot = buildScreen(resolved, absMat(index, rootKey), appFamily, varIndex, typeStyles);
   } catch (e) {
     console.error(`  ⚠ screen ${rootKey} (${root.name}): ${(e as Error).message} — skipped`);
     continue;
