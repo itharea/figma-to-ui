@@ -85,6 +85,17 @@ export function splitTokens(tokens: Token[]): {
 // variableResolvedType. Prefer text-style nodes; fall back to grouped Typography
 // FLOAT variables only when no text styles exist. letterSpacingPx@size is computed
 // from THAT entry's own font size via reconcile-lib (never a bare unit-less number).
+// Per-property variable bindings on a text style — each typography field references
+// its own Figma variable (the screenshot's Font/Size/Line height/Letter spacing rows:
+// Typography/family/Display, Typography/size/2xl, …). The typography analogue of a
+// fill's colorVar; each entry is the bound variable's NAME, or null when unbound.
+export type TypeVars = {
+  family: string | null;
+  weight: string | null;
+  size: string | null;
+  lineHeight: string | null;
+  letterSpacing: string | null;
+};
 export type IRTypography = {
   id: string;
   name: string;
@@ -93,12 +104,51 @@ export type IRTypography = {
   weight: string | null;
   lineHeightPx: number | null;
   "letterSpacingPx@size": number;
+  textCase: string | null; // raw fig textCase enum (UPPER/LOWER/TITLE/…) or null
+  vars: TypeVars; // per-property variable bindings (design tokens), names or null
   source: "text-style" | "grouped-variables";
   guid?: string;
 };
 
+// Pull the variable-alias guidKey out of one variableConsumptionMap entry payload.
+// Most fields nest it at variableData.value.alias.guid; FONT_STYLE wraps it in
+// value.fontStyleValue.asString.value.alias.guid. Returns null when not an alias.
+function consumptionAliasGuid(variableData: any): string | null {
+  const v = variableData?.value;
+  const alias = v?.alias ?? v?.fontStyleValue?.asString?.value?.alias;
+  const g = alias?.guid;
+  if (!g || g.sessionID === undefined || g.localID === undefined) return null;
+  return `${g.sessionID}:${g.localID}`;
+}
+
+// fig variableField → our TypeVars key. (FONT_STYLE carries the weight axis.)
+const TYPE_VAR_FIELD: Record<string, keyof TypeVars> = {
+  FONT_FAMILY: "family",
+  FONT_STYLE: "weight",
+  FONT_SIZE: "size",
+  LINE_HEIGHT: "lineHeight",
+  LETTER_SPACING: "letterSpacing",
+};
+
+// The per-property variable bindings on a TEXT STYLE node, resolved to variable NAMES
+// via `varNames` (variable guidKey → name). Reads node.variableConsumptionMap.entries.
+function textVarBindings(styleNode: any, varNames: Map<string, string>): TypeVars {
+  const out: TypeVars = { family: null, weight: null, size: null, lineHeight: null, letterSpacing: null };
+  const entries = styleNode?.variableConsumptionMap?.entries ?? [];
+  for (const e of entries) {
+    const field = TYPE_VAR_FIELD[e?.variableField];
+    if (!field) continue;
+    const gk = consumptionAliasGuid(e.variableData);
+    if (gk && varNames.has(gk)) out[field] = varNames.get(gk)!;
+  }
+  return out;
+}
+
 export function assembleTypography(index: ReturnType<typeof load>): IRTypography[] {
   const { nodes } = index;
+  // variable guidKey → name, to resolve each style's per-property variable bindings.
+  const varNames = new Map<string, string>();
+  for (const n of nodes) if (n.type === "VARIABLE" && n.guid) varNames.set(key(n.guid), n.name ?? "");
   const styles = nodes.filter((n) => n.styleType === "TEXT");
   if (styles.length) {
     return styles.map((n) => {
@@ -111,6 +161,8 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
         weight: n.fontName?.style ?? null,
         lineHeightPx: lineHeightPx(n.lineHeight, size ?? 0),
         "letterSpacingPx@size": letterSpacingToPx(n.letterSpacing, size ?? 0),
+        textCase: typeof n.textCase === "string" ? n.textCase : null,
+        vars: textVarBindings(n, varNames),
         source: "text-style",
         guid: key(n.guid),
       };
@@ -141,6 +193,8 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
     weight: null,
     lineHeightPx: e.lh ?? null,
     "letterSpacingPx@size": e.ls != null && e.size != null ? letterSpacingToPx({ value: e.ls, units: "PIXELS" }, e.size) : 0,
+    textCase: null,
+    vars: { family: null, weight: null, size: null, lineHeight: null, letterSpacing: null },
     source: "grouped-variables",
   }));
 }
