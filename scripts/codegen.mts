@@ -39,18 +39,34 @@ import * as path from "path";
 import type { IRNode } from "./screens-lib.mts";
 import { mapValue } from "./components-lib.mts";
 import { disambiguateJustify } from "./reconcile-lib.mts";
+import { cssVarName, tsAccessor } from "./theme-lib.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];
 const setName = argv[1];
 if (!dir || !setName || setName.startsWith("--"))
-  throw new Error("usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web]");
+  throw new Error("usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>]");
 const flag = (n: string) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 const outDir = flag("--out");
 const framework = (flag("--framework") ?? "rn").toLowerCase();
 if (framework !== "rn" && framework !== "web")
   throw new Error(`--framework must be rn|web (got "${framework}")`);
 const web = framework === "web";
+// Module a generated RN component imports `{ theme, defaultMode }` from (theme-gen.mts
+// output). web references CSS custom properties inline (no import). issue #17.
+const themeImport = flag("--theme-import") ?? "./theme";
+
+// A bound-variable value as a reference into the generated theme (issue #17), using the
+// SHARED theme-lib munging so codegen and theme-gen never drift. web → CSS var() (numeric
+// tokens are unit-less, so a px context wraps them in calc(... * 1px)); rn → a runtime
+// `theme[defaultMode].<path>` member access (requires the import variantFile injects).
+const themeRef = (varName: string, numeric: boolean): string =>
+  web
+    ? numeric
+      ? `'calc(var(${cssVarName(varName)}) * 1px)'`
+      : `'var(${cssVarName(varName)})'`
+    : `theme[defaultMode].${tsAccessor(varName)}`;
+const THEME_MARK = "theme[defaultMode]"; // sentinel: a variant file that contains it needs the import
 
 const readJSON = (rel: string): any => {
   const p = path.join(dir, rel);
@@ -223,7 +239,8 @@ function colorRef(
   label: string, todos: string[]
 ): string {
   if (!c || !c.hex) return "'transparent'";
-  if (c.var) return `'${c.hex}' /* token ${c.var} */`;
+  // Bound to a Figma variable → reference the generated theme, not the literal (issue #17).
+  if (c.var) return themeRef(c.var, false);
   if (c.token) return c.token;
   if (c.match === "none" || (typeof c.match === "string" && c.match.startsWith("nearest"))) {
     todos.push(`${label} color ${c.hex} is "${c.match}" against the theme — adjudicate in decisions.json before shipping the literal`);
@@ -274,7 +291,8 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
   // strokes + per-side widths (improvement 3-borders).
   if (s?.strokes?.length) {
     const st = s.strokes[0];
-    const cref = st.var ? `'${st.hex}' /* token ${st.var} */` : `'${st.hex ?? "transparent"}'`;
+    // route through colorRef so a bound stroke references the theme (issue #17), same as fills.
+    const cref = colorRef({ hex: st.hex ?? null, var: (st as any).var ?? null, match: (st as any).var ? "bound" : null }, `${n.name} border`, push);
     const lineStyle = st.dash?.length ? "dashed" : "solid";
     if (s.borderWidths) {
       const bw = s.borderWidths;
@@ -371,16 +389,22 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
     const v = f.vars;
     const varc = (name: string | null | undefined) => (name ? ` // var ${name}` : "");
     if (f.styleName) lines.push(`// token text-style: ${f.styleName}`);
-    if (f.size != null) lines.push(`fontSize: ${f.size},${v?.size ? ` // var ${v.size}` : f.sizeToken ? ` // token ${f.sizeToken}` : ""}`);
-    // line-height (improvement 2): web wants a string '36px' (React treats a unitless
-    // number as a multiplier); RN wants a bare number.
-    if (f.lineHeightPx != null) lines.push(`lineHeight: ${web ? `'${f.lineHeightPx}px'` : f.lineHeightPx},${varc(v?.lineHeight)}`);
-    if (f.letterSpacingPx || v?.letterSpacing) lines.push(`letterSpacing: ${f.letterSpacingPx},${varc(v?.letterSpacing)}`);
+    // A bound numeric/string typography property references the theme (issue #17);
+    // unbound keeps the reconciled literal. lineHeight (improvement 2): web wants a
+    // string '36px' (React treats a unitless number as a multiplier), RN a bare number.
+    if (f.size != null)
+      lines.push(v?.size ? `fontSize: ${themeRef(v.size, true)},` : `fontSize: ${f.size},${f.sizeToken ? ` // token ${f.sizeToken}` : ""}`);
+    if (f.lineHeightPx != null)
+      lines.push(v?.lineHeight ? `lineHeight: ${themeRef(v.lineHeight, true)},` : `lineHeight: ${web ? `'${f.lineHeightPx}px'` : f.lineHeightPx},`);
+    if (f.letterSpacingPx || v?.letterSpacing)
+      lines.push(v?.letterSpacing ? `letterSpacing: ${themeRef(v.letterSpacing, true)},` : `letterSpacing: ${f.letterSpacingPx},`);
     // Emit the font family straight from Figma. decisions.fontMap (appFamily) is an
     // OPTIONAL override for when the app registers the face under a different name — it
-    // must never block generation, so the raw Figma family is the default.
+    // must never block generation, so the raw Figma family is the default. A bound
+    // family references the theme string token.
     const famName = f.appFamily ?? f.family;
-    if (famName) lines.push(`fontFamily: '${famName}',${varc(v?.family)}`);
+    if (v?.family) lines.push(`fontFamily: ${themeRef(v.family, false)},`);
+    else if (famName) lines.push(`fontFamily: '${famName}',`);
     const fw = fontWeightValue(f.weight);
     if (fw) lines.push(`fontWeight: '${fw}',${v?.weight ? ` // var ${v.weight}` : f.weight ? ` // ${f.weight}` : ""}`);
     else if (f.weight) { lines.push(`// TODO: fontWeight — unmapped Figma weight "${f.weight}"${v?.weight ? ` (var ${v.weight})` : ""}`); push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`); }
@@ -689,12 +713,17 @@ function destructure(used: Set<string>): string {
 }
 
 function variantFile(r: VariantRender): string {
-  const imports = web
-    ? `import * as React from 'react';`
-    : `import * as React from 'react';\nimport { View, Text, StyleSheet } from 'react-native';`;
   const stylesDecl = web
     ? `const styles: Record<string, React.CSSProperties> = {\n${r.styles.map((s) => `  ${s.key}: {\n${ind(s.body, 4)}\n  },`).join("\n")}\n};`
     : `const styles = StyleSheet.create({\n${r.styles.map((s) => `  ${s.key}: {\n${ind(s.body, 4)}\n  },`).join("\n")}\n});`;
+  // RN files that reference the theme (theme[defaultMode]…) need the import; web uses
+  // inline CSS var() strings and needs none. issue #17.
+  const usesTheme = !web && (stylesDecl.includes(THEME_MARK) || r.jsx.includes(THEME_MARK));
+  const imports =
+    (web
+      ? `import * as React from 'react';`
+      : `import * as React from 'react';\nimport { View, Text, StyleSheet } from 'react-native';`) +
+    (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "");
   const todoBlock = r.todos.length
     ? "\n// === TODO (this variant — unconfirmed values) ===\n" + r.todos.map((t) => `// TODO: ${t}`).join("\n") + "\n"
     : "\n// (no open TODOs for this variant)\n";

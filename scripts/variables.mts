@@ -9,7 +9,7 @@ import { resolveVariables } from "./tokens-lib.mts";
 const index = load(process.argv[2]);
 const { nodes } = index;
 
-const sets = nodes.filter((n: any) => n.type === "VARIABLE_SET");
+const sets = nodes.filter((n: any) => n.type === "VARIABLE_SET" && !n.isSoftDeleted);
 for (const s of sets) {
   const modes = (s.variableSetModes ?? []).map((m: any) => `${m.id?.sessionID}:${m.id?.localID}=${m.name}`);
   console.log(`SET "${s.name}" [${key(s.guid)}] modes=[${modes.join(", ")}]`);

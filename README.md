@@ -84,6 +84,7 @@ workflow the agent follows.
 | `tree.mts`       | page/frame skeleton with node keys      |
 | `find.mts`       | locates nodes by name                   |
 | `variables.mts`  | design tokens from Figma variables      |
+| `theme-gen.mts`  | IR variable catalog → typed theme (ts/css) |
 | `dump.mts`       | per-screen implementation dump          |
 | `overrides.mts`  | per-instance text/color overrides       |
 | `export-svg.mts` | vector nodes to SVG                     |

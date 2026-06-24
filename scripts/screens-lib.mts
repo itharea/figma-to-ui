@@ -98,8 +98,10 @@ export type IRColor = {
 // GROUND-TRUTH hex a bound paint must render — the cached paint.color literal can
 // be STALE (instance-override paints bake a literal that drifts from the live
 // variable). `value` can be null only if the variable failed to resolve.
-export type VarIndexEntry = { name: string; value: string | null };
-// The build-ir variable index: variable guidKey → { name, value }.
+export type VarIndexEntry = { name: string; value: string | null; mode?: string };
+// The build-ir variable index: variable guidKey → { name, value, mode }.
+// `mode` is the collection default mode the `value` was resolved at (inspectability;
+// resolvers read only `name`/`value`).
 export type VarIndex = Map<string, VarIndexEntry>;
 
 // Side-effect-free resolver: given a paint and the variable index, return the

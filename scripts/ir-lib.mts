@@ -42,18 +42,34 @@ export type IRToken = {
   id: string; // ir node id ("token:<guid>")
   name: string;
   set: string;
+  // variableResolvedType (COLOR | FLOAT | STRING | BOOLEAN) — carried through so a
+  // consumer (theme-gen) can choose hex vs bare-number vs quoted-string emission.
+  type: string;
   modes: Record<string, string>;
   guid: string;
+  defaultMode: string; // the token's collection default mode (see Token.defaultMode)
   aliasOf?: Record<string, string>;
+  aliasTargets?: Record<string, string>; // mode name → direct alias target guidKey
 };
 const irToken = (t: Token): IRToken => ({
   id: `token:${t.guid}`,
   name: t.name,
   set: t.setName,
+  type: t.type,
   modes: t.modes,
   guid: t.guid,
+  defaultMode: t.defaultMode,
   ...(t.aliasOf ? { aliasOf: t.aliasOf } : {}),
+  ...(t.aliasTargets ? { aliasTargets: t.aliasTargets } : {}),
 });
+
+// The COMPLETE variable catalog as IRTokens — every resolved variable regardless of
+// type (COLOR/FLOAT/STRING/BOOLEAN), in source order. splitTokens() buckets a SUBSET
+// by sizing semantics (and drops STRING); this keeps the whole set so theme-gen has a
+// lossless source. Pure pass-through of resolveVariables' output.
+export function toIRTokens(tokens: Token[]): IRToken[] {
+  return tokens.map(irToken);
+}
 
 // Split resolved variables into the per-file token buckets. Alias chains are
 // already collapsed by resolveVariables; we keep `aliasOf` as provenance only.

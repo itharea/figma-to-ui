@@ -41,6 +41,7 @@ import {
 import {
   uniqueSlug,
   splitTokens,
+  toIRTokens,
   assembleTypography,
   assembleEffects,
   collectFonts,
@@ -132,21 +133,30 @@ console.error("pass 2a: variable tokens (alias chains collapsed)");
 // guids-scope is a Phase-7 refinement.
 const resolvedVars = resolveVariables(index);
 const { colors, spacing, radius } = splitTokens(resolvedVars);
+// The COMPLETE variable catalog (all types incl. STRING + the Numbers primitives) —
+// the lossless source theme-gen reads. splitTokens' colors/spacing/radius are a subset.
+const variables = toIRTokens(resolvedVars);
 
 // Variable-binding index (improvement A-variables / spec #3): variable guidKey →
-// { name, value }, built ONCE from the resolved COLOR variables. `value` is the
-// variable's RESOLVED concrete hex (single-mode in this decode → that mode's value;
-// alias chains already collapsed by resolveVariables). buildScreen's shared
-// resolver reads it to attach the design token AND substitute the resolved value
-// for the (possibly stale) cached paint.color on every variable-bound fill/stroke
-// (paint.colorVar ALIAS) as GROUND TRUTH — never re-resolved per node. SCOPED to
-// COLOR bindings (fill/text colorVar); numeric bindings (cornerRadius/stackSpacing
-// via variableConsumptionMap) are a clear TODO — that map's structure is ambiguous
-// and would be a guess here.
+// { name, value, mode }, built ONCE from the resolved COLOR variables. `value` is the
+// variable's RESOLVED concrete hex at the variable's collection DEFAULT mode (the set's
+// first variableSetModes entry, by Figma's own ordering) — NOT a blind first-of-object
+// pick, so it stays correct once a Light/Dark collection appears. Alias chains are
+// already collapsed by resolveVariables. buildScreen's shared resolver reads it to
+// attach the design token AND substitute the resolved value for the (possibly stale)
+// cached paint.color on every variable-bound fill/stroke (paint.colorVar ALIAS) as
+// GROUND TRUTH — never re-resolved per node. SCOPED to COLOR bindings (fill/text
+// colorVar); numeric bindings (cornerRadius/stackSpacing via variableConsumptionMap)
+// are a clear TODO — that map's structure is ambiguous and would be a guess here.
 const varIndex: VarIndex = new Map();
 for (const t of resolvedVars)
-  if (t.type === "COLOR") varIndex.set(t.guid, { name: t.name, value: Object.values(t.modes)[0] ?? null });
-console.error(`  variable-binding index: ${varIndex.size} color variable(s)`);
+  if (t.type === "COLOR")
+    varIndex.set(t.guid, {
+      name: t.name,
+      value: t.modes[t.defaultMode] ?? Object.values(t.modes)[0] ?? null,
+      mode: t.defaultMode,
+    });
+console.error(`  variable-binding index: ${varIndex.size} color variable(s); ${variables.length} variable(s) total`);
 
 // --- pass 2b: composite styles ---------------------------------------------
 console.error("pass 2b: composite typography + effects");
@@ -191,7 +201,9 @@ const stamp = (irId: string, guidKey: string) => {
 const writeJSON = (rel: string, data: any) =>
   fs.writeFileSync(path.join(outDir, rel), JSON.stringify(data, null, 2));
 
-for (const t of [...colors, ...spacing, ...radius]) stamp(t.id, t.guid);
+// `variables` is the SUPERSET of colors/spacing/radius (plus STRING + typography
+// FLOATs), all sharing the same `token:<guid>` ids — stamp it once (idempotent).
+for (const t of variables) stamp(t.id, t.guid);
 for (const t of typography) if (t.guid) stamp(t.id, t.guid);
 for (const e of effects) stamp(e.id, e.guid);
 
@@ -200,6 +212,7 @@ writeJSON("tokens/spacing.json", spacing);
 writeJSON("tokens/radius.json", radius);
 writeJSON("tokens/typography.json", typography);
 writeJSON("tokens/effects.json", effects);
+writeJSON("tokens/variables.json", variables); // complete catalog (theme-gen source)
 writeJSON("fonts.json", fonts);
 
 const componentFiles: string[] = [];
@@ -412,6 +425,7 @@ const manifest = {
   builtAt: new Date().toISOString(),
   scope: { kind: "pages", value: allPages ? "all" : scopeRaw },
   counts: {
+    variables: variables.length, // complete catalog (all types, post soft-delete)
     colors: colors.length,
     spacing: spacing.length,
     radius: radius.length,
@@ -430,7 +444,7 @@ const manifest = {
   theme: themePath ? { path: path.resolve(themePath), entries: theme.length } : null,
   decisions: decisionsPath ? { path: path.resolve(decisionsPath), hash: decisionsHash } : null,
   artifacts: {
-    tokens: ["colors.json", "spacing.json", "radius.json", "typography.json", "effects.json"],
+    tokens: ["variables.json", "colors.json", "spacing.json", "radius.json", "typography.json", "effects.json"],
     fonts: "fonts.json",
     components: componentFiles,
     rawMap: "raw-map.json",
@@ -441,5 +455,5 @@ const manifest = {
 };
 writeJSON("manifest.json", manifest);
 
-console.error(`wrote ${outDir}/  (${manifest.counts.components} components, ${fonts.length} fonts, ${colors.length}+${spacing.length}+${radius.length} primitive tokens)`);
+console.error(`wrote ${outDir}/  (${manifest.counts.components} components, ${fonts.length} fonts, ${variables.length} variables, ${colors.length}+${spacing.length}+${radius.length} primitive tokens)`);
 console.log(JSON.stringify({ out: outDir, ...manifest.counts }, null, 2));

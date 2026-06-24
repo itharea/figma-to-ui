@@ -18,6 +18,7 @@
     "tree": "node scripts/tree.mts",
     "find": "node scripts/find.mts",
     "variables": "node scripts/variables.mts",
+    "theme-gen": "node scripts/theme-gen.mts",
     "dump": "node scripts/dump.mts",
     "overrides": "node scripts/overrides.mts",
     "export-svg": "node scripts/export-svg.mts",
