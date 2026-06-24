@@ -28,6 +28,10 @@ import {
   emitTheme,
   type ThemeVar,
 } from "./theme-lib.mts";
+import { spawnSync } from "child_process";
+import * as path from "path";
+import { fileURLToPath } from "url";
+import { buildContract, decodePng, encodePng, diffImages, type RGBAImage } from "./fidelity-lib.mts";
 
 let pass = 0;
 let fail = 0;
@@ -288,6 +292,61 @@ const tv = (name: string, type: string, value: string, guid: string, target?: st
   const web = emitTheme([d], { framework: "web" });
   check("emit dangling: falls back to value", web.code.includes("--x-d: 99"), web.code);
   check("emit dangling: warns", web.warnings.some((w) => /dangling/.test(w)), JSON.stringify(web.warnings));
+}
+
+// ── fidelity-lib: contract builder (the elevation guardrail) ────────────────
+{
+  const node: any = {
+    id: "1:2", path: "/p", guid: "1:2", type: "frame", name: "Card",
+    box: { x: 0, y: 0, w: 100, h: 50, absX: 0, absY: 0 },
+    layout: { mode: "row", gap: 8, paddingTop: 4, paddingRight: 4, paddingBottom: 4, paddingLeft: 4, align: "center" },
+    style: { cornerRadius: 8, fills: [{ type: "solid", hex: "#ffffff" }] },
+    children: [
+      {
+        id: "1:3", path: "/p/c", guid: "1:3", type: "text", name: "Label",
+        box: { x: 0, y: 0, w: 40, h: 16, absX: 0, absY: 0 },
+        font: { family: "Inter", appFamily: null, weight: "Medium", size: 16, sizeSource: "style", sizeToken: null, styleName: "Body/M", vars: null, lineHeightPx: 20, letterSpacingPx: 0, conflicts: [] },
+        color: { hex: "#111111", var: null, varGuid: null, token: null, match: null },
+        text: { value: "Hi", placeholder: false },
+        style: { fills: [{ type: "solid", hex: "#111111" }] },
+        children: [],
+      },
+    ],
+  };
+  const recs = buildContract(node);
+  eq("contract: node count", recs.length, 2);
+  eq("contract: root styleKey matches codegen", recs[0].styleKey, "n_1_2");
+  eq("contract: root childCount", recs[0].childCount, 1);
+  eq("contract: root bg fill", recs[0].invariants.bg, "#ffffff");
+  eq("contract: root radius", recs[0].invariants.radius, "8");
+  check("contract: layout captured", recs[0].invariants.layout === "row gap8 align:center pad[4,4,4,4]", recs[0].invariants.layout);
+  check("contract: font size+family", /size16/.test(recs[1].invariants.font ?? "") && /fam:Inter/.test(recs[1].invariants.font ?? ""), recs[1].invariants.font);
+  eq("contract: text color", recs[1].invariants.color, "#111111");
+  check("contract: text fill not treated as bg", !("bg" in recs[1].invariants), JSON.stringify(recs[1].invariants));
+}
+
+// ── fidelity-lib: PNG roundtrip + image diff (the visual backstop) ───────────
+{
+  const img: RGBAImage = { width: 2, height: 2, rgba: new Uint8Array([
+    255, 0, 0, 255,   0, 255, 0, 255,
+    0, 0, 255, 255,   10, 20, 30, 200,
+  ]) };
+  const round = decodePng(encodePng(img));
+  eq("png roundtrip: dims", [round.width, round.height], [2, 2]);
+  eq("png roundtrip: pixels identical", Array.from(round.rgba), Array.from(img.rgba));
+
+  const white: RGBAImage = { width: 4, height: 4, rgba: new Uint8Array(4 * 4 * 4).fill(255) };
+  const black: RGBAImage = { width: 4, height: 4, rgba: (() => { const a = new Uint8Array(4 * 4 * 4); for (let i = 0; i < a.length; i++) a[i] = i % 4 === 3 ? 255 : 0; return a; })() };
+  approx("diff: identical → 0%", diffImages(white, white).score, 0);
+  approx("diff: white vs black → 100%", diffImages(white, black).score, 100, 0.5);
+}
+
+// ── raw.mts: dispatch smoke (confirms all 8 folded lib imports resolve) ──────
+{
+  const rawPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "raw.mts");
+  const r = spawnSync(process.argv[0], [rawPath], { encoding: "utf8" });
+  check("raw.mts no-arg → exit 1", r.status === 1, `status ${r.status}`);
+  check("raw.mts no-arg → prints usage", /usage: raw\.mts/.test(r.stderr ?? ""), (r.stderr ?? "").slice(0, 120));
 }
 
 // ── live fixtures (skip cleanly when no decode is reachable) ─────────────────

@@ -1,10 +1,18 @@
 # figma-to-ui
 
 Decode binary Figma `.fig` export files locally. No Figma account, no plugin, no REST
-API, no cloud. It's a small set of TypeScript scripts that turn a `.fig` file into
-authoritative design data (exact colors, font sizes, line heights, paddings, auto-layout
-rules, text content, components, SVG vectors, and image/video assets) so an AI coding
-agent has a pixel-perfect reference to implement the design as code, 1:1.
+API, no cloud. It's a small set of TypeScript scripts plus a **harness** that turns a
+`.fig` file into authoritative design data (exact colors, font sizes, line heights,
+paddings, auto-layout rules, text content, components, SVG vectors, and image/video
+assets) so an AI coding agent has a pixel-perfect reference to implement the design as
+code, 1:1.
+
+The harness compiles the `.fig` into a **Design IR** once, then drives a fixed sequence:
+build IR → generate a theme from the file's variables → scaffold each component set →
+elevate those scaffolds into clean components (with a fidelity guardrail that proves the
+1:1 mapping survives) → assemble screens by locating the designer's component instances
+under the screen nodes. `SKILL.md` is that harness; `REFERENCE.md` is the `.fig` format
+and node-field encyclopedia it points to.
 
 It's model-, company-, and toolchain-agnostic. The scripts are plain Node-compatible
 TypeScript (run them with Node, Bun, or tsx; install with npm, pnpm, yarn, or bun), and
@@ -37,8 +45,8 @@ project already uses:
 ## Install
 
 Install it as a skill: clone the repo into your agent's skills directory. The folder
-name becomes the skill name (`figma-to-ui`), and the agent picks up `SKILL.md` (the full
-`.fig` format spec and workflow) on its own.
+name becomes the skill name (`figma-to-ui`), and the agent picks up `SKILL.md` (the
+harness procedure) on its own, with `REFERENCE.md` alongside for field-level detail.
 
 | Agent       | Clone into                     |
 | ----------- | ------------------------------ |
@@ -72,25 +80,27 @@ design, or to pull specific pieces: the design tokens, one screen, an icon set, 
 Following `SKILL.md`, it unzips the export, decodes `canvas.fig` into queryable JSON,
 walks the node graph, and turns the exact node values into code.
 
-`SKILL.md` is the operational spec: the `.fig` format, the node-field reference, the
-component and override model, vector-to-SVG handling, and the step-by-step extraction
-workflow the agent follows.
+`SKILL.md` is the operational harness; `REFERENCE.md` is the reference it links to (the
+`.fig` format, the node-field tables, the component/override model, vector-to-SVG, the
+IR node schema, the pitfalls checklist, and every script's flags).
 
 ## What's in the toolkit
 
-| Script           | What it does                            |
-| ---------------- | --------------------------------------- |
-| `parse.mts`      | decodes `canvas.fig` (fig-kiwi) to JSON |
-| `tree.mts`       | page/frame skeleton with node keys      |
-| `find.mts`       | locates nodes by name                   |
-| `variables.mts`  | design tokens from Figma variables      |
-| `theme-gen.mts`  | IR variable catalog → typed theme (ts/css) |
-| `dump.mts`       | per-screen implementation dump          |
-| `overrides.mts`  | per-instance text/color overrides       |
-| `export-svg.mts` | vector nodes to SVG                     |
+| Stage              | Scripts                                                                 |
+| ------------------ | ----------------------------------------------------------------------- |
+| Decode & locate    | `parse`, `tree`, `find`, `node`                                         |
+| IR spine           | `build-ir`, `theme-gen`, `codegen`, `fidelity`, `ir-validate`, `render --ir`, `diff-ir`, `ir` |
+| Assets             | `export-svg`, `icons`                                                    |
+| Raw query / verify | `raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames>` |
+| Test               | `selftest.mts` (`npm test`)                                             |
 
-All scripts share `scripts/lib.mts` (the node-tree index and color helpers), so keep the
-`scripts/` directory together. Exact invocation for each one lives in `SKILL.md`.
+`build-ir.mts` is the centerpiece — it compiles the decoded message into the IR every
+other step reads. `theme-gen.mts` turns the file's variables into a typed theme,
+`codegen.mts` scaffolds each component set, and `fidelity.mts` is the guardrail that
+proves an elevated component still matches the IR. All scripts share `scripts/lib.mts`
+(the node-tree index and color helpers) and the pure `*-lib.mts` modules, so keep the
+`scripts/` directory together. Exact invocation for each lives in `SKILL.md` /
+`REFERENCE.md`.
 
 ## How it works
 
