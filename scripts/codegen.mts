@@ -75,23 +75,36 @@ const readJSON = (rel: string): any => {
 
 // --- locate the component file: components/<slug>.json, slug-tolerant ---------
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+// Component identifier (PascalCase) from a Figma name — the meta component name AND
+// the JSX/import name used for nested-component references (parity across both).
+const compIdent = (name: string) =>
+  (name ?? "").replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, ch: string) => ch.toUpperCase()).replace(/\s/g, "") || "Component";
 const compDir = path.join(dir, "components");
 if (!fs.existsSync(compDir)) throw new Error(`${dir}: no components/ — not an IR (or no component sets)`);
+
+// Registry of ALL catalog components, keyed by the set `guid` AND every
+// `variants[].guidKey`. An instance's `component.guid` (= symbolData.symbolID) is a
+// variant guidKey (or set guid), so this resolves a nested instance to its owning
+// component + the specific variant — the basis for emitting a child-component
+// reference instead of inlining. Built in the same pass that locates the target set.
+type RegEntry = { slug: string; Comp: string; comp: any; variant: any };
+const registry = new Map<string, RegEntry>();
 const wantSlug = slugify(setName);
+const availSlugs: string[] = [];
 let compFile: string | null = null;
 let comp: any = null;
 for (const f of fs.readdirSync(compDir)) {
   if (!f.endsWith(".json")) continue;
+  const fslug = f.replace(/\.json$/, "");
+  availSlugs.push(fslug);
   const c = JSON.parse(fs.readFileSync(path.join(compDir, f), "utf8"));
-  if (f.replace(/\.json$/, "") === wantSlug || slugify(c.name ?? "") === wantSlug) {
-    compFile = f;
-    comp = c;
-    break;
-  }
+  const Comp = compIdent(c.name ?? fslug);
+  if (c.guid) registry.set(c.guid, { slug: fslug, Comp, comp: c, variant: null });
+  for (const v of c.variants ?? []) if (v.guidKey) registry.set(v.guidKey, { slug: fslug, Comp, comp: c, variant: v });
+  if (fslug === wantSlug || slugify(c.name ?? "") === wantSlug) { compFile = f; comp = c; }
 }
 if (!comp) {
-  const avail = fs.readdirSync(compDir).filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, ""));
-  throw new Error(`no component set "${setName}" in ${dir}/components/. Available: ${avail.slice(0, 40).join(", ")}${avail.length > 40 ? " …" : ""}`);
+  throw new Error(`no component set "${setName}" in ${dir}/components/. Available: ${availSlugs.slice(0, 40).join(", ")}${availSlugs.length > 40 ? " …" : ""}`);
 }
 
 // --- axes / default variant ---------------------------------------------------
@@ -131,82 +144,83 @@ type Logical =
   | { name: string; tsType: "boolean"; role: "bool"; figNames: string[]; defKey: string }
   | { name: string; tsType: "React.ReactNode"; role: "slot"; figNames: string[]; defKey: string };
 
-const props: any[] = comp.props ?? [];
-const propGroups: { node: string; props: string[] }[] = comp.propGroups ?? [];
-// defKey → Phase A prop record (the stable identity; `name` can collide).
-const propByDefKey = new Map<string, any>();
-for (const p of props) propByDefKey.set(p.defKey, p);
-
-// Group props by the default-master node they bind (so a bool-visible + text pair on
-// the SAME node collapses to one). A prop with no binding still gets its own slot.
-const propsByNode = new Map<string, any[]>(); // node guid → props binding it
-const unbound: any[] = [];
-for (const p of props) {
-  if (!p.bindings?.length) { unbound.push(p); continue; }
-  for (const b of p.bindings) (propsByNode.get(b.node) ?? propsByNode.set(b.node, []).get(b.node)!).push(p);
-}
-
-// Build the logical prop list + a defKey → logical map. The COLLAPSE happens here:
-// on a node carrying a BOOL-visible prop AND a TEXT-characters prop, emit one optional
-// string; both defKeys point at that single logical prop.
-const logicals: Logical[] = [];
-const logicalByDefKey = new Map<string, Logical>();
-const usedNames = new Set<string>();
-// de-dupe an emitted prop name deterministically (collision → name2, name3, …).
-function uniqueName(base: string): string {
-  let n = base || "prop";
-  let i = 2;
-  while (usedNames.has(n)) n = `${base}${i++}`;
-  usedNames.add(n);
-  return n;
-}
-const seenDefKeys = new Set<string>();
-
-// Deterministic order: walk props[] in file order; the first prop of a collapsed pair
-// drives placement (its node's other prop is folded in).
-for (const p of props) {
-  if (seenDefKeys.has(p.defKey)) continue;
-  // find a collapse partner on the same node (bool-visible ⊕ text-characters).
-  const node = p.bindings?.find((b: any) => b.field === "visible" || b.field === "characters")?.node;
-  const onNode = node ? (propsByNode.get(node) ?? []) : [];
-  const textP = onNode.find((q) => q.kind === "text");
-  const boolP = onNode.find((q) => q.kind === "boolean");
-  if (textP && boolP) {
-    // COLLAPSE → one optional string. Name from the TEXT prop. Both defKeys map here.
-    const name = uniqueName(textP.name);
-    const lg: Logical = {
-      name, tsType: "string", role: "text", defKey: textP.defKey,
-      figNames: [textP.rawName, boolP.rawName], defText: typeof textP.default === "string" ? textP.default : null,
-    };
-    logicals.push(lg);
-    logicalByDefKey.set(textP.defKey, lg);
-    logicalByDefKey.set(boolP.defKey, lg);
-    seenDefKeys.add(textP.defKey);
-    seenDefKeys.add(boolP.defKey);
-    continue;
+// Derive the logical prop model for ANY component catalog record. The COLLAPSE
+// happens here: on a node carrying a BOOL-visible prop AND a TEXT-characters prop,
+// emit one optional string; both defKeys point at that single logical prop.
+// Standalone props become text / show<Bool> / slot. Returns the logical list plus a
+// defKey → logical map. Called for the generated `comp` (below) AND, on the
+// nested-component reference path, for a REFERENCED component (to map an instance's
+// overrides onto that component's props).
+function deriveLogicals(c: any): { logicals: Logical[]; logicalByDefKey: Map<string, Logical> } {
+  const cprops: any[] = c.props ?? [];
+  // Group props by the default-master node they bind (so a bool-visible + text pair on
+  // the SAME node collapses to one). A prop with no binding still gets its own slot.
+  const propsByNode = new Map<string, any[]>(); // node guid → props binding it
+  for (const p of cprops) {
+    if (!p.bindings?.length) continue;
+    for (const b of p.bindings) (propsByNode.get(b.node) ?? propsByNode.set(b.node, []).get(b.node)!).push(p);
   }
-  seenDefKeys.add(p.defKey);
-  if (p.kind === "text") {
-    const lg: Logical = { name: uniqueName(p.name), tsType: "string", role: "text", defKey: p.defKey, figNames: [p.rawName], defText: typeof p.default === "string" ? p.default : null };
-    logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
-  } else if (p.kind === "boolean") {
-    // a standalone BOOL binds a node's `visible` → name it show<Name> (idiomatic for a
-    // visibility toggle, and it frees the bare name for a content/text prop so a
-    // collapsed `Action`+`actionText` pair becomes `action`, not `action2`). Skip the
-    // prefix when the prop is already show/is/has-prefixed.
-    const showName = /^(show|is|has)[A-Z]/.test(p.name)
-      ? p.name
-      : "show" + p.name.charAt(0).toUpperCase() + p.name.slice(1);
-    const lg: Logical = { name: uniqueName(showName), tsType: "boolean", role: "bool", defKey: p.defKey, figNames: [p.rawName] };
-    logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
-  } else {
-    const lg: Logical = { name: uniqueName(p.name), tsType: "React.ReactNode", role: "slot", defKey: p.defKey, figNames: [p.rawName] };
-    logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+  const logicals: Logical[] = [];
+  const logicalByDefKey = new Map<string, Logical>();
+  const usedNames = new Set<string>();
+  // de-dupe an emitted prop name deterministically (collision → name2, name3, …).
+  const uniqueName = (base: string): string => {
+    let n = base || "prop";
+    let i = 2;
+    while (usedNames.has(n)) n = `${base}${i++}`;
+    usedNames.add(n);
+    return n;
+  };
+  const seenDefKeys = new Set<string>();
+  // Deterministic order: walk props[] in file order; the first prop of a collapsed pair
+  // drives placement (its node's other prop is folded in).
+  for (const p of cprops) {
+    if (seenDefKeys.has(p.defKey)) continue;
+    // find a collapse partner on the same node (bool-visible ⊕ text-characters).
+    const node = p.bindings?.find((b: any) => b.field === "visible" || b.field === "characters")?.node;
+    const onNode = node ? (propsByNode.get(node) ?? []) : [];
+    const textP = onNode.find((q) => q.kind === "text");
+    const boolP = onNode.find((q) => q.kind === "boolean");
+    if (textP && boolP) {
+      // COLLAPSE → one optional string. Name from the TEXT prop. Both defKeys map here.
+      const name = uniqueName(textP.name);
+      const lg: Logical = {
+        name, tsType: "string", role: "text", defKey: textP.defKey,
+        figNames: [textP.rawName, boolP.rawName], defText: typeof textP.default === "string" ? textP.default : null,
+      };
+      logicals.push(lg);
+      logicalByDefKey.set(textP.defKey, lg);
+      logicalByDefKey.set(boolP.defKey, lg);
+      seenDefKeys.add(textP.defKey);
+      seenDefKeys.add(boolP.defKey);
+      continue;
+    }
+    seenDefKeys.add(p.defKey);
+    if (p.kind === "text") {
+      const lg: Logical = { name: uniqueName(p.name), tsType: "string", role: "text", defKey: p.defKey, figNames: [p.rawName], defText: typeof p.default === "string" ? p.default : null };
+      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+    } else if (p.kind === "boolean") {
+      // a standalone BOOL binds a node's `visible` → name it show<Name> (idiomatic for a
+      // visibility toggle, and it frees the bare name for a content/text prop so a
+      // collapsed `Action`+`actionText` pair becomes `action`, not `action2`). Skip the
+      // prefix when the prop is already show/is/has-prefixed.
+      const showName = /^(show|is|has)[A-Z]/.test(p.name)
+        ? p.name
+        : "show" + p.name.charAt(0).toUpperCase() + p.name.slice(1);
+      const lg: Logical = { name: uniqueName(showName), tsType: "boolean", role: "bool", defKey: p.defKey, figNames: [p.rawName] };
+      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+    } else {
+      const lg: Logical = { name: uniqueName(p.name), tsType: "React.ReactNode", role: "slot", defKey: p.defKey, figNames: [p.rawName] };
+      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+    }
   }
+  return { logicals, logicalByDefKey };
 }
+
+const { logicals, logicalByDefKey } = deriveLogicals(comp);
 
 // --- identifiers --------------------------------------------------------------
-const Comp = (comp.name ?? setName).replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase()).replace(/\s/g, "") || "Component";
+const Comp = compIdent(comp.name ?? setName);
 const slug = slugify(comp.name ?? setName) || "component";
 function variantComponentName(v: any): string {
   const k = variantPropKey(v);
@@ -471,6 +485,88 @@ function interactiveArchetype(n: IRNode): string | null {
   return null;
 }
 
+// Render a nested-component REFERENCE for an instance node that resolves to another
+// catalog component (`entry`). Emits `<Comp variantAttrs propAttrs />`, mapping the
+// instance's RESOLVED values onto the referenced component's props (text/visibility)
+// via deriveLogicals (so the prop model matches that component's own generated Props),
+// records the import, and FLAGS any per-instance overrides it can't express as props
+// so nothing is silently dropped. Gated by the caller on `!isVectorOnly` (icons stay
+// on the export-svg path) and a self-reference guard.
+function componentReference(
+  n: IRNode,
+  entry: RegEntry,
+  pad: string,
+  push: (m: string) => void,
+  refImports: Map<string, string>
+): string {
+  refImports.set(entry.Comp, entry.slug);
+
+  // variant-selecting attrs — mirrors the meta component's Props (single-axis →
+  // `variant`; multi-axis → one kebab-named prop per axis). Values use the SAME
+  // mapValue() the union type is built from (parity with components-lib).
+  const rax: Record<string, string[]> = entry.comp.axes ?? {};
+  const axNames = Object.keys(rax);
+  const vprops: Record<string, string> = entry.variant?.props ?? {};
+  let attrs = "";
+  if (entry.variant && axNames.length === 1) {
+    attrs += ` variant="${mapValue(String(vprops[axNames[0]] ?? ""))}"`;
+  } else if (entry.variant && axNames.length > 1) {
+    for (const a of axNames) attrs += ` ${kebabProp(a)}="${mapValue(String(vprops[a] ?? ""))}"`;
+  }
+
+  // guid → resolved IR node for the instance subtree. Invisible nodes were dropped in
+  // toIR, so a visible-bound node being ABSENT means the override hid it.
+  const byGuid = new Map<string, IRNode>();
+  (function w(node: IRNode) {
+    if (!byGuid.has(node.guid)) byGuid.set(node.guid, node);
+    for (const c of node.children ?? []) w(c);
+  })(n);
+
+  const { logicalByDefKey } = deriveLogicals(entry.comp);
+  const propByDefKey = new Map<string, any>();
+  for (const p of entry.comp.props ?? []) propByDefKey.set(p.defKey, p);
+
+  const emitted = new Set<string>(); // logical names already set (collapse de-dupe)
+  for (const b of (entry.variant?.bindings ?? []) as any[]) {
+    const lg = logicalByDefKey.get(b.defKey);
+    if (!lg || emitted.has(lg.name)) continue;
+    if (lg.role === "text" && b.field === "characters") {
+      // collapsed (bool⊕text) → hidden unless a string is passed, so emit whenever the
+      // node is shown. standalone → emit only when it differs from the master default.
+      const conditional = lg.figNames.length > 1;
+      const target = byGuid.get(b.node);
+      if (target?.text) {
+        const val = target.text.value ?? "";
+        if (conditional || val !== (lg.defText ?? "")) {
+          attrs += ` ${lg.name}={${JSON.stringify(val)}}`;
+          emitted.add(lg.name);
+        }
+      }
+    } else if (lg.role === "bool" && b.field === "visible") {
+      // standalone visibility toggle: pass only when the resolved state differs from the
+      // prop default (absent ⇒ hidden, since invisible nodes were dropped in toIR).
+      const def = propByDefKey.get(b.defKey)?.default;
+      const shown = byGuid.has(b.node);
+      if (typeof def === "boolean" && shown !== def) {
+        attrs += shown ? ` ${lg.name}` : ` ${lg.name}={false}`;
+        emitted.add(lg.name);
+      }
+    } else if (lg.role === "slot" && b.field === "symbolId") {
+      push(`reference <${entry.Comp}/>: instance-swap prop "${lg.name}" not auto-wired — pass the swapped content (${n.guid})`);
+    }
+  }
+
+  const overrides = n.component?.overrides ?? 0;
+  if (overrides) {
+    const passed = [...emitted];
+    push(
+      `referenced <${entry.Comp}${attrs}/> for "${n.name}" (${n.guid}) — ${overrides} instance override(s)` +
+        `${passed.length ? `, passed [${passed.join(", ")}]` : ""}; confirm remaining overrides (image/style/icon) are handled`
+    );
+  }
+  return `${pad}<${entry.Comp}${attrs} />`;
+}
+
 // --- the per-variant render: walk the subtree, emit JSX + collect style entries.
 type VariantRender = {
   v: any;
@@ -480,6 +576,7 @@ type VariantRender = {
   jsx: string; // the JSX tree (indented for inside the return)
   styles: { key: string; body: string }[];
   usedProps: Set<string>; // logical prop names this variant references
+  refImports: Map<string, string>; // referenced child component: Comp identifier → file slug
   todos: string[];
 };
 
@@ -489,6 +586,7 @@ function renderVariant(v: any): VariantRender {
   const push = (m: string) => todos.push(`[${propKey}] ${m}`);
   const styles: { key: string; body: string }[] = [];
   const usedProps = new Set<string>();
+  const refImports = new Map<string, string>(); // nested child components referenced here
 
   // node guid → logical prop, via THIS variant's bindings (defKey-joined). A node may
   // carry a text binding, a visibility binding, an instance-swap binding, or several.
@@ -506,7 +604,7 @@ function renderVariant(v: any): VariantRender {
   const subtree = findNodeByGuid(v.guidKey);
   if (!subtree) {
     push(`variant subtree not found by guid ${v.guidKey} — emitting an empty shell`);
-    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, todos };
+    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, todos };
   }
 
   const Box = web ? "div" : "View";
@@ -623,6 +721,15 @@ function renderVariant(v: any): VariantRender {
       return wrapConditional(el, binds, depth, n);
     }
 
+    // NESTED COMPONENT → reference it as a child component instead of inlining the
+    // resolved subtree (the design uses it AS a component). Gated on !isVectorOnly so
+    // vector icons keep the export-svg path; self-references fall through to inline.
+    const refEntry = n.type === "instance" && n.component?.guid ? registry.get(n.component.guid) : undefined;
+    if (refEntry && refEntry.slug !== slug && !isVectorOnly(n)) {
+      const el = componentReference(n, refEntry, pad, push, refImports);
+      return wrapConditional(el, binds, depth, n);
+    }
+
     // vector art / an icon instance (subtree is purely vectors) → ONE sized
     // placeholder + an export-svg TODO, NOT a tree of meaningless empty/recolored
     // boxes (codegen can't draw vector paths; export-svg.mts does). The placeholder
@@ -673,7 +780,7 @@ function renderVariant(v: any): VariantRender {
   }
 
   const jsx = emit(subtree, 0, false);
-  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, todos };
+  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, todos };
 }
 
 const rendered = variants.map(renderVariant);
@@ -719,11 +826,19 @@ function variantFile(r: VariantRender): string {
   // RN files that reference the theme (theme[defaultMode]…) need the import; web uses
   // inline CSS var() strings and needs none. issue #17.
   const usesTheme = !web && (stylesDecl.includes(THEME_MARK) || r.jsx.includes(THEME_MARK));
+  // nested child components referenced by this variant → sibling-folder imports
+  // (all component folders share the same --out base, so '../<slug>'). Deterministic
+  // order; de-duped by component identifier.
+  const refImportLines = [...r.refImports.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([Ref, refSlug]) => `import { ${Ref} } from '../${refSlug}';`)
+    .join("\n");
   const imports =
     (web
       ? `import * as React from 'react';`
       : `import * as React from 'react';\nimport { View, Text, StyleSheet } from 'react-native';`) +
-    (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "");
+    (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "") +
+    (refImportLines ? `\n${refImportLines}` : "");
   const todoBlock = r.todos.length
     ? "\n// === TODO (this variant — unconfirmed values) ===\n" + r.todos.map((t) => `// TODO: ${t}`).join("\n") + "\n"
     : "\n// (no open TODOs for this variant)\n";
