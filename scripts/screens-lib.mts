@@ -14,7 +14,7 @@
 // (`color.{token,match}`, `font.{sizeToken,sizeMatch}`) stay null here; Phase 8's
 // --theme fills them.
 import * as crypto from "crypto";
-import { colorStr, mul, nodeMat, type Mat } from "./lib.mts";
+import { colorStr, key, mul, nodeMat, type Mat } from "./lib.mts";
 import {
   reconcileTextSize,
   deriveFontFromRender,
@@ -272,6 +272,13 @@ export type IRNode = {
   autoResize?: string | null;
   styleRuns?: number;
   unresolved?: string;
+  // INSTANCE nodes only: the master/variant this instance references (guidKey of
+  // symbolData.symbolID). Matches a component catalog entry's set `guid` or a
+  // `variants[].guidKey`, letting codegen emit a child-component REFERENCE instead
+  // of inlining the (resolved) subtree. `overrides` is the count of per-instance
+  // symbolOverrides — codegen passes what it can map to the component's props and
+  // FLAGS the rest so nothing is silently dropped. Absent on non-instance nodes.
+  component?: { guid: string; overrides?: number };
   children: IRNode[];
 };
 
@@ -766,6 +773,16 @@ function toIR(
     box,
     children: [],
   };
+
+  // INSTANCE → carry the master/variant link. symbolData survives resolve-lib's
+  // `...n` spread, so this is the guidKey of the referenced master (matches a
+  // component catalog set `guid` / `variants[].guidKey`). Lets codegen emit a
+  // child-component REFERENCE instead of inlining the resolved subtree.
+  const symId = (n as any).symbolData?.symbolID;
+  if (symId) {
+    const ov = (n as any).symbolData?.symbolOverrides?.length ?? 0;
+    node.component = { guid: key(symId), ...(ov ? { overrides: ov } : {}) };
+  }
 
   if ((n as any).type === "TEXT") {
     const { text, font, color, styleRuns } = reconcileText(n, appFamilyOf, varIndex, typeStyles);
