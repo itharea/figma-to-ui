@@ -18,6 +18,16 @@ import {
 } from "./reconcile-lib.mts";
 import { resolveInstance } from "./resolve-lib.mts";
 import { cornerRadiusOf } from "./screens-lib.mts";
+import {
+  cssVarName,
+  treePath,
+  tsAccessor,
+  constIdent,
+  literalFor,
+  topoOrder,
+  emitTheme,
+  type ThemeVar,
+} from "./theme-lib.mts";
 
 let pass = 0;
 let fail = 0;
@@ -216,6 +226,68 @@ function makeIndex(nodes: any[]): ReturnType<typeof load> {
   eq("override: composes one child", r.children.length, 1);
   eq("override: text → 'Real'", (r.children[0] as any)?.textData?.characters, "Real");
   eq("override: hasTextOverride flagged", r.children[0]?.hasTextOverride, true);
+}
+
+// ── theme-lib: name munging, literals, topo order, emit (issue #16/#17) ──────
+{
+  // name munging — the ONE rule codegen and theme-gen both consume.
+  eq("cssVarName praline", cssVarName("Color/praline/950"), "--color-praline-950");
+  eq("cssVarName comma decimal", cssVarName("Numbers/1,5"), "--numbers-1-5");
+  eq("treePath splits on slash only (comma stays in leaf)", treePath("Numbers/1,5"), ["numbers", "1,5"]);
+  eq("treePath lowercases first segment only", treePath("Color/praline/950"), ["color", "praline", "950"]);
+  eq("tsAccessor bracket for numeric leaf", tsAccessor("Color/praline/950"), "color.praline['950']");
+  eq("tsAccessor bracket for hyphen segment", tsAccessor("Typography/line-height/m"), "typography['line-height'].m");
+  eq("constIdent keeps case, joins on _", constIdent("Numbers/18"), "Numbers_18");
+  eq("constIdent comma → _", constIdent("Numbers/1,5"), "Numbers_1_5");
+}
+{
+  // literalFor by type.
+  eq("literalFor COLOR quoted", literalFor("COLOR", "#2a1e1e").code, "'#2a1e1e'");
+  eq("literalFor FLOAT bare", literalFor("FLOAT", "18").code, "18");
+  eq("literalFor STRING quoted", literalFor("STRING", "Lora").code, "'Lora'");
+  eq("literalFor BOOLEAN bare", literalFor("BOOLEAN", "true").code, "true");
+  const bad = literalFor("FLOAT", "alias→7:9");
+  check("literalFor non-numeric FLOAT → quoted + warning", bad.code === "'alias→7:9'" && !!bad.warning, JSON.stringify(bad));
+}
+const tv = (name: string, type: string, value: string, guid: string, target?: string): ThemeVar => ({
+  id: `token:${guid}`, name, set: "S", type, modes: { "Mode 1": value }, guid, defaultMode: "Mode 1",
+  ...(target ? { aliasTargets: { "Mode 1": target } } : {}),
+});
+{
+  // topo: a→b→c (c concrete) must emit c, then b, then a.
+  const a = tv("X/a", "FLOAT", "18", "a", "b");
+  const b = tv("X/b", "FLOAT", "18", "b", "c");
+  const c = tv("X/c", "FLOAT", "18", "c");
+  const { ordered, hadCycle } = topoOrder([a, b, c], "Mode 1");
+  eq("topo 2-hop order c,b,a", ordered.map((v) => v.guid), ["c", "b", "a"]);
+  check("topo no cycle", hadCycle === false);
+}
+{
+  const n18 = tv("Numbers/18", "FLOAT", "18", "n18");
+  const sm = tv("Typography/size/m", "FLOAT", "18", "sm", "n18");
+  const pr = tv("Color/praline/950", "COLOR", "#2a1e1e", "pr");
+  const fam = tv("Typography/family/Display", "STRING", "Lora", "fam");
+  const vars = [pr, n18, sm, fam];
+  const web = emitTheme(vars, { framework: "web" });
+  check("emit web: alias → var() ref", web.code.includes("--typography-size-m: var(--numbers-18)"), web.code);
+  check("emit web: concrete color literal", web.code.includes("--color-praline-950: #2a1e1e"), web.code);
+  check("emit web: no warnings", web.warnings.length === 0, JSON.stringify(web.warnings));
+  const rn = emitTheme(vars, { framework: "rn" });
+  check("emit rn: alias const references target", rn.code.includes("const Typography_size_m = Numbers_18"), rn.code);
+  check("emit rn: bracket key for numeric leaf", rn.code.includes("'950': Color_praline_950"), rn.code);
+  check("emit rn: STRING const quoted", rn.code.includes("const Typography_family_Display = 'Lora'"), rn.code);
+  // topological guarantee: a target const is declared BEFORE its referrer.
+  check("emit rn: target declared before referrer",
+    rn.code.indexOf("const Numbers_18") < rn.code.indexOf("const Typography_size_m") && rn.code.indexOf("const Numbers_18") >= 0,
+    rn.code);
+  check("emit rn: mode-keyed + defaultMode export", rn.code.includes("export const defaultMode = 'Mode 1'") && rn.code.includes("'Mode 1': (() =>"), rn.code);
+}
+{
+  // dangling alias (target not in catalog — e.g. soft-deleted) → value fallback + warning.
+  const d = tv("X/d", "FLOAT", "99", "d", "missing");
+  const web = emitTheme([d], { framework: "web" });
+  check("emit dangling: falls back to value", web.code.includes("--x-d: 99"), web.code);
+  check("emit dangling: warns", web.warnings.some((w) => /dangling/.test(w)), JSON.stringify(web.warnings));
 }
 
 // ── live fixtures (skip cleanly when no decode is reachable) ─────────────────

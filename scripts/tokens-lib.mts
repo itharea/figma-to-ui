@@ -13,8 +13,19 @@ export type Token = {
   type: string; // variableResolvedType: COLOR | FLOAT | BOOLEAN | STRING
   modes: Record<string, string>; // mode name → concrete value (hex | number-as-string | text)
   guid: string;
+  // the variable's collection DEFAULT mode (its set's first variableSetModes entry,
+  // by Figma's own ordering) — the canonical mode to resolve a binding against when
+  // no mode context is available (e.g. a screen's bound color). Falls back to the
+  // first resolved mode name when the set has no declared modes.
+  defaultMode: string;
   // alias provenance per mode (mode name → "Numbers/18" chain), present only when aliased
   aliasOf?: Record<string, string>;
+  // DIRECT alias target per mode (mode name → target variable guidKey). The first hop
+  // of the alias, NOT the collapsed concrete value — lets a consumer express the alias
+  // as a CODE REFERENCE to the target token (e.g. var(--numbers-18)) rather than baking
+  // the value. Present only on the modes that are aliased. Keyed by guid (never name) so
+  // it joins straight onto another Token.guid.
+  aliasTargets?: Record<string, string>;
 };
 
 // Concrete value of a variableData value (no alias following). Returns null for
@@ -74,11 +85,26 @@ export function resolveVariables(index: ReturnType<typeof load>): Token[] {
     return { value: concreteValue(vd), chain: [t.name ?? tk] };
   };
 
+  // The collection DEFAULT mode name = the set's FIRST variableSetModes entry (Figma's
+  // own ordering). Used to resolve a binding when no mode context is available.
+  const defaultModeName = (setId: any): string | null => {
+    const s = setId ? byKey.get(key(setId.guid ?? setId)) : null;
+    const first = (s?.variableSetModes ?? [])[0];
+    return first ? modeName(setId, first.id) : null;
+  };
+
   const tokens: Token[] = [];
   for (const n of nodes) {
-    if (n.type !== "VARIABLE") continue;
+    // Skip SOFT-DELETED variables: Figma retains deleted variables in the export
+    // (isSoftDeleted) for sync/recovery, but they are not part of the live token
+    // system — emitting them pollutes every downstream token file. followAlias still
+    // traverses byKey (the full node index), so a LIVE alias through a soft-deleted
+    // intermediate keeps resolving to a value; only the deleted node's own output row
+    // is dropped.
+    if (n.type !== "VARIABLE" || n.isSoftDeleted) continue;
     const modes: Record<string, string> = {};
     const aliasOf: Record<string, string> = {};
+    const aliasTargets: Record<string, string> = {};
     for (const e of n.variableDataValues?.entries ?? []) {
       const mn = modeName(n.variableSetID, e.modeID);
       const v = e.variableData?.value;
@@ -86,6 +112,7 @@ export function resolveVariables(index: ReturnType<typeof load>): Token[] {
         const r = followAlias(v.alias.guid ?? v.alias, e.modeID, new Set([key(n.guid)]));
         modes[mn] = r.value ?? `alias→${key(v.alias.guid ?? v.alias)}`;
         aliasOf[mn] = r.chain.join(" → ");
+        aliasTargets[mn] = key(v.alias.guid ?? v.alias); // DIRECT (first-hop) target guid
       } else {
         const c = concreteValue(v);
         modes[mn] = c ?? JSON.stringify(v);
@@ -97,7 +124,9 @@ export function resolveVariables(index: ReturnType<typeof load>): Token[] {
       type: n.variableResolvedType ?? "?",
       modes,
       guid: key(n.guid),
+      defaultMode: defaultModeName(n.variableSetID) ?? Object.keys(modes)[0] ?? "default",
       ...(Object.keys(aliasOf).length ? { aliasOf } : {}),
+      ...(Object.keys(aliasTargets).length ? { aliasTargets } : {}),
     });
   }
   return tokens;
