@@ -34,6 +34,63 @@ vector→SVG, the IR node schema, the pitfalls checklist, and every script's fla
 Reach for it when you need a specific field; you don't need to read it to follow
 this harness.
 
+---
+
+## Operating principles (read before executing)
+
+Implementing a whole design is long and content-intensive. These principles keep
+the work faithful and keep you from inventing values. They override any instinct
+to "just produce something."
+
+1. **Deterministic by default.** Everything `build-ir` emits is a pure function of
+   the `.fig` bytes. You do not guess geometry, color, type, or structure — you
+   read it from the IR. If a value isn't in the IR, you find it with a raw query or
+   you ask; you never make it up.
+2. **Judgment lives in named slots — nowhere else.** Genuine human decisions are
+   confined to **`decisions.json`** (everything that changes IR *data* — fonts,
+   colors, placeholder copy, canonical pages) plus two **inline codegen choices**
+   that don't change the IR: *what to build* (the codegen scope — never blindly
+   generate the whole catalog) and *how to handle icons/vectors*. Everything else is
+   mechanical.
+3. **STOP at every decision point.** The [Decision points](#decision-points--stop-and-ask-the-user)
+   table lists every place you must stop and ask the user. An unanswered decision is
+   a **blocker, not a default** — do not ship a master default, a bare literal, or a
+   guessed answer to skip a question.
+4. **Resolve every `// TODO` before a component ships.** The codegen scaffold marks
+   every unconfirmed value with a `// TODO`. A component is not done while one
+   remains. See [Step 5](#step-5--elevate-the-scaffold-the-core-of-the-harness) for
+   the auto-resolve-vs-ask taxonomy.
+5. **Prove 1:1, don't assert it.** Fidelity is established by the guardrail
+   (`fidelity.mts` contract + `render --ir` diff + `ir-validate.mts` gate), not by
+   your judgement that it "looks right."
+6. **One named artifact per fig.** Parse each `.fig` into a **named** `msg-<name>.json`
+   and compile a matching `ir-<name>/`; never reuse a bare `message.json` (two
+   designs collide and you can't tell which decode you're reading).
+
+## Decision points — STOP and ask the user
+
+The harness is deterministic except for genuine judgment calls. At each point below,
+STOP, present the options (with the inventory the scripts give you), and get the
+user's answer. Rows marked **→ decisions.json** are *data* decisions: record the
+answer there and re-build, so the result stays reproducible (see
+[Determinism contract](#determinism-contract)). The codegen scope and the icon policy
+are the decisions that don't change IR data, so they stay inline.
+
+| When | Decision to ask | Where the answer lives |
+|---|---|---|
+| Step 1 (after decode) | Which pages are **canonical** vs. scratchpad/wip/notes | `canonicalPages` **→ decisions.json** |
+| Steps 2 & 5 | **Placeholder copy** (master defaults like `Test`/`Heirloom`) — what's the real text? | `placeholders` **→ decisions.json** |
+| Steps 2 & 5 | **`match:none` / unconfirmed `nearest` colors** — which token, or deliberately new? | `tokenConfirms` / `tokenRejects` **→ decisions.json** |
+| Steps 2 & 5 | **Unmapped fonts** (no app-family) — which app font? | `fontMap` **→ decisions.json** |
+| Step 4 (before codegen) | **Which components to build** — scope to the task; exclude platform/system & device-chrome sets (iOS/Android keyboards, status bars, home indicators, device frames like `iphone-x-or-newer`) | inline — codegen scope |
+| Steps 7 & 5 | **Icon/vector strategy** — library import vs. export-svg vs. hybrid (ask every run) | inline — drives TODO resolution |
+| Step 6 (brownfield) | **Token conflicts** — fig value vs. an existing repo token; intentional divergence? | ask before overwriting; `issues.json` is the list |
+
+`ir-validate.mts` (the ship gate) stays red until the `decisions.json` rows are
+authored — a red gate **is** the automated "ask, don't ship" list.
+
+---
+
 ## Setup
 
 ```sh
@@ -45,11 +102,6 @@ npm init -y >/dev/null 2>&1 && npm i kiwi-schema   # or pnpm/yarn/bun add
 Scripts are plain Node-compatible `.mts` — run with `node <script>.mts …`
 (Node ≥ 22.18 runs TypeScript directly and ships `zstd`), or `bun` / `npx tsx`.
 The only hard floor is **Node ≥ 22.15 or Bun** (for `zlib.zstdDecompressSync`).
-
-**Work-dir hygiene — one named file per fig.** Parse each `.fig` into a **named**
-`msg-<name>.json` and compile it into a matching `ir-<name>/`; never reuse a bare
-`message.json` across files (two designs collide and you can't tell which decode
-you're reading).
 
 ---
 
@@ -64,8 +116,10 @@ node find.mts  $WORK/msg-<name>.json "<regex>"
 
 Page/frame **names** carry the information architecture. Reject scratchpad pages
 (`trial`, `old`, `draft`, `wip`, `-`, or local-language equivalents) and read any
-`todo`/notes page — designers leave undecided-content notes there. **Confirm the
-canonical pages with the user** before compiling; the IR build is scoped to them.
+`todo`/notes page — designers leave undecided-content notes there.
+
+> **Decision point —** *Confirm the canonical pages with the user before compiling*
+> (the IR build is scoped to them). Record them in `canonicalPages`.
 
 ## Step 2 — Build the IR
 
@@ -99,7 +153,12 @@ node ir-validate.mts ir-<name>     # the SHIP GATE — exits non-zero on any
 A failing gate **is** the automated "ask, don't ship" list: each line names a
 node `guid` and the `decisions.json` entry that resolves it. Drive it to green by
 authoring `decisions.json`, then re-build. (See the `decisions.json` schema at
-the end.)
+the end.) Detection is deterministic; **resolution is the decision** — the
+unmapped-font / `match:none`-color / placeholder rows are all
+[decision points](#decision-points--stop-and-ask-the-user): ask, then record.
+
+> **Done when —** `ir-validate.mts` exits **green** (zero unresolved tokens, fonts,
+> placeholders, or conflicts).
 
 ## Step 3 — Theme from the variables (the foundation)
 
@@ -120,7 +179,15 @@ in code. Generate the theme first so the next step can point components at it.
 
 ## Step 4 — Components: the faithful scaffold
 
-For each designer **component set**, generate the scaffold from its master:
+> **Decision point — scope what gets built (before you codegen).** A `.fig` usually
+> ships platform/system & device-chrome sets that are NOT your product: iOS/Android
+> **keyboards**, **status bars**, **home indicators**, **device frames**
+> (`iphone-x-or-newer`), system nav bars, and `time`/battery/signal chrome. Inventory
+> the sets first (`ir-<name>/manifest.json` → `components[]`, or `ls ir-<name>/components/`),
+> flag the likely-irrelevant ones by name, propose a task-relevant scope, and **confirm
+> with the user**. Generate only the in-scope sets — never the whole catalog by default.
+
+For each **in-scope** component set, generate the scaffold from its master:
 
 ```sh
 node codegen.mts ir-<name> <set> --framework web --out src/components --theme-import ../theme \
@@ -141,6 +208,12 @@ photos, thumbnails) into `<slug>/assets/` and emits a real reference — web
 — so the elevate step sees the actual image instead of a placeholder box. Without
 it, image fills stay as `// TODO` (re-run with `--images` to wire them).
 
+**The scaffold marks, it never guesses.** It leaves a clearly-marked `// TODO` on
+every placeholder text, unmapped font, open conflict, `match:none` color, and
+vector/icon (it *cannot* draw vector paths). It never bakes an unconfirmed value
+silently — every TODO is attributed to the variant in its block and aggregated in
+the file's `REVIEW` block. Those TODOs are Step 5's worklist.
+
 **Why one file per variant, not CSS conditionals?** On purpose. Figma variants
 frequently have **different frame structures** — a `SingleLine` header has no
 subtitle node; a `Modal` header adds a close-icon slot; a column in one variant
@@ -157,9 +230,6 @@ would actually ship — **without breaking the 1:1 mapping**.
 - **Re-bind to the theme.** Every value annotated `// var …` / `// token …`, and
   every bound value, must reference the generated theme (`theme.color.praline[950]`
   / `var(--color-praline-950)`), not a literal.
-- **Resolve the `// TODO`s.** Placeholder copy = undecided content — **ask the
-  user**, don't ship `Test`/master defaults. Adjudicate `match:none`/`nearest`
-  colors and unmapped fonts in `decisions.json` and re-build.
 - **Name things.** Replace opaque style keys (`n_n_5a20…`) with semantic names.
 - **Extract shared sub-structure** into small components (a title block, an
   action row) and reuse across variants.
@@ -168,6 +238,25 @@ would actually ship — **without breaking the 1:1 mapping**.
   drive the difference from a prop. If their node trees differ, **keep them
   separate**. Use the fidelity contract (below) to decide: identical structure =
   identical contract trees.
+
+**Resolve EVERY `// TODO` — a component must not ship with one open.** Two classes:
+
+- **Auto-resolvable by you, deterministically (no user input needed):**
+  - *Vector/icon* TODOs (`// TODO: export "<name>" via export-svg`) → resolve per
+    the **icon/vector policy** chosen in Step 7: a library-named icon becomes an
+    import + `<Icon/>`; an exported vector becomes an inlined `<svg>` / `<Image>`.
+    No `export-svg` placeholder box may remain.
+  - *Image fills* → already extracted + wired if Step 4 ran with `--images`; if a
+    TODO remains, re-run codegen with `--images`.
+  - *Color / font* TODOs → once the decision is recorded in `decisions.json` and the
+    IR re-built, the value is confirmed; re-bind to the theme.
+  - *Interactive-archetype markers* (slider/stepper) → wire `value`/`onChange`.
+  - Opaque style-key names → rename (above).
+- **Require a user decision first** (these are [decision points](#decision-points--stop-and-ask-the-user)):
+  *placeholder copy*, *`match:none`/`nearest` colors*, *unmapped fonts*, *icon
+  strategy*. Resolve via `decisions.json` + re-build (the data ones) or the chosen
+  icon policy. **Never** ship a `Test`/master default or a bare literal to silence a
+  TODO — ask.
 
 **Don't break (the invariants):** per-node geometry (w/h/padding/gap), typography
 (family/size/lineHeight/letterSpacing/weight/case), color tokens, per-side
@@ -200,7 +289,12 @@ you adjudicate — real copy replacing a placeholder is an expected, legitimate 
 node ir-validate.mts ir-<name>
 ```
 
-Loop until the contract holds, the render matches, and the gate is green.
+> **Definition of Done (per component)** — all must hold before assembling screens:
+> - [ ] **Zero `// TODO`** left (the `REVIEW` block is empty).
+> - [ ] Every bound / `var` / `token` value references the generated theme, not a literal.
+> - [ ] No placeholder / master-default copy remains.
+> - [ ] Icons & vectors resolved per the chosen policy (no `export-svg` placeholder boxes).
+> - [ ] `fidelity.mts` contract holds; `render --ir` matches; `ir-validate.mts` is green.
 
 ## Step 6 — Assemble the screens
 
@@ -228,8 +322,11 @@ node render.mts --ir ir-<name> <screen-id> out.png
 **Brownfield?** If the consuming repo already has a theme, switch to **map mode**:
 run `build-ir … --theme <path>`, match fig values to code tokens **by value, never
 by name**, and **respect intentional divergence** (a deliberate token alias, a
-licensed-font substitution). Prefer asking over overwriting — `issues.json`'s
-`nearest`/`none` rows are the "ask, don't overwrite" list.
+licensed-font substitution).
+
+> **Decision point —** *Prefer asking over overwriting.* `issues.json`'s
+> `nearest`/`none` rows are the "ask, don't overwrite" list — confirm a conflicting
+> token with the user before changing it.
 
 ## Step 7 — Assets
 
@@ -238,11 +335,29 @@ node icons.mts      msg-<name>.json <screen-guidKey>   # icon instances → libr
 node export-svg.mts msg-<name>.json <guidKey> out.svg [--png]   # vector logos/illustrations
 ```
 
-Icon layer names usually identify a public library (Phosphor: `MagnifyingGlass`,
-`CaretUpDown`) — use the package instead of exporting every icon. **Raster image
-fills referenced by a component are already extracted + wired** when Step 4 ran
-with `--images` (into `<slug>/assets/`); only `export-svg` vectors/logos and any
-video fills (from the zip's `videos/` by content hash) remain to wire by hand.
+The scaffold deliberately leaves every vector/icon as a `// TODO` (codegen cannot
+draw paths). How you resolve those TODOs is a **decision the user owns** — there is
+no universal default, so **ask every run**.
+
+> **Decision point — pick the icon/vector strategy (ask the user, every run).**
+> Run `icons.mts` first to inventory the icon instances and the `AppIconName` union,
+> then present the inventory + a recommended policy and get the user's choice:
+> - **(a) Existing icon library** (Phosphor / lucide / custom) — the natural default
+>   when layer names are library exports (Phosphor: `MagnifyingGlass`, `CaretUpDown`).
+>   Map each icon-instance layer name to a library import. **Do not export.**
+> - **(b) Export every vector** via `export-svg.mts`, inline as `<svg>` /
+>   `react-native-svg`. Use when there is no library or names aren't recognizable.
+> - **(c) Hybrid (often best)** — library-named icons → import (a); custom logos /
+>   illustrations / brand marks → `export-svg` (b).
+>
+> Heuristic: if `icons.mts` finds library-named instances, propose (a)/(c); if it
+> finds none, propose (b). After the user chooses, resolve **every** vector `// TODO`
+> per that policy in Step 5 — no `export-svg` placeholder box may remain.
+
+**Raster image fills referenced by a component are already extracted + wired** when
+Step 4 ran with `--images` (into `<slug>/assets/`); only `export-svg` vectors/logos
+and any video fills (from the zip's `videos/` by content hash) remain to wire by
+hand.
 
 ---
 
@@ -250,9 +365,11 @@ video fills (from the zip's `videos/` by content hash) remain to wire by hand.
 
 Everything `build-ir` emits is a pure function of the `.fig` bytes **except** the
 values read from `--decisions <decisions.json>`. That file is the single judgment
-slot — a human/LLM authors it by reading `issues.json` + `intent.json`. Never let
-the model "build the IR"; it only writes `decisions.json`. Detection (conflicts,
-placeholders) is always deterministic; **resolution** is the decision.
+slot for **data** — a human/LLM authors it by reading `issues.json` + `intent.json`.
+Never let the model "build the IR"; it only writes `decisions.json`. Detection
+(conflicts, placeholders) is always deterministic; **resolution** is the decision.
+(The judgments that are *not* data — the codegen scope of Step 4 and the icon/vector
+policy of Step 7 — stay inline because they shape generated code, not the IR.)
 
 ```json
 {

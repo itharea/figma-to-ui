@@ -40,6 +40,7 @@ import type { IRNode } from "./screens-lib.mts";
 import { mapValue } from "./components-lib.mts";
 import { disambiguateJustify } from "./reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "./theme-lib.mts";
+import { overlap, hasSignificantNonAdjacentOverlap } from "./layout-lib.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];
@@ -551,23 +552,22 @@ function isSingleIconWrapper(n: IRNode): boolean {
   return kids.length === 1 && isVectorOnly(kids[0]);
 }
 
-// Strict bbox intersection (improvement 9): touching edges (==) do NOT count.
-function overlap(
-  a: { x: number; y: number; w: number; h: number },
-  b: { x: number; y: number; w: number; h: number }
-): boolean {
-  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-}
+// `overlap()` / `hasSignificantNonAdjacentOverlap()` live in layout-lib.mts (pure +
+// unit-tested). Strict bbox intersection (improvement 9): touching edges (==) do NOT count.
 
-// Does THIS container position its children absolutely (improvements 6/7)?
+// Does THIS container position its children absolutely (improvements 6/7/11)?
 //   #7: a non-auto-layout container (no layout) positions children absolutely.
-//   #6: an auto-layout container positions children abs only when a child is absolute.
+//   #6: an auto-layout container positions children abs when a child is stack-absolute.
+//   #11: an auto-layout container with an authored peek-stack (a significant NON-ADJACENT
+//        overlap among children) positions them absolutely too — flex flow can't author
+//        that, so the stored bboxes are intentional placement, not frozen snapshots.
 // A single-icon wrapper keeps flex-centering (#4) — never positions absolutely.
 function containerPositionsChildren(n: IRNode, kids: IRNode[]): boolean {
   if (!kids.length) return false;
   if (isSingleIconWrapper(n)) return false;
   if (!n.layout) return true; // #7
-  return kids.some((c) => c.positioning === "absolute"); // #6
+  if (kids.some((c) => c.positioning === "absolute")) return true; // #6
+  return hasSignificantNonAdjacentOverlap(kids.map((c) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 }))); // #11
 }
 
 // Interactive-archetype MARKER (improvement 10): a string TODO (no prop synthesis).
@@ -597,7 +597,8 @@ function componentReference(
   entry: RegEntry,
   pad: string,
   push: (m: string) => void,
-  refImports: Map<string, string>
+  refImports: Map<string, string>,
+  posLines: string[]
 ): string {
   refImports.set(entry.Comp, entry.slug);
 
@@ -664,7 +665,18 @@ function componentReference(
   // IR (resolve-lib's overrideApplied, surfaced as n.override.fields).
   const styleFields = (n.override?.fields ?? []).filter((f) => STYLE_OVERRIDE_FIELDS.has(f));
   const overrideBody = styleFields.length ? rootOverrideStyle(n, styleFields, push) : "";
-  if (overrideBody) attrs += ` ${styleOverridePropName(entry.comp)}={{ ${overrideBody} }}`;
+  // ABSOLUTE PLACEMENT (regression fix for the nested-component reference path): when the
+  // parent positions this child absolutely (stack-absolute, parent-positions-children, or
+  // overlap escalation), the position/left/top/zIndex prefix MUST ride along — a reference
+  // has no JSX box of its own to carry it,
+  // so it flows into the parent and the overlap/peek layout collapses to a flat row. Merge it
+  // into the same root style-override prop the child already merges (issue #23 path) so the
+  // referenced component's root applies it. posLines wins over master styles (later in merge).
+  // Inlined to ONE line: this body lands inside a JSX attr AND inside a `//` TODO message, so
+  // an embedded newline would break out of the comment / split the attribute.
+  const inlineBody = (s: string) => s.replace(/\s*\n\s*/g, " ").trim();
+  const mergedBody = [posLines.join(" "), overrideBody].filter(Boolean).map(inlineBody).join(" ");
+  if (mergedBody) attrs += ` ${styleOverridePropName(entry.comp)}={{ ${mergedBody} }}`;
 
   const overrides = n.component?.overrides ?? 0;
   if (overrides) {
@@ -761,9 +773,10 @@ function renderVariant(v: any): VariantRender {
     // auto-layout (flex) row places children by flexbox, so their stored bboxes are
     // frozen snapshots — a sub-pixel bbox touch there is not a real z-overlap and must
     // never pull a flex child absolute. positionsKids is true only for a non-auto-layout
-    // container or one with an explicitly-absolute child; positionPrefix establishes the
-    // containing block on exactly that condition, so any escalation here also gets a
-    // `position:relative` parent for free.
+    // container, one with an explicitly-absolute child, or an authored peek-stack (#11:
+    // significant NON-ADJACENT overlap, which flex flow cannot produce); positionPrefix
+    // establishes the containing block on exactly that condition, so any escalation here
+    // also gets a `position:relative` parent for free.
     const overlapping = new Set<IRNode>();
     if (positionsKids) {
       const boxOf = (c: IRNode) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 });
@@ -849,7 +862,7 @@ function renderVariant(v: any): VariantRender {
     // vector icons keep the export-svg path; self-references fall through to inline.
     const refEntry = n.type === "instance" && n.component?.guid ? registry.get(n.component.guid) : undefined;
     if (refEntry && refEntry.slug !== slug && !isVectorOnly(n)) {
-      const el = componentReference(n, refEntry, pad, push, refImports);
+      const el = componentReference(n, refEntry, pad, push, refImports, posLines);
       return wrapConditional(el, binds, depth, n);
     }
 
