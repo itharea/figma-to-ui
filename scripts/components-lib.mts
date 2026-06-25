@@ -400,3 +400,98 @@ export function extractVariantBindings(
   }
   return out;
 }
+
+// === LOGICAL PROP MODEL — the idiomatic collapse (a pure transform over ComponentProp[]) ===
+// Lives here (not in codegen.mts) so it's unit-testable in isolation with synthetic
+// ComponentProp fixtures — no decode, no IR artifact dependency.
+export type Logical =
+  | { name: string; tsType: "string"; role: "text"; figNames: string[]; defText: string | null; defKey: string }
+  | { name: string; tsType: "boolean"; role: "bool"; figNames: string[]; defKey: string; defBool: boolean | null }
+  | { name: string; tsType: "React.ReactNode"; role: "slot"; figNames: string[]; defKey: string; defSym: string | null };
+
+// Derive the logical prop model for ANY component catalog record (anything with a `props`
+// array of ComponentProp). The COLLAPSE happens here: on a node carrying a BOOL-visible prop
+// AND a TEXT-characters prop whose bool default is NOT true, emit one optional string; both
+// defKeys point at that single logical prop. Standalone props become text / show<Bool> / slot.
+// Returns the logical list plus a defKey → logical map. Called for the generated `comp` AND,
+// on the nested-component reference path, for a REFERENCED component (to map an instance's
+// overrides onto that component's props).
+export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
+  logicals: Logical[];
+  logicalByDefKey: Map<string, Logical>;
+} {
+  const cprops: any[] = c.props ?? [];
+  // Group props by the default-master node they bind (so a bool-visible + text pair on
+  // the SAME node collapses to one). A prop with no binding still gets its own slot.
+  const propsByNode = new Map<string, any[]>(); // node guid → props binding it
+  for (const p of cprops) {
+    if (!p.bindings?.length) continue;
+    for (const b of p.bindings) (propsByNode.get(b.node) ?? propsByNode.set(b.node, []).get(b.node)!).push(p);
+  }
+  const logicals: Logical[] = [];
+  const logicalByDefKey = new Map<string, Logical>();
+  const usedNames = new Set<string>();
+  // de-dupe an emitted prop name deterministically (collision → name2, name3, …).
+  const uniqueName = (base: string): string => {
+    let n = base || "prop";
+    let i = 2;
+    while (usedNames.has(n)) n = `${base}${i++}`;
+    usedNames.add(n);
+    return n;
+  };
+  const seenDefKeys = new Set<string>();
+  // Deterministic order: walk props[] in file order; the first prop of a collapsed pair
+  // drives placement (its node's other prop is folded in).
+  for (const p of cprops) {
+    if (seenDefKeys.has(p.defKey)) continue;
+    // find a collapse partner on the same node (bool-visible ⊕ text-characters).
+    const node = p.bindings?.find((b: any) => b.field === "visible" || b.field === "characters")?.node;
+    const onNode = node ? (propsByNode.get(node) ?? []) : [];
+    const textP = onNode.find((q) => q.kind === "text");
+    const boolP = onNode.find((q) => q.kind === "boolean");
+    // COLLAPSE a text+bool pair into one optional string ONLY when the bool's master
+    // default is NOT true — i.e. the node is HIDDEN by default, so "pass a string to
+    // show it, omit to hide" matches the master. When the bool defaults to `true` the
+    // node is VISIBLE by default with default text, so collapsing-and-gating-on-`!= null`
+    // would wrongly hide it at zero props (finding #3). Keep them as TWO props instead:
+    // a `show<Bool>` defaulted to its IR value + a text prop with a master-default
+    // fallback, so the zero-prop render reproduces the Figma master 1:1.
+    if (textP && boolP && boolP.default !== true) {
+      // COLLAPSE → one optional string. Name from the TEXT prop. Both defKeys map here.
+      const name = uniqueName(textP.name);
+      const lg: Logical = {
+        name, tsType: "string", role: "text", defKey: textP.defKey,
+        figNames: [textP.rawName, boolP.rawName], defText: typeof textP.default === "string" ? textP.default : null,
+      };
+      logicals.push(lg);
+      logicalByDefKey.set(textP.defKey, lg);
+      logicalByDefKey.set(boolP.defKey, lg);
+      seenDefKeys.add(textP.defKey);
+      seenDefKeys.add(boolP.defKey);
+      continue;
+    }
+    seenDefKeys.add(p.defKey);
+    if (p.kind === "text") {
+      const lg: Logical = { name: uniqueName(p.name), tsType: "string", role: "text", defKey: p.defKey, figNames: [p.rawName], defText: typeof p.default === "string" ? p.default : null };
+      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+    } else if (p.kind === "boolean") {
+      // a standalone BOOL binds a node's `visible` → name it show<Name> (idiomatic for a
+      // visibility toggle, and it frees the bare name for a content/text prop so a
+      // collapsed `Action`+`actionText` pair becomes `action`, not `action2`). Skip the
+      // prefix when the prop is already show/is/has-prefixed.
+      const showName = /^(show|is|has)[A-Z]/.test(p.name)
+        ? p.name
+        : "show" + p.name.charAt(0).toUpperCase() + p.name.slice(1);
+      // carry the IR visibility default so codegen can default the prop in the destructure
+      // (`show<X> = true`) → a master-visible node renders at zero props (finding #3).
+      const lg: Logical = { name: uniqueName(showName), tsType: "boolean", role: "bool", defKey: p.defKey, figNames: [p.rawName], defBool: typeof p.default === "boolean" ? p.default : null };
+      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+    } else {
+      // carry the instance-swap default SYMBOL guid so the slot is never emitted with no
+      // default AND no TODO (finding #2) — the render flags it (best-effort named).
+      const lg: Logical = { name: uniqueName(p.name), tsType: "React.ReactNode", role: "slot", defKey: p.defKey, figNames: [p.rawName], defSym: typeof p.default === "string" ? p.default : null };
+      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+    }
+  }
+  return { logicals, logicalByDefKey };
+}

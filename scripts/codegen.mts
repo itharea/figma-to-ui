@@ -37,7 +37,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { IRNode } from "./screens-lib.mts";
-import { mapValue } from "./components-lib.mts";
+import { mapValue, deriveLogicals, type Logical } from "./components-lib.mts";
 import { disambiguateJustify } from "./reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "./theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap } from "./layout-lib.mts";
@@ -152,85 +152,9 @@ function findNodeByGuid(guid: string): IRNode | null {
   return null;
 }
 
-// === PROP MODEL — the idiomatic collapse (a codegen transform over Phase A facts) ===
-type Logical =
-  | { name: string; tsType: "string"; role: "text"; figNames: string[]; defText: string | null; defKey: string }
-  | { name: string; tsType: "boolean"; role: "bool"; figNames: string[]; defKey: string }
-  | { name: string; tsType: "React.ReactNode"; role: "slot"; figNames: string[]; defKey: string };
-
-// Derive the logical prop model for ANY component catalog record. The COLLAPSE
-// happens here: on a node carrying a BOOL-visible prop AND a TEXT-characters prop,
-// emit one optional string; both defKeys point at that single logical prop.
-// Standalone props become text / show<Bool> / slot. Returns the logical list plus a
-// defKey → logical map. Called for the generated `comp` (below) AND, on the
-// nested-component reference path, for a REFERENCED component (to map an instance's
-// overrides onto that component's props).
-function deriveLogicals(c: any): { logicals: Logical[]; logicalByDefKey: Map<string, Logical> } {
-  const cprops: any[] = c.props ?? [];
-  // Group props by the default-master node they bind (so a bool-visible + text pair on
-  // the SAME node collapses to one). A prop with no binding still gets its own slot.
-  const propsByNode = new Map<string, any[]>(); // node guid → props binding it
-  for (const p of cprops) {
-    if (!p.bindings?.length) continue;
-    for (const b of p.bindings) (propsByNode.get(b.node) ?? propsByNode.set(b.node, []).get(b.node)!).push(p);
-  }
-  const logicals: Logical[] = [];
-  const logicalByDefKey = new Map<string, Logical>();
-  const usedNames = new Set<string>();
-  // de-dupe an emitted prop name deterministically (collision → name2, name3, …).
-  const uniqueName = (base: string): string => {
-    let n = base || "prop";
-    let i = 2;
-    while (usedNames.has(n)) n = `${base}${i++}`;
-    usedNames.add(n);
-    return n;
-  };
-  const seenDefKeys = new Set<string>();
-  // Deterministic order: walk props[] in file order; the first prop of a collapsed pair
-  // drives placement (its node's other prop is folded in).
-  for (const p of cprops) {
-    if (seenDefKeys.has(p.defKey)) continue;
-    // find a collapse partner on the same node (bool-visible ⊕ text-characters).
-    const node = p.bindings?.find((b: any) => b.field === "visible" || b.field === "characters")?.node;
-    const onNode = node ? (propsByNode.get(node) ?? []) : [];
-    const textP = onNode.find((q) => q.kind === "text");
-    const boolP = onNode.find((q) => q.kind === "boolean");
-    if (textP && boolP) {
-      // COLLAPSE → one optional string. Name from the TEXT prop. Both defKeys map here.
-      const name = uniqueName(textP.name);
-      const lg: Logical = {
-        name, tsType: "string", role: "text", defKey: textP.defKey,
-        figNames: [textP.rawName, boolP.rawName], defText: typeof textP.default === "string" ? textP.default : null,
-      };
-      logicals.push(lg);
-      logicalByDefKey.set(textP.defKey, lg);
-      logicalByDefKey.set(boolP.defKey, lg);
-      seenDefKeys.add(textP.defKey);
-      seenDefKeys.add(boolP.defKey);
-      continue;
-    }
-    seenDefKeys.add(p.defKey);
-    if (p.kind === "text") {
-      const lg: Logical = { name: uniqueName(p.name), tsType: "string", role: "text", defKey: p.defKey, figNames: [p.rawName], defText: typeof p.default === "string" ? p.default : null };
-      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
-    } else if (p.kind === "boolean") {
-      // a standalone BOOL binds a node's `visible` → name it show<Name> (idiomatic for a
-      // visibility toggle, and it frees the bare name for a content/text prop so a
-      // collapsed `Action`+`actionText` pair becomes `action`, not `action2`). Skip the
-      // prefix when the prop is already show/is/has-prefixed.
-      const showName = /^(show|is|has)[A-Z]/.test(p.name)
-        ? p.name
-        : "show" + p.name.charAt(0).toUpperCase() + p.name.slice(1);
-      const lg: Logical = { name: uniqueName(showName), tsType: "boolean", role: "bool", defKey: p.defKey, figNames: [p.rawName] };
-      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
-    } else {
-      const lg: Logical = { name: uniqueName(p.name), tsType: "React.ReactNode", role: "slot", defKey: p.defKey, figNames: [p.rawName] };
-      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
-    }
-  }
-  return { logicals, logicalByDefKey };
-}
-
+// === PROP MODEL — the idiomatic collapse lives in components-lib.mts (pure + unit-tested) ===
+// `Logical` + `deriveLogicals` are imported (see the top-of-file import) so the prop-model
+// transform is testable in isolation with synthetic ComponentProp fixtures.
 const { logicals, logicalByDefKey } = deriveLogicals(comp);
 
 // --- identifiers --------------------------------------------------------------
@@ -329,6 +253,26 @@ function colorRef(
     return `'${c.hex}' /* TODO: ${c.match} — adjudicate token */`;
   }
   return `'${c.hex}'`;
+}
+
+// Collect every DISTINCT solid fill {hex, var} across a vector subtree — the vector-branch
+// node itself PLUS its descendants. Icon wrappers (instance/frame) carry empty fills on the
+// branch node; the real colour lives on descendant <vector> nodes, so we must recurse, not
+// just read n.style.fills (finding #1). Order-preserved, deduped by hex|var.
+function collectVectorFills(n: IRNode): { hex: string; var: string | null }[] {
+  const out: { hex: string; var: string | null }[] = [];
+  const seen = new Set<string>();
+  (function walk(m: IRNode) {
+    for (const f of m.style?.fills ?? []) {
+      if (f.type === "solid" && f.hex) {
+        const v = (f as any).var ?? null;
+        const k = `${f.hex}|${v ?? ""}`;
+        if (!seen.has(k)) { seen.add(k); out.push({ hex: f.hex, var: v }); }
+      }
+    }
+    for (const c of m.children ?? []) walk(c);
+  })(n);
+  return out;
 }
 
 // One node's style object body (container/box fields). web|rn share most fields.
@@ -645,7 +589,8 @@ function componentReference(
       }
     } else if (lg.role === "bool" && b.field === "visible") {
       // standalone visibility toggle: pass only when the resolved state differs from the
-      // prop default (absent ⇒ hidden, since invisible nodes were dropped in toIR).
+      // prop default (absent ⇒ the child's IR default — codegen now defaults the bool in the
+      // child's destructure, finding #3 — so omitting the prop reproduces the master).
       const def = propByDefKey.get(b.defKey)?.default;
       const shown = byGuid.has(b.node);
       if (typeof def === "boolean" && shown !== def) {
@@ -853,7 +798,18 @@ function renderVariant(v: any): VariantRender {
         ? slotBody
         : [slotBody, `display: 'flex',`, `alignItems: 'center',`, `justifyContent: 'center',`].filter(Boolean).join("\n");
       styles.push({ key: sk, body: prefixBody(body) });
-      const el = `${pad}<${Box} ${styleAttr}>{${binds.slot.name}}</${Box}>`;
+      // NEVER leave a slot with no default AND no marker (finding #2): the master swaps a
+      // default symbol in here, so always flag it (best-effort named via the screens
+      // artifacts) — otherwise the zero-prop render is silently empty with nothing to catch.
+      const slotLg = binds.slot;
+      const defSym = slotLg.role === "slot" ? slotLg.defSym : null;
+      if (defSym) {
+        const defName = findNodeByGuid(defSym)?.name;
+        push(`instance-swap "${slotLg.name}": default ${defName ? `"${defName}" ` : ""}(${defSym}) — wire the default icon (export-svg/library per the icon policy) or pass ${slotLg.name}; renders empty otherwise`);
+      } else {
+        push(`instance-swap "${slotLg.name}": no IR default — pass ${slotLg.name} or it renders empty`);
+      }
+      const el = `${pad}<${Box} ${styleAttr}>{${slotLg.name}}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
 
@@ -871,16 +827,27 @@ function renderVariant(v: any): VariantRender {
     // boxes (codegen can't draw vector paths; export-svg.mts does). The placeholder
     // box flex-centers (improvement 4) so the inlined <svg>/<Image> ends up centered.
     if (n.type === "vector" || n.type === "boolean_operation" || (n.type === "instance" && isVectorOnly(n))) {
+      // Carry the IR's vector data through instead of dropping it (finding #1): collect the
+      // resolved fills (hex + token) from the whole vector subtree. For a MONO-fill icon set
+      // `color` (web only — RN ViewStyle has no `color`) so an inlined currentColor <svg>
+      // inherits the right colour; bound tokens resolve to the theme exactly like every other
+      // colour. Every distinct fill is named in the TODO so the scaffold is self-contained.
+      const fills = collectVectorFills(n);
+      const colorExpr = (f: { hex: string; var: string | null }) => (f.var ? themeRef(f.var, false) : `'${f.hex}'`);
+      const colorLine = web && fills.length === 1 ? `color: ${colorExpr(fills[0])},` : "";
       const box = [
         n.box?.w ? `width: ${n.box.w},` : "",
         n.box?.h ? `height: ${n.box.h},` : "",
+        colorLine,
         `display: 'flex',`,
         `alignItems: 'center',`,
         `justifyContent: 'center',`,
       ].filter(Boolean).join("\n");
       styles.push({ key: sk, body: prefixBody(box) });
-      push(`icon/vector "${n.name}" (${n.guid}) — export via export-svg.mts and inline as <Svg>/<Image>`);
-      const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid}) */}</${Box}>`;
+      const fillNote = fills.length ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]` : "";
+      const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
+      push(`icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — export via export-svg.mts (carries all fills) and inline as <Svg>/<Image>`);
+      const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid})${fillNote} */}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
 
@@ -980,7 +947,12 @@ ${propsTypeBody()}
 // the destructure of logical props (all optional) for a variant component signature.
 // `withStyle` appends the root `style` override prop when the variant's root merges it.
 function destructure(used: Set<string>, withStyle: boolean): string {
-  const names = logicals.filter((l) => used.has(l.name)).map((l) => l.name);
+  // bool visibility props default to their IR value so a master-visible node renders at zero
+  // props (finding #3): `{ showHeader = true }`. text/slot props stay plain (text carries its
+  // master-default fallback at the use site; a slot has no sensible literal default).
+  const names = logicals
+    .filter((l) => used.has(l.name))
+    .map((l) => (l.role === "bool" && l.defBool != null ? `${l.name} = ${l.defBool}` : l.name));
   if (withStyle) names.push(STYLE_PROP);
   return names.length ? `{ ${names.join(", ")} }` : "_props";
 }

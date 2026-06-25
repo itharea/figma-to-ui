@@ -33,6 +33,7 @@ import { spawnSync } from "child_process";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { buildContract, decodePng, encodePng, diffImages, type RGBAImage } from "./fidelity-lib.mts";
+import { deriveLogicals } from "./components-lib.mts";
 
 let pass = 0;
 let fail = 0;
@@ -330,6 +331,56 @@ const tv = (name: string, type: string, value: string, guid: string, target?: st
   const web = emitTheme([d], { framework: "web" });
   check("emit dangling: falls back to value", web.code.includes("--x-d: 99"), web.code);
   check("emit dangling: warns", web.warnings.some((w) => /dangling/.test(w)), JSON.stringify(web.warnings));
+}
+
+// ── components-lib: deriveLogicals prop model (findings #2/#3 — synthetic) ──
+// Pure transform over synthetic ComponentProp[]; no decode / IR-artifact dependency.
+const bind = (node: string, field: string) => [{ node, field }];
+{
+  // #3 — text + bool(default:true) on the SAME node must NOT collapse: a master-visible
+  // node renders at zero props via show<X>=true + a master-default text fallback.
+  const { logicals, logicalByDefKey } = deriveLogicals({
+    props: [
+      { name: "header", rawName: "Header", kind: "boolean", defKey: "b1", default: true, bindings: bind("N1", "visible") },
+      { name: "baslik", rawName: "Başlık", kind: "text", defKey: "t1", default: "Test", bindings: bind("N1", "characters") },
+    ],
+  });
+  eq("deriveLogicals: default-true text+bool NOT collapsed (2 props)", logicals.length, 2);
+  const showHeader = logicals.find((l) => l.name === "showHeader") as any;
+  const baslik = logicals.find((l) => l.name === "baslik") as any;
+  check("deriveLogicals: showHeader is bool, defBool=true", !!showHeader && showHeader.role === "bool" && showHeader.defBool === true, JSON.stringify(showHeader));
+  check("deriveLogicals: baslik is text, defText='Test', standalone", !!baslik && baslik.role === "text" && baslik.defText === "Test" && baslik.figNames.length === 1, JSON.stringify(baslik));
+  check("deriveLogicals: both defKeys map (bool→showHeader, text→baslik)", logicalByDefKey.get("b1") === showHeader && logicalByDefKey.get("t1") === baslik, "");
+}
+{
+  // text + bool(default:false) on the SAME node SHOULD collapse to one optional string
+  // (master hides by default → pass a string to show, omit to hide). Behaviour preserved.
+  const { logicals, logicalByDefKey } = deriveLogicals({
+    props: [
+      { name: "secondLine", rawName: "SecondLine", kind: "boolean", defKey: "b2", default: false, bindings: bind("N2", "visible") },
+      { name: "line2", rawName: "Line2", kind: "text", defKey: "t2", default: "Addr", bindings: bind("N2", "characters") },
+    ],
+  });
+  eq("deriveLogicals: default-false text+bool collapsed (1 prop)", logicals.length, 1);
+  const lg = logicals[0] as any;
+  check("deriveLogicals: collapsed → role text, figNames length 2", lg.role === "text" && lg.figNames.length === 2, JSON.stringify(lg));
+  check("deriveLogicals: collapsed → both defKeys map to it", logicalByDefKey.get("b2") === lg && logicalByDefKey.get("t2") === lg, "");
+}
+{
+  // #3 — standalone bool(default:true) → show<X> carrying defBool for the destructure default.
+  const { logicals } = deriveLogicals({
+    props: [{ name: "action", rawName: "action", kind: "boolean", defKey: "b3", default: true, bindings: bind("N3", "visible") }],
+  });
+  const lg = logicals[0] as any;
+  check("deriveLogicals: standalone bool → showAction, role bool, defBool=true", lg.name === "showAction" && lg.role === "bool" && lg.defBool === true, JSON.stringify(lg));
+}
+{
+  // #2 — instanceSwap carries the default SYMBOL guid so the slot is never silently empty.
+  const { logicals } = deriveLogicals({
+    props: [{ name: "instance", rawName: "Instance", kind: "instanceSwap", defKey: "s4", default: "315:2646", bindings: bind("N4", "symbolId") }],
+  });
+  const lg = logicals[0] as any;
+  check("deriveLogicals: instanceSwap → slot, defSym set", lg.role === "slot" && lg.defSym === "315:2646", JSON.stringify(lg));
 }
 
 // ── fidelity-lib: contract builder (the elevation guardrail) ────────────────
