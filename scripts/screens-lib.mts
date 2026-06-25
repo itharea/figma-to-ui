@@ -279,6 +279,13 @@ export type IRNode = {
   // symbolOverrides — codegen passes what it can map to the component's props and
   // FLAGS the rest so nothing is silently dropped. Absent on non-instance nodes.
   component?: { guid: string; overrides?: number };
+  // Names of the fields resolve-lib actually overrode on THIS node (the keys of
+  // ResolvedNode.overrideApplied — a subset of FIELD_KEYS, e.g. ["fillPaints",
+  // "cornerRadius"]). Surfaced so codegen can apply a per-instance ROOT style
+  // override onto a referenced child component instead of dropping it (the root
+  // override lands on the resolved instance node itself). Absent when nothing was
+  // overridden on the node.
+  override?: { fields: string[] };
   children: IRNode[];
 };
 
@@ -782,6 +789,16 @@ function toIR(
   if (symId) {
     const ov = (n as any).symbolData?.symbolOverrides?.length ?? 0;
     node.component = { guid: key(symId), ...(ov ? { overrides: ov } : {}) };
+  }
+
+  // Which fields resolve-lib actually overrode on this node (FIELD_KEYS subset).
+  // For a nested instance whose ROOT was overridden, the override lands on the
+  // resolved instance node itself, so `node.override.fields` here is exactly the
+  // root-container override set codegen needs to re-apply onto the child reference.
+  const overrideApplied = (n as any).overrideApplied as Record<string, unknown> | undefined;
+  if (overrideApplied) {
+    const fields = Object.keys(overrideApplied);
+    if (fields.length) node.override = { fields };
   }
 
   if ((n as any).type === "TEXT") {

@@ -240,6 +240,22 @@ function kebabProp(s: string): string {
   return s.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[\s_]+/g, "-").replace(/[^\w-]/g, "").toLowerCase();
 }
 
+// Name of the per-instance ROOT style-override prop for a component (issue #23). Defaults
+// to the idiomatic `style`, but a Figma variant axis can literally be named "Style" (→ a
+// `style` variant prop — e.g. Button), which would collide. So fall back to a free name,
+// derived from the component's OWN axes + logical props. Both the generated component and
+// any PARENT referencing it call this on the same catalog record, so the names agree.
+function styleOverridePropName(c: any): string {
+  const taken = new Set<string>();
+  const axNames = Object.keys(c.axes ?? {});
+  if (axNames.length === 1) taken.add("variant");
+  else for (const a of axNames) taken.add(kebabProp(a));
+  for (const l of deriveLogicals(c).logicals) taken.add(l.name);
+  for (const cand of ["style", "rootStyle", "styleOverride", "rootStyleOverride"]) if (!taken.has(cand)) return cand;
+  return "rootStyleOverride";
+}
+const STYLE_PROP = styleOverridePropName(comp); // the override-prop name for THIS component
+
 // === per-node JSX rendering (a variant's resolved subtree → a JSX tree) =========
 const allTodos: string[] = [];
 const ind = (s: string, n: number) => s.split("\n").map((l) => (l ? " ".repeat(n) + l : l)).join("\n");
@@ -264,36 +280,45 @@ function colorRef(
 }
 
 // One node's style object body (container/box fields). web|rn share most fields.
-function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
+// `only` (optional) restricts emission to the listed override field names (a subset
+// of FIELD_KEYS): codegen passes it to build a per-instance ROOT style OVERRIDE for a
+// referenced child component, so only the genuinely-overridden box fields are emitted
+// (no layout/flex-child lines, which aren't override-able). Omitted ⇒ full body.
+function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>): string {
   const lines: string[] = [];
   const s = n.style;
+  const want = (f: string) => !only || only.has(f);
   // size: emit when fixed (a hug/grow child sizes itself; still record for fidelity).
-  if (n.box) { if (n.box.w) lines.push(`width: ${n.box.w},`); if (n.box.h) lines.push(`height: ${n.box.h},`); }
+  if (want("size") && n.box) { if (n.box.w) lines.push(`width: ${n.box.w},`); if (n.box.h) lines.push(`height: ${n.box.h},`); }
   // background = first solid fill (bound var wins as a token comment).
-  const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
-  if (fill) {
-    const ref = colorRef({ hex: fill.hex ?? null, var: (fill as any).var ?? null, match: (fill as any).var ? "bound" : null }, `${n.name} background`, push);
-    lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
-  }
-  // image fill (improvement 5-image-fills): codegen can't embed bytes, so flag for
-  // export + leave a placeholder bg. Emitted AFTER the solid fill so a node with both
-  // keeps its solid bg AND still gets flagged.
-  const imgFill = s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
-  if (imgFill) {
-    const hash = (imgFill as any).imageHash as string;
-    push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — export to images/ and wire the src`);
-    // Round 2 (C): do NOT emit an opaque placeholder bg. Image-fill nodes are often
-    // image-ONLY (no solid in the design) and the assets are transparent PNGs meant to
-    // composite over the parent surface — an opaque #eee would show through their alpha.
-    // Leave the background transparent; the TODO flags the node for wiring.
-    if (web) {
-      lines.push(`// TODO: image — backgroundImage: 'url(images/${hash.slice(0, 16)}…)'`);
-      lines.push(`backgroundSize: 'cover',`);
-    } else {
-      lines.push(`// TODO: image — render as <Image source={{ uri: '…/${hash.slice(0, 16)}…' }} />`);
+  if (want("fillPaints")) {
+    const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
+    if (fill) {
+      const ref = colorRef({ hex: fill.hex ?? null, var: (fill as any).var ?? null, match: (fill as any).var ? "bound" : null }, `${n.name} background`, push);
+      lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
+    }
+    // image fill (improvement 5-image-fills): codegen can't embed bytes, so flag for
+    // export + leave a placeholder bg. Emitted AFTER the solid fill so a node with both
+    // keeps its solid bg AND still gets flagged. Skipped in override mode (`only`): a
+    // bare comment inside an inline `style={{…}}` prop is noise — the caller's instance
+    // override TODO already flags an image/icon override for wiring.
+    const imgFill = !only && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
+    if (imgFill) {
+      const hash = (imgFill as any).imageHash as string;
+      push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — export to images/ and wire the src`);
+      // Round 2 (C): do NOT emit an opaque placeholder bg. Image-fill nodes are often
+      // image-ONLY (no solid in the design) and the assets are transparent PNGs meant to
+      // composite over the parent surface — an opaque #eee would show through their alpha.
+      // Leave the background transparent; the TODO flags the node for wiring.
+      if (web) {
+        lines.push(`// TODO: image — backgroundImage: 'url(images/${hash.slice(0, 16)}…)'`);
+        lines.push(`backgroundSize: 'cover',`);
+      } else {
+        lines.push(`// TODO: image — render as <Image source={{ uri: '…/${hash.slice(0, 16)}…' }} />`);
+      }
     }
   }
-  if (s?.cornerRadius !== undefined) {
+  if (want("cornerRadius") && s?.cornerRadius !== undefined) {
     if (typeof s.cornerRadius === "number") lines.push(`borderRadius: ${s.cornerRadius},`);
     else {
       lines.push(`borderTopLeftRadius: ${s.cornerRadius.tl},`);
@@ -303,7 +328,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
     }
   }
   // strokes + per-side widths (improvement 3-borders).
-  if (s?.strokes?.length) {
+  if ((want("strokePaints") || want("strokeWeight")) && s?.strokes?.length) {
     const st = s.strokes[0];
     // route through colorRef so a bound stroke references the theme (issue #17), same as fills.
     const cref = colorRef({ hex: st.hex ?? null, var: (st as any).var ?? null, match: (st as any).var ? "bound" : null }, `${n.name} border`, push);
@@ -324,8 +349,8 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
       else if (st.dash?.length) lines.push(`borderStyle: 'dashed',`);
     }
   }
-  if (s?.opacity !== undefined) lines.push(`opacity: ${s.opacity},`);
-  if (s?.effects?.length) {
+  if (want("opacity") && s?.opacity !== undefined) lines.push(`opacity: ${s.opacity},`);
+  if (want("effects") && s?.effects?.length) {
     const e = s.effects[0];
     if (web) lines.push(`boxShadow: '${e.offsetX}px ${e.offsetY}px ${e.radius}px ${e.spread ?? 0}px ${e.hex ?? "#000"}', // ${e.type}${s.effects.length > 1 ? ` (+${s.effects.length - 1} more — see master)` : ""}`);
     else {
@@ -335,26 +360,47 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
       if (s.effects.length > 1) lines.push(`// +${s.effects.length - 1} more effect(s) — see master`);
     }
   }
-  // auto-layout container.
-  const l = n.layout;
-  if (l) {
-    lines.push(`display: 'flex',`);
-    lines.push(`flexDirection: '${l.mode}',`);
-    if (l.gap !== undefined) lines.push(`gap: ${l.gap},`);
-    // SPACE_EVENLY→SPACE_BETWEEN disambiguation (improvement 8): the helper filters
-    // absolute/invisible children and requires >=2 in-flow.
-    const j = disambiguateJustify(l, n.box, n.children ?? []);
-    if (j) lines.push(`justifyContent: '${j}',`);
-    if (l.align) lines.push(`alignItems: '${l.align}',`);
-    if (l.paddingTop !== undefined) lines.push(`paddingTop: ${l.paddingTop},`);
-    if (l.paddingRight !== undefined) lines.push(`paddingRight: ${l.paddingRight},`);
-    if (l.paddingBottom !== undefined) lines.push(`paddingBottom: ${l.paddingBottom},`);
-    if (l.paddingLeft !== undefined) lines.push(`paddingLeft: ${l.paddingLeft},`);
-    if (l.wrap) lines.push(`flexWrap: 'wrap',`);
+  // auto-layout container + flex-child sizing: structural, never a per-instance style
+  // override — emitted in full mode only (skipped when building a root override body).
+  if (!only) {
+    const l = n.layout;
+    if (l) {
+      lines.push(`display: 'flex',`);
+      lines.push(`flexDirection: '${l.mode}',`);
+      if (l.gap !== undefined) lines.push(`gap: ${l.gap},`);
+      // SPACE_EVENLY→SPACE_BETWEEN disambiguation (improvement 8): the helper filters
+      // absolute/invisible children and requires >=2 in-flow.
+      const j = disambiguateJustify(l, n.box, n.children ?? []);
+      if (j) lines.push(`justifyContent: '${j}',`);
+      if (l.align) lines.push(`alignItems: '${l.align}',`);
+      if (l.paddingTop !== undefined) lines.push(`paddingTop: ${l.paddingTop},`);
+      if (l.paddingRight !== undefined) lines.push(`paddingRight: ${l.paddingRight},`);
+      if (l.paddingBottom !== undefined) lines.push(`paddingBottom: ${l.paddingBottom},`);
+      if (l.paddingLeft !== undefined) lines.push(`paddingLeft: ${l.paddingLeft},`);
+      if (l.wrap) lines.push(`flexWrap: 'wrap',`);
+    }
+    // node as a flex child.
+    lines.push(...flexChildLines(n));
   }
-  // node as a flex child.
-  lines.push(...flexChildLines(n));
   return lines.join("\n");
+}
+
+// Build the per-instance ROOT style-override object body for a nested-component
+// reference: only the box fields the instance actually overrode on its root (a subset
+// of STYLE_OVERRIDE_FIELDS), flattened to a single inline-object body. Returns "" when
+// nothing maps. Shares nodeStyleBody's field→CSS mapping so parent and child agree.
+const STYLE_OVERRIDE_FIELDS = new Set(["fillPaints", "strokePaints", "strokeWeight", "cornerRadius", "opacity", "size", "effects"]);
+function rootOverrideStyle(n: IRNode, fields: string[], push: (m: string) => void): string {
+  const sel = fields.filter((f) => STYLE_OVERRIDE_FIELDS.has(f));
+  if (!sel.length) return "";
+  // Strip trailing `// …` line comments (token/align annotations nodeStyleBody appends)
+  // before flattening to one line — otherwise a `//` would comment out the rest of the
+  // inline object literal, including its closing `}}`. Block `/* … */` comments are safe.
+  return nodeStyleBody(n, push, new Set(sel))
+    .split("\n")
+    .map((l) => l.replace(/\s*\/\/.*$/, "").trim())
+    .filter(Boolean)
+    .join(" ");
 }
 
 // A node's sizing AS A FLEX CHILD (improvement 3): grow/alignSelf/min/aspect. Shared
@@ -556,12 +602,22 @@ function componentReference(
     }
   }
 
+  // ROOT style override (regression fix, issue #23): pre-PR-#22 the instance subtree was
+  // inlined, so per-instance ROOT box overrides (fill/radius/border/opacity/size/effects)
+  // rendered. Referencing dropped them — the child drew its MASTER styles. Re-apply them
+  // here as a `style` prop the referenced child merges onto its root (root-container scope;
+  // deeper-node overrides stay flagged below). The override fields come straight from the
+  // IR (resolve-lib's overrideApplied, surfaced as n.override.fields).
+  const styleFields = (n.override?.fields ?? []).filter((f) => STYLE_OVERRIDE_FIELDS.has(f));
+  const overrideBody = styleFields.length ? rootOverrideStyle(n, styleFields, push) : "";
+  if (overrideBody) attrs += ` ${styleOverridePropName(entry.comp)}={{ ${overrideBody} }}`;
+
   const overrides = n.component?.overrides ?? 0;
   if (overrides) {
-    const passed = [...emitted];
+    const passed = [...emitted, ...(overrideBody ? [`style[${styleFields.join(",")}]`] : [])];
     push(
       `referenced <${entry.Comp}${attrs}/> for "${n.name}" (${n.guid}) — ${overrides} instance override(s)` +
-        `${passed.length ? `, passed [${passed.join(", ")}]` : ""}; confirm remaining overrides (image/style/icon) are handled`
+        `${passed.length ? `, passed [${passed.join(", ")}]` : ""}; confirm remaining overrides (image/icon/deep-node) are handled`
     );
   }
   return `${pad}<${entry.Comp}${attrs} />`;
@@ -577,6 +633,7 @@ type VariantRender = {
   styles: { key: string; body: string }[];
   usedProps: Set<string>; // logical prop names this variant references
   refImports: Map<string, string>; // referenced child component: Comp identifier → file slug
+  usesStyleProp: boolean; // root merges the `style` override prop → destructure it
   todos: string[];
 };
 
@@ -587,6 +644,7 @@ function renderVariant(v: any): VariantRender {
   const styles: { key: string; body: string }[] = [];
   const usedProps = new Set<string>();
   const refImports = new Map<string, string>(); // nested child components referenced here
+  let usesStyleProp = false; // set when the root node merges the `style` override prop
 
   // node guid → logical prop, via THIS variant's bindings (defKey-joined). A node may
   // carry a text binding, a visibility binding, an instance-swap binding, or several.
@@ -604,7 +662,7 @@ function renderVariant(v: any): VariantRender {
   const subtree = findNodeByGuid(v.guidKey);
   if (!subtree) {
     push(`variant subtree not found by guid ${v.guidKey} — emitting an empty shell`);
-    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, todos };
+    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, usesStyleProp, todos };
   }
 
   const Box = web ? "div" : "View";
@@ -679,7 +737,16 @@ function renderVariant(v: any): VariantRender {
     const pad = "  ".repeat(depth);
     const sk = styleKey(n);
     const binds = bindingsOf.get(n.guid);
-    const styleAttr = web ? `style={styles.${sk}}` : `style={styles.${sk}}`;
+    // The ROOT node (depth 0) merges the incoming `style` override prop on top of its
+    // own style, so a parent referencing this component can re-apply per-instance root
+    // overrides (issue #23). Non-root nodes keep their plain style object.
+    const isRoot = depth === 0;
+    if (isRoot) usesStyleProp = true;
+    const styleAttr = isRoot
+      ? web
+        ? `style={{ ...styles.${sk}, ...${STYLE_PROP} }}`
+        : `style={[styles.${sk}, ${STYLE_PROP}]}`
+      : `style={styles.${sk}}`;
     const kidsAll = (n.children ?? []).filter((c) => (c as any).visible !== false);
     const posLines = positionPrefix(n, parentPositionsChildren, absOverride, zIndex, kidsAll);
     const prefixBody = (body: string) => (posLines.length ? posLines.join("\n") + (body ? "\n" + body : "") : body);
@@ -780,7 +847,7 @@ function renderVariant(v: any): VariantRender {
   }
 
   const jsx = emit(subtree, 0, false);
-  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, todos };
+  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, usesStyleProp, todos };
 }
 
 const rendered = variants.map(renderVariant);
@@ -799,13 +866,21 @@ function propsTypeBody(): string {
     lines.push(`  /** Figma: ${fig} */`);
     lines.push(`  ${l.name}?: ${l.tsType};`);
   }
+  // Per-instance ROOT style override, merged onto the component's root node (issue #23).
+  // A parent referencing this component as a nested instance passes its overridden root
+  // box styles here; also usable when assembling screens to nudge an instance.
+  lines.push(`  /** Root style override (applied to this component's root element). */`);
+  lines.push(`  ${STYLE_PROP}?: ${web ? "React.CSSProperties" : "StyleProp<ViewStyle>"};`);
   return lines.join("\n");
 }
 
 function typesFile(): string {
+  const typeImports = web
+    ? `import type * as React from 'react';`
+    : `import type * as React from 'react';\nimport type { StyleProp, ViewStyle } from 'react-native';`;
   return `// AUTO-GENERATED — shared Props type for the "${comp.name}" component folder.
 // Type-only module so index.tsx and the per-variant files never form a runtime cycle.
-import type * as React from 'react';
+${typeImports}
 
 export type ${Comp}Props = {
 ${propsTypeBody()}
@@ -814,8 +889,10 @@ ${propsTypeBody()}
 }
 
 // the destructure of logical props (all optional) for a variant component signature.
-function destructure(used: Set<string>): string {
+// `withStyle` appends the root `style` override prop when the variant's root merges it.
+function destructure(used: Set<string>, withStyle: boolean): string {
   const names = logicals.filter((l) => used.has(l.name)).map((l) => l.name);
+  if (withStyle) names.push(STYLE_PROP);
   return names.length ? `{ ${names.join(", ")} }` : "_props";
 }
 
@@ -848,7 +925,7 @@ function variantFile(r: VariantRender): string {
 ${imports}
 import type { ${Comp}Props } from './types';
 
-export function ${r.compName}(${destructure(r.usedProps)}: ${Comp}Props) {
+export function ${r.compName}(${destructure(r.usedProps, r.usesStyleProp)}: ${Comp}Props) {
   return (
 ${ind(r.jsx, 4)}
   );
