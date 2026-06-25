@@ -18,6 +18,7 @@ import {
 } from "./reconcile-lib.mts";
 import { resolveInstance } from "./resolve-lib.mts";
 import { cornerRadiusOf } from "./screens-lib.mts";
+import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./layout-lib.mts";
 import {
   cssVarName,
   treePath,
@@ -161,6 +162,43 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
     [{ box: { x: 22.5, y: 0, w: 285.5, h: 40 } }, { box: { x: 308, y: 0, w: 62, h: 40 } }],
   );
   eq("dj offset > tol not flush → space-evenly", overTol, "space-evenly");
+}
+
+// ── layout-lib: overlap geometry + peek-stack detection (improvement #11) ────
+{
+  // strict overlap: edge-touching does NOT count; real intersection does.
+  eq("overlap edge-touch → false", overlap({ x: 0, y: 0, w: 10, h: 10 }, { x: 10, y: 0, w: 10, h: 10 }), false);
+  eq("overlap real → true", overlap({ x: 0, y: 0, w: 10, h: 10 }, { x: 5, y: 0, w: 10, h: 10 }), true);
+  eq("overlapArea disjoint → 0", overlapArea({ x: 0, y: 0, w: 10, h: 10 }, { x: 20, y: 0, w: 10, h: 10 }), 0);
+  eq("overlapArea 5x10 → 50", overlapArea({ x: 0, y: 0, w: 10, h: 10 }, { x: 5, y: 0, w: 10, h: 10 }), 50);
+
+  // negative-gap flex (slider track `blue`, guid 1153:1957 family): a fill bar + a thumb,
+  // ADJACENT, overlapping ~30% — must STAY flex (no non-adjacent pair). #11 must not fire.
+  eq(
+    "peek-stack: adjacent slider bar+thumb → false",
+    hasSignificantNonAdjacentOverlap([{ x: 0, y: 4, w: 117, h: 12 }, { x: 107, y: 0, w: 20, h: 20 }]),
+    false,
+  );
+  // authored peek-carousel (collections-slider Frame 1686562511, 5 product cards): large
+  // center + 4 progressively-smaller cards stacked behind — NON-ADJACENT pairs overlap
+  // 34–88%. #11 must fire so codegen positions them absolutely even with no abs flag.
+  eq(
+    "peek-stack: collections 5-card carousel → true",
+    hasSignificantNonAdjacentOverlap([
+      { x: -4, y: 63, w: 160, h: 199 },
+      { x: 19, y: 38, w: 200, h: 249 },
+      { x: 210, y: 63, w: 160, h: 199 },
+      { x: 150, y: 38, w: 200, h: 249 },
+      { x: 53, y: 0, w: 260, h: 324 },
+    ]),
+    true,
+  );
+  // a clean flex row (3 cards laid out side by side, tiny frozen-bbox touches only) → false.
+  eq(
+    "peek-stack: clean side-by-side row → false",
+    hasSignificantNonAdjacentOverlap([{ x: 0, y: 0, w: 100, h: 100 }, { x: 100, y: 0, w: 100, h: 100 }, { x: 200, y: 0, w: 100, h: 100 }]),
+    false,
+  );
 }
 
 // ── screens-lib: cornerRadiusOf (CODEGEN_BUGS_v2 B — independent per-corner) ──
