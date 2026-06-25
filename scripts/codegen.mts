@@ -45,9 +45,13 @@ const argv = process.argv.slice(2);
 const dir = argv[0];
 const setName = argv[1];
 if (!dir || !setName || setName.startsWith("--"))
-  throw new Error("usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>]");
+  throw new Error("usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>]");
 const flag = (n: string) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 const outDir = flag("--out");
+// Decoded .fig images dir (the unzipped fig's `images/`, raster fills by content hash).
+// When given (with --out), codegen EXTRACTS each referenced image fill into the component
+// folder's assets/ and emits a real src reference instead of a placeholder TODO.
+const imagesDir = flag("--images");
 const framework = (flag("--framework") ?? "rn").toLowerCase();
 if (framework !== "rn" && framework !== "web")
   throw new Error(`--framework must be rn|web (got "${framework}")`);
@@ -110,7 +114,16 @@ if (!comp) {
 // --- axes / default variant ---------------------------------------------------
 const axes: Record<string, string[]> = comp.axes ?? {};
 const axisNames = Object.keys(axes);
-const variants: any[] = comp.variants ?? [];
+// A component with NO detected variants (a heuristic single-frame component — e.g.
+// `stroke-hint` detected a bordered frame, no variant axis) still IS a component: treat
+// the set frame itself as one default variant rendered from its own subtree, instead of
+// crashing on an empty `rendered[]` (its guid resolves in the screens IR like any variant).
+const variants: any[] =
+  comp.variants?.length
+    ? comp.variants
+    : comp.guid
+      ? [{ guidKey: comp.guid, props: {}, rawName: comp.name ?? "default", bindings: [], size: comp.size }]
+      : [];
 const isDefaultVariant = (v: any) =>
   axisNames.every((a) => (axes[a]?.[0] !== undefined ? v.props[a] === axes[a][0] : true));
 const defaultVariant = variants.find(isDefaultVariant) ?? variants[0];
@@ -222,6 +235,44 @@ const { logicals, logicalByDefKey } = deriveLogicals(comp);
 // --- identifiers --------------------------------------------------------------
 const Comp = compIdent(comp.name ?? setName);
 const slug = slugify(comp.name ?? setName) || "component";
+
+// --- image-fill asset extraction (--images) -----------------------------------
+// Copy a referenced raster fill (by content hash) out of the decoded .fig images dir
+// into <out>/<slug>/assets/, so codegen can emit a REAL reference (web backgroundImage /
+// rn <Image source>) instead of a placeholder TODO. Memoized; returns the written
+// basename (e.g. "<hash>.png") or null when no --images/--out or the asset is absent.
+// Extension is sniffed from magic bytes (the fig stores fills extension-less).
+const extFromMagic = (b: Buffer): string => {
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return ".png";
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return ".jpg";
+  if (b.length >= 12 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP") return ".webp";
+  if (b.length >= 6 && b.toString("ascii", 0, 4) === "GIF8") return ".gif";
+  return "";
+};
+const assetCache = new Map<string, string | null>(); // hash → written basename | null
+function assetRef(hash: string | undefined): string | null {
+  if (!hash || !imagesDir || !outDir) return null;
+  if (assetCache.has(hash)) return assetCache.get(hash)!;
+  let src: string | null = null;
+  const direct = path.join(imagesDir, hash);
+  if (fs.existsSync(direct)) src = direct;
+  else if (fs.existsSync(imagesDir)) {
+    const f = fs.readdirSync(imagesDir).find((x) => x === hash || x.startsWith(hash + "."));
+    if (f) src = path.join(imagesDir, f);
+  }
+  if (!src) { assetCache.set(hash, null); return null; }
+  const buf = fs.readFileSync(src);
+  const file = hash + (path.extname(src) || extFromMagic(buf));
+  const destDir = path.join(outDir, slug, "assets");
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.writeFileSync(path.join(destDir, file), buf);
+  assetCache.set(hash, file);
+  return file;
+}
+const imageHashOf = (n: IRNode): string | undefined => {
+  const f = (n.style?.fills ?? []).find((x: any) => x.type === "image" && x.imageHash);
+  return f ? ((f as any).imageHash as string) : undefined;
+};
 function variantComponentName(v: any): string {
   const k = variantPropKey(v);
   const camel = k.replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase()).replace(/\s/g, "");
@@ -239,6 +290,22 @@ const propKeyExpr =
 function kebabProp(s: string): string {
   return s.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[\s_]+/g, "-").replace(/[^\w-]/g, "").toLowerCase();
 }
+
+// Name of the per-instance ROOT style-override prop for a component (issue #23). Defaults
+// to the idiomatic `style`, but a Figma variant axis can literally be named "Style" (→ a
+// `style` variant prop — e.g. Button), which would collide. So fall back to a free name,
+// derived from the component's OWN axes + logical props. Both the generated component and
+// any PARENT referencing it call this on the same catalog record, so the names agree.
+function styleOverridePropName(c: any): string {
+  const taken = new Set<string>();
+  const axNames = Object.keys(c.axes ?? {});
+  if (axNames.length === 1) taken.add("variant");
+  else for (const a of axNames) taken.add(kebabProp(a));
+  for (const l of deriveLogicals(c).logicals) taken.add(l.name);
+  for (const cand of ["style", "rootStyle", "styleOverride", "rootStyleOverride"]) if (!taken.has(cand)) return cand;
+  return "rootStyleOverride";
+}
+const STYLE_PROP = styleOverridePropName(comp); // the override-prop name for THIS component
 
 // === per-node JSX rendering (a variant's resolved subtree → a JSX tree) =========
 const allTodos: string[] = [];
@@ -264,36 +331,48 @@ function colorRef(
 }
 
 // One node's style object body (container/box fields). web|rn share most fields.
-function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
+// `only` (optional) restricts emission to the listed override field names (a subset
+// of FIELD_KEYS): codegen passes it to build a per-instance ROOT style OVERRIDE for a
+// referenced child component, so only the genuinely-overridden box fields are emitted
+// (no layout/flex-child lines, which aren't override-able). Omitted ⇒ full body.
+function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>): string {
   const lines: string[] = [];
   const s = n.style;
+  const want = (f: string) => !only || only.has(f);
   // size: emit when fixed (a hug/grow child sizes itself; still record for fidelity).
-  if (n.box) { if (n.box.w) lines.push(`width: ${n.box.w},`); if (n.box.h) lines.push(`height: ${n.box.h},`); }
+  if (want("size") && n.box) { if (n.box.w) lines.push(`width: ${n.box.w},`); if (n.box.h) lines.push(`height: ${n.box.h},`); }
   // background = first solid fill (bound var wins as a token comment).
-  const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
-  if (fill) {
-    const ref = colorRef({ hex: fill.hex ?? null, var: (fill as any).var ?? null, match: (fill as any).var ? "bound" : null }, `${n.name} background`, push);
-    lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
-  }
-  // image fill (improvement 5-image-fills): codegen can't embed bytes, so flag for
-  // export + leave a placeholder bg. Emitted AFTER the solid fill so a node with both
-  // keeps its solid bg AND still gets flagged.
-  const imgFill = s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
-  if (imgFill) {
-    const hash = (imgFill as any).imageHash as string;
-    push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — export to images/ and wire the src`);
-    // Round 2 (C): do NOT emit an opaque placeholder bg. Image-fill nodes are often
-    // image-ONLY (no solid in the design) and the assets are transparent PNGs meant to
-    // composite over the parent surface — an opaque #eee would show through their alpha.
-    // Leave the background transparent; the TODO flags the node for wiring.
-    if (web) {
-      lines.push(`// TODO: image — backgroundImage: 'url(images/${hash.slice(0, 16)}…)'`);
-      lines.push(`backgroundSize: 'cover',`);
-    } else {
-      lines.push(`// TODO: image — render as <Image source={{ uri: '…/${hash.slice(0, 16)}…' }} />`);
+  if (want("fillPaints")) {
+    const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
+    if (fill) {
+      const ref = colorRef({ hex: fill.hex ?? null, var: (fill as any).var ?? null, match: (fill as any).var ? "bound" : null }, `${n.name} background`, push);
+      lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
+    }
+    // image fill (improvement 5-image-fills): with --images, EXTRACT the raster fill into
+    // assets/ and emit a real backgroundImage reference; without it, leave a placeholder
+    // TODO. Emitted AFTER the solid fill so a node with both keeps its solid bg too.
+    // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
+    // (handled there). Skipped in override mode (`only`): an image override is flagged by
+    // the caller's instance-override TODO, not inlined into a `style={{…}}` prop.
+    const imgFill = !only && web && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
+    if (imgFill) {
+      const hash = (imgFill as any).imageHash as string;
+      const file = assetRef(hash);
+      if (file) {
+        lines.push(`backgroundImage: "url('./assets/${file}')",`);
+        lines.push(`backgroundSize: 'cover',`);
+        lines.push(`backgroundPosition: 'center',`);
+        lines.push(`backgroundRepeat: 'no-repeat',`);
+      } else {
+        push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — pass --images <dir> to extract + wire the src`);
+        // No opaque placeholder bg: image-only fills are often transparent PNGs meant to
+        // composite over the parent surface (an opaque #eee would show through their alpha).
+        lines.push(`// TODO: image — backgroundImage: "url('./assets/${hash.slice(0, 16)}…')" (re-run codegen with --images)`);
+        lines.push(`backgroundSize: 'cover',`);
+      }
     }
   }
-  if (s?.cornerRadius !== undefined) {
+  if (want("cornerRadius") && s?.cornerRadius !== undefined) {
     if (typeof s.cornerRadius === "number") lines.push(`borderRadius: ${s.cornerRadius},`);
     else {
       lines.push(`borderTopLeftRadius: ${s.cornerRadius.tl},`);
@@ -303,7 +382,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
     }
   }
   // strokes + per-side widths (improvement 3-borders).
-  if (s?.strokes?.length) {
+  if ((want("strokePaints") || want("strokeWeight")) && s?.strokes?.length) {
     const st = s.strokes[0];
     // route through colorRef so a bound stroke references the theme (issue #17), same as fills.
     const cref = colorRef({ hex: st.hex ?? null, var: (st as any).var ?? null, match: (st as any).var ? "bound" : null }, `${n.name} border`, push);
@@ -324,8 +403,8 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
       else if (st.dash?.length) lines.push(`borderStyle: 'dashed',`);
     }
   }
-  if (s?.opacity !== undefined) lines.push(`opacity: ${s.opacity},`);
-  if (s?.effects?.length) {
+  if (want("opacity") && s?.opacity !== undefined) lines.push(`opacity: ${s.opacity},`);
+  if (want("effects") && s?.effects?.length) {
     const e = s.effects[0];
     if (web) lines.push(`boxShadow: '${e.offsetX}px ${e.offsetY}px ${e.radius}px ${e.spread ?? 0}px ${e.hex ?? "#000"}', // ${e.type}${s.effects.length > 1 ? ` (+${s.effects.length - 1} more — see master)` : ""}`);
     else {
@@ -335,26 +414,47 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void): string {
       if (s.effects.length > 1) lines.push(`// +${s.effects.length - 1} more effect(s) — see master`);
     }
   }
-  // auto-layout container.
-  const l = n.layout;
-  if (l) {
-    lines.push(`display: 'flex',`);
-    lines.push(`flexDirection: '${l.mode}',`);
-    if (l.gap !== undefined) lines.push(`gap: ${l.gap},`);
-    // SPACE_EVENLY→SPACE_BETWEEN disambiguation (improvement 8): the helper filters
-    // absolute/invisible children and requires >=2 in-flow.
-    const j = disambiguateJustify(l, n.box, n.children ?? []);
-    if (j) lines.push(`justifyContent: '${j}',`);
-    if (l.align) lines.push(`alignItems: '${l.align}',`);
-    if (l.paddingTop !== undefined) lines.push(`paddingTop: ${l.paddingTop},`);
-    if (l.paddingRight !== undefined) lines.push(`paddingRight: ${l.paddingRight},`);
-    if (l.paddingBottom !== undefined) lines.push(`paddingBottom: ${l.paddingBottom},`);
-    if (l.paddingLeft !== undefined) lines.push(`paddingLeft: ${l.paddingLeft},`);
-    if (l.wrap) lines.push(`flexWrap: 'wrap',`);
+  // auto-layout container + flex-child sizing: structural, never a per-instance style
+  // override — emitted in full mode only (skipped when building a root override body).
+  if (!only) {
+    const l = n.layout;
+    if (l) {
+      lines.push(`display: 'flex',`);
+      lines.push(`flexDirection: '${l.mode}',`);
+      if (l.gap !== undefined) lines.push(`gap: ${l.gap},`);
+      // SPACE_EVENLY→SPACE_BETWEEN disambiguation (improvement 8): the helper filters
+      // absolute/invisible children and requires >=2 in-flow.
+      const j = disambiguateJustify(l, n.box, n.children ?? []);
+      if (j) lines.push(`justifyContent: '${j}',`);
+      if (l.align) lines.push(`alignItems: '${l.align}',`);
+      if (l.paddingTop !== undefined) lines.push(`paddingTop: ${l.paddingTop},`);
+      if (l.paddingRight !== undefined) lines.push(`paddingRight: ${l.paddingRight},`);
+      if (l.paddingBottom !== undefined) lines.push(`paddingBottom: ${l.paddingBottom},`);
+      if (l.paddingLeft !== undefined) lines.push(`paddingLeft: ${l.paddingLeft},`);
+      if (l.wrap) lines.push(`flexWrap: 'wrap',`);
+    }
+    // node as a flex child.
+    lines.push(...flexChildLines(n));
   }
-  // node as a flex child.
-  lines.push(...flexChildLines(n));
   return lines.join("\n");
+}
+
+// Build the per-instance ROOT style-override object body for a nested-component
+// reference: only the box fields the instance actually overrode on its root (a subset
+// of STYLE_OVERRIDE_FIELDS), flattened to a single inline-object body. Returns "" when
+// nothing maps. Shares nodeStyleBody's field→CSS mapping so parent and child agree.
+const STYLE_OVERRIDE_FIELDS = new Set(["fillPaints", "strokePaints", "strokeWeight", "cornerRadius", "opacity", "size", "effects"]);
+function rootOverrideStyle(n: IRNode, fields: string[], push: (m: string) => void): string {
+  const sel = fields.filter((f) => STYLE_OVERRIDE_FIELDS.has(f));
+  if (!sel.length) return "";
+  // Strip trailing `// …` line comments (token/align annotations nodeStyleBody appends)
+  // before flattening to one line — otherwise a `//` would comment out the rest of the
+  // inline object literal, including its closing `}}`. Block `/* … */` comments are safe.
+  return nodeStyleBody(n, push, new Set(sel))
+    .split("\n")
+    .map((l) => l.replace(/\s*\/\/.*$/, "").trim())
+    .filter(Boolean)
+    .join(" ");
 }
 
 // A node's sizing AS A FLEX CHILD (improvement 3): grow/alignSelf/min/aspect. Shared
@@ -556,12 +656,22 @@ function componentReference(
     }
   }
 
+  // ROOT style override (regression fix, issue #23): pre-PR-#22 the instance subtree was
+  // inlined, so per-instance ROOT box overrides (fill/radius/border/opacity/size/effects)
+  // rendered. Referencing dropped them — the child drew its MASTER styles. Re-apply them
+  // here as a `style` prop the referenced child merges onto its root (root-container scope;
+  // deeper-node overrides stay flagged below). The override fields come straight from the
+  // IR (resolve-lib's overrideApplied, surfaced as n.override.fields).
+  const styleFields = (n.override?.fields ?? []).filter((f) => STYLE_OVERRIDE_FIELDS.has(f));
+  const overrideBody = styleFields.length ? rootOverrideStyle(n, styleFields, push) : "";
+  if (overrideBody) attrs += ` ${styleOverridePropName(entry.comp)}={{ ${overrideBody} }}`;
+
   const overrides = n.component?.overrides ?? 0;
   if (overrides) {
-    const passed = [...emitted];
+    const passed = [...emitted, ...(overrideBody ? [`style[${styleFields.join(",")}]`] : [])];
     push(
       `referenced <${entry.Comp}${attrs}/> for "${n.name}" (${n.guid}) — ${overrides} instance override(s)` +
-        `${passed.length ? `, passed [${passed.join(", ")}]` : ""}; confirm remaining overrides (image/style/icon) are handled`
+        `${passed.length ? `, passed [${passed.join(", ")}]` : ""}; confirm remaining overrides (image/icon/deep-node) are handled`
     );
   }
   return `${pad}<${entry.Comp}${attrs} />`;
@@ -577,6 +687,8 @@ type VariantRender = {
   styles: { key: string; body: string }[];
   usedProps: Set<string>; // logical prop names this variant references
   refImports: Map<string, string>; // referenced child component: Comp identifier → file slug
+  usesStyleProp: boolean; // root merges the `style` override prop → destructure it
+  rnImageUsed: boolean; // an rn <Image> was emitted → import it
   todos: string[];
 };
 
@@ -587,6 +699,8 @@ function renderVariant(v: any): VariantRender {
   const styles: { key: string; body: string }[] = [];
   const usedProps = new Set<string>();
   const refImports = new Map<string, string>(); // nested child components referenced here
+  let usesStyleProp = false; // set when the root node merges the `style` override prop
+  let rnImageUsed = false; // set when an rn <Image> is emitted for an extracted fill
 
   // node guid → logical prop, via THIS variant's bindings (defKey-joined). A node may
   // carry a text binding, a visibility binding, an instance-swap binding, or several.
@@ -604,7 +718,7 @@ function renderVariant(v: any): VariantRender {
   const subtree = findNodeByGuid(v.guidKey);
   if (!subtree) {
     push(`variant subtree not found by guid ${v.guidKey} — emitting an empty shell`);
-    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, todos };
+    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, usesStyleProp, rnImageUsed, todos };
   }
 
   const Box = web ? "div" : "View";
@@ -679,7 +793,16 @@ function renderVariant(v: any): VariantRender {
     const pad = "  ".repeat(depth);
     const sk = styleKey(n);
     const binds = bindingsOf.get(n.guid);
-    const styleAttr = web ? `style={styles.${sk}}` : `style={styles.${sk}}`;
+    // The ROOT node (depth 0) merges the incoming `style` override prop on top of its
+    // own style, so a parent referencing this component can re-apply per-instance root
+    // overrides (issue #23). Non-root nodes keep their plain style object.
+    const isRoot = depth === 0;
+    if (isRoot) usesStyleProp = true;
+    const styleAttr = isRoot
+      ? web
+        ? `style={{ ...styles.${sk}, ...${STYLE_PROP} }}`
+        : `style={[styles.${sk}, ${STYLE_PROP}]}`
+      : `style={styles.${sk}}`;
     const kidsAll = (n.children ?? []).filter((c) => (c as any).visible !== false);
     const posLines = positionPrefix(n, parentPositionsChildren, absOverride, zIndex, kidsAll);
     const prefixBody = (body: string) => (posLines.length ? posLines.join("\n") + (body ? "\n" + body : "") : body);
@@ -761,6 +884,24 @@ function renderVariant(v: any): VariantRender {
       push(`instance "${n.name}" (${n.guid}) has no resolved children — confirm the icon master`);
       inner = `${"  ".repeat(depth + 1)}{/* TODO: instance "${n.name}" — confirm icon master (${n.guid}) */}`;
     }
+    // rn: a View style can't hold a background image, so render an absolute-fill <Image>
+    // BEHIND the children (web set backgroundImage in the style above). Needs --images to
+    // extract the asset; without it, flag the node so nothing is silently dropped.
+    if (!web) {
+      const ih = imageHashOf(n);
+      if (ih) {
+        const file = assetRef(ih);
+        if (file) {
+          rnImageUsed = true;
+          const ik = `${sk}__img`;
+          styles.push({ key: ik, body: "position: 'absolute',\ntop: 0,\nleft: 0,\nright: 0,\nbottom: 0," });
+          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="cover" />`;
+          inner = inner ? `${imgEl}\n${inner}` : imgEl;
+        } else {
+          push(`image fill "${n.name}" (${n.guid}) hash ${ih.slice(0, 8)}… — pass --images <dir> to extract + render <Image>`);
+        }
+      }
+    }
     const el = inner
       ? `${pad}<${Box} ${styleAttr}>\n${inner}\n${pad}</${Box}>`
       : `${pad}<${Box} ${styleAttr} />`;
@@ -780,10 +921,12 @@ function renderVariant(v: any): VariantRender {
   }
 
   const jsx = emit(subtree, 0, false);
-  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, todos };
+  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, usesStyleProp, rnImageUsed, todos };
 }
 
 const rendered = variants.map(renderVariant);
+if (!rendered.length)
+  throw new Error(`component set "${comp.name ?? setName}" has no variants and no set guid to render — nothing to generate (check the component detection in build-ir)`);
 for (const r of rendered) allTodos.push(...r.todos);
 
 // === FILE EMISSION ============================================================
@@ -799,13 +942,21 @@ function propsTypeBody(): string {
     lines.push(`  /** Figma: ${fig} */`);
     lines.push(`  ${l.name}?: ${l.tsType};`);
   }
+  // Per-instance ROOT style override, merged onto the component's root node (issue #23).
+  // A parent referencing this component as a nested instance passes its overridden root
+  // box styles here; also usable when assembling screens to nudge an instance.
+  lines.push(`  /** Root style override (applied to this component's root element). */`);
+  lines.push(`  ${STYLE_PROP}?: ${web ? "React.CSSProperties" : "StyleProp<ViewStyle>"};`);
   return lines.join("\n");
 }
 
 function typesFile(): string {
+  const typeImports = web
+    ? `import type * as React from 'react';`
+    : `import type * as React from 'react';\nimport type { StyleProp, ViewStyle } from 'react-native';`;
   return `// AUTO-GENERATED — shared Props type for the "${comp.name}" component folder.
 // Type-only module so index.tsx and the per-variant files never form a runtime cycle.
-import type * as React from 'react';
+${typeImports}
 
 export type ${Comp}Props = {
 ${propsTypeBody()}
@@ -814,8 +965,10 @@ ${propsTypeBody()}
 }
 
 // the destructure of logical props (all optional) for a variant component signature.
-function destructure(used: Set<string>): string {
+// `withStyle` appends the root `style` override prop when the variant's root merges it.
+function destructure(used: Set<string>, withStyle: boolean): string {
   const names = logicals.filter((l) => used.has(l.name)).map((l) => l.name);
+  if (withStyle) names.push(STYLE_PROP);
   return names.length ? `{ ${names.join(", ")} }` : "_props";
 }
 
@@ -833,10 +986,11 @@ function variantFile(r: VariantRender): string {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([Ref, refSlug]) => `import { ${Ref} } from '../${refSlug}';`)
     .join("\n");
+  const rnImports = ["View", "Text", "StyleSheet", ...(r.rnImageUsed ? ["Image"] : [])].join(", ");
   const imports =
     (web
       ? `import * as React from 'react';`
-      : `import * as React from 'react';\nimport { View, Text, StyleSheet } from 'react-native';`) +
+      : `import * as React from 'react';\nimport { ${rnImports} } from 'react-native';`) +
     (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "") +
     (refImportLines ? `\n${refImportLines}` : "");
   const todoBlock = r.todos.length
@@ -848,7 +1002,7 @@ function variantFile(r: VariantRender): string {
 ${imports}
 import type { ${Comp}Props } from './types';
 
-export function ${r.compName}(${destructure(r.usedProps)}: ${Comp}Props) {
+export function ${r.compName}(${destructure(r.usedProps, r.usesStyleProp)}: ${Comp}Props) {
   return (
 ${ind(r.jsx, 4)}
   );

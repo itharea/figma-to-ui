@@ -123,7 +123,8 @@ in code. Generate the theme first so the next step can point components at it.
 For each designer **component set**, generate the scaffold from its master:
 
 ```sh
-node codegen.mts ir-<name> <set> --framework web --out src/components --theme-import ../theme
+node codegen.mts ir-<name> <set> --framework web --out src/components --theme-import ../theme \
+  --images <unzipped-fig>/images
 ```
 
 You get a folder: `index.tsx` (a dispatcher switching on the variant prop),
@@ -132,6 +133,13 @@ You get a folder: `index.tsx` (a dispatcher switching on the variant prop),
 resolved subtree** as a real JSX tree with reconciled per-node
 style/layout/font/text, bound values referencing the theme, and `// TODO`s on
 every placeholder/conflict/unmapped value.
+
+**Pass `--images <unzipped-fig>/images` so real raster fills are wired, not
+TODO'd.** With it, codegen **extracts** each referenced image fill (product
+photos, thumbnails) into `<slug>/assets/` and emits a real reference — web
+`backgroundImage: url('./assets/<hash>.png')`, rn `<Image source={require(…)}>`
+— so the elevate step sees the actual image instead of a placeholder box. Without
+it, image fills stay as `// TODO` (re-run with `--images` to wire them).
 
 **Why one file per variant, not CSS conditionals?** On purpose. Figma variants
 frequently have **different frame structures** — a `SingleLine` header has no
@@ -231,8 +239,10 @@ node export-svg.mts msg-<name>.json <guidKey> out.svg [--png]   # vector logos/i
 ```
 
 Icon layer names usually identify a public library (Phosphor: `MagnifyingGlass`,
-`CaretUpDown`) — use the package instead of exporting every icon. Copy raster/
-video fills from the zip's `images/`·`videos/` by their content hash.
+`CaretUpDown`) — use the package instead of exporting every icon. **Raster image
+fills referenced by a component are already extracted + wired** when Step 4 ran
+with `--images` (into `<slug>/assets/`); only `export-svg` vectors/logos and any
+video fills (from the zip's `videos/` by content hash) remain to wire by hand.
 
 ---
 
