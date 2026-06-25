@@ -53,10 +53,19 @@ function emit(n: any, mat: Mat) {
     for (const g of geos ?? []) {
       const ps = visiblePaints(paints);
       if (!ps.length) continue;
-      const op = (ps[0].opacity ?? 1) * (n.opacity ?? 1);
-      paths.push(
-        `<path d="${decodePath(g.commandsBlob)}" fill="${colorStr(ps[0].color)}"${op < 1 ? ` fill-opacity="${op.toFixed(3)}"` : ""} fill-rule="${g.windingRule === "ODD" ? "evenodd" : "nonzero"}" transform="${matStr}"/>`
-      );
+      // Emit EVERY visible solid paint, not just the first — a multi-fill vector (e.g. a
+      // base colour + a roast overlay) stacks paints on the SAME geometry. Document order
+      // is paint order: fills[0] is the bottom layer, later paints composite on top.
+      // Opacity is PER-PAINT, so it stays inside this loop; only the path data + winding
+      // rule are per-geometry and hoisted.
+      const d = decodePath(g.commandsBlob);
+      const fr = g.windingRule === "ODD" ? "evenodd" : "nonzero";
+      for (const p of ps) {
+        const op = (p.opacity ?? 1) * (n.opacity ?? 1);
+        paths.push(
+          `<path d="${d}" fill="${colorStr(p.color)}"${op < 1 ? ` fill-opacity="${op.toFixed(3)}"` : ""} fill-rule="${fr}" transform="${matStr}"/>`
+        );
+      }
     }
   }
 }

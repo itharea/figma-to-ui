@@ -226,6 +226,28 @@ the finished component.
 Now act as an experienced Staff SWE. Refactor the scaffold into the component you
 would actually ship — **without breaking the 1:1 mapping**.
 
+**Elevation is a refactor *of codegen's output*, not a re-derivation from the IR.**
+Codegen is the **source of truth**: every value it resolved — geometry, per-side
+padding, gaps, radii, colour tokens, typography, and the variant→structure mapping —
+is a FIXED input. Never re-measure or re-derive from the `.fig`/IR; a from-scratch
+rewrite reliably loses values codegen transcribed correctly. Elevation may change only
+*form*: opaque style-key names → semantic names, N near-identical variant files → one
+token-driven component, repeated sub-trees → small shared sub-components, variant axes
+→ props. It must not change a single resolved value.
+
+> **Precondition — elevate only once the scaffold is DATA-COMPLETE.** Codegen now
+> carries the IR's vector/icon data through (size + every fill + token + resolved
+> colour), flags every instance-swap default, and renders master-visible content by
+> default. If any of that is missing (an un-flagged empty slot, a hidden master node,
+> a vector with no fills note), the scaffold isn't yet a trustworthy source of truth —
+> fix codegen first; don't elevate against a guess.
+
+The most reliable way to hold this line is to **spawn the elevate subagent once per
+component** — `figma-to-ui/agents/elevate.md` — passing the component's paths (slug,
+scaffold dir, IR component JSON, out file, theme note, icon note). Its prompt forbids
+changing any resolved value, so it refactors for elegance without drifting into
+re-derivation (the `skill-creator` ships its agents the same way).
+
 **Do:**
 - **Re-bind to the theme.** Every value annotated `// var …` / `// token …`, and
   every bound value, must reference the generated theme (`theme.color.praline[950]`
@@ -335,24 +357,34 @@ node icons.mts      msg-<name>.json <screen-guidKey>   # icon instances → libr
 node export-svg.mts msg-<name>.json <guidKey> out.svg [--png]   # vector logos/illustrations
 ```
 
-The scaffold deliberately leaves every vector/icon as a `// TODO` (codegen cannot
-draw paths). How you resolve those TODOs is a **decision the user owns** — there is
-no universal default, so **ask every run**.
+The scaffold leaves every vector/icon as a `// TODO` (codegen cannot draw paths) but
+now carries its resolved data *through* that TODO — size, every fill (hex + token),
+and (for a mono-fill icon) the resolved colour (finding #1). With that data, the
+**default policy is OWNED icons: export the geometry from the `.fig` and build a local,
+recolorable 1:1 icon set.** An icon library is **opt-in** — only when the user asks.
 
-> **Decision point — pick the icon/vector strategy (ask the user, every run).**
-> Run `icons.mts` first to inventory the icon instances and the `AppIconName` union,
-> then present the inventory + a recommended policy and get the user's choice:
-> - **(a) Existing icon library** (Phosphor / lucide / custom) — the natural default
->   when layer names are library exports (Phosphor: `MagnifyingGlass`, `CaretUpDown`).
+Why owned-by-default: the `.fig` holds the exact paths, fills and per-context colours.
+A library can only *approximate* — it can't reproduce a custom `Format`/`Weight` axis,
+an off-library glyph, or a brand mark, and it adds a runtime dependency. Exporting
+replicates every icon 1:1 with zero external deps.
+
+> **Decision point — confirm the icon/vector strategy (default: owned).**
+> Run `icons.mts` first to inventory the icon instances and the `AppIconName` union.
+> - **(a) Owned, exported (default).** Export each icon set's geometry via
+>   `export-svg.mts` (now faithful to *every* path and *every* fill, finding #4) and
+>   elevate it into an owned component that is **recolorable** (`currentColor` / a
+>   `color` prop — the `RoastSquare` pattern). The elevation step reads the exported
+>   code + the IR and decides the component shape itself — including `Format`/`Weight`
+>   variants — exactly as for any other component. A subagent pipeline:
+>   *inventory → export each set → elevate into an owned component.*
+> - **(b) Existing icon library** (Phosphor / lucide / custom) — **opt-in**, when the
+>   user asks and layer names are library exports (`MagnifyingGlass`, `CaretUpDown`).
 >   Map each icon-instance layer name to a library import. **Do not export.**
-> - **(b) Export every vector** via `export-svg.mts`, inline as `<svg>` /
->   `react-native-svg`. Use when there is no library or names aren't recognizable.
-> - **(c) Hybrid (often best)** — library-named icons → import (a); custom logos /
->   illustrations / brand marks → `export-svg` (b).
+> - **(c) Hybrid** — owned for custom logos / illustrations / brand marks, library for
+>   the rest. Reasonable when the user wants a library but some glyphs are off-library.
 >
-> Heuristic: if `icons.mts` finds library-named instances, propose (a)/(c); if it
-> finds none, propose (b). After the user chooses, resolve **every** vector `// TODO`
-> per that policy in Step 5 — no `export-svg` placeholder box may remain.
+> After the choice, resolve **every** vector `// TODO` per that policy in Step 5 — no
+> `export-svg` placeholder box may remain.
 
 **Raster image fills referenced by a component are already extracted + wired** when
 Step 4 ran with `--images` (into `<slug>/assets/`); only `export-svg` vectors/logos
