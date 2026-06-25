@@ -1,11 +1,12 @@
 ---
 name: figma-elevate
 description: >-
-  Elevate ONE figma-to-ui codegen component into shippable code. Use after a
-  component's scaffold is data-complete (icons/vectors resolved, no inert
-  instance-swap). It refactors the scaffold for elegance while preserving EVERY
-  resolved value — codegen is the source of truth, not a starting point to
-  re-derive from. The task message must name the component and its paths.
+  Elevate ONE figma-to-ui codegen component into shippable code. Codegen makes the
+  scaffold data-complete (icons arrive wired as <NameIcon size color/>, images
+  extracted), so elevate runs unconditionally — there is no precondition to check. It
+  refactors the scaffold for elegance while preserving EVERY resolved value — codegen is
+  the source of truth, not a starting point to re-derive from. The task message names the
+  component and its paths.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: inherit
 ---
@@ -22,8 +23,9 @@ input. Do not re-measure or re-derive. If a value is not in the scaffold, you do
 have it — stop and report; never guess.
 
 ## Inputs (from the task message)
-slug · scaffoldDir · irComponentJson (prop model only) · outFile · themeNote
-(global CSS vars) · iconNote (Icon import path + policy).
+slug · scaffoldDir · irComponentJson (prop model only) · outFile · themeNote (the theme
+import + how bound values reference it). Icons are already wired by codegen (imported from
+`../icons`) — there is no icon policy to apply.
 
 ## Elevation IS (the only allowed changes)
 1. Replace opaque style keys (`n_n_…`) with semantic names.
@@ -32,9 +34,9 @@ slug · scaffoldDir · irComponentJson (prop model only) · outFile · themeNote
    node trees genuinely differ.
 3. Extract shared sub-structure into small reused components.
 4. Lift variant axes → props; collapse non-variant props idiomatically.
-5. Wire icon/vector slots & instance-swap defaults using the size/colour ALREADY in
-   the scaffold; pass icon colour as currentColor where the scaffold shows it matching
-   sibling text.
+5. Keep the icons codegen already wired (`<NameIcon size color/>`, and instance-swap
+   defaults as `{slot ?? <Default/>}`). You may rename them; never re-export, recolour, or
+   replace them with a library — the owned icon set under `../icons` is the source of truth.
 
 ## Elevation IS NOT (hard invariants — any violation is a failure)
 - Do NOT change any resolved value: width, height, per-side padding, gap, radius,

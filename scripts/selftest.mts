@@ -32,7 +32,7 @@ import {
 import { spawnSync } from "child_process";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { buildContract, decodePng, encodePng, diffImages, type RGBAImage } from "./fidelity-lib.mts";
+import { extractGeometry, toSvgString, emitIconComponent } from "./svg-lib.mts";
 import { deriveLogicals } from "./components-lib.mts";
 
 let pass = 0;
@@ -383,51 +383,44 @@ const bind = (node: string, field: string) => [{ node, field }];
   check("deriveLogicals: instanceSwap → slot, defSym set", lg.role === "slot" && lg.defSym === "315:2646", JSON.stringify(lg));
 }
 
-// ── fidelity-lib: contract builder (the elevation guardrail) ────────────────
+// ── svg-lib: geometry extraction + recolor + dedup-by-shape (internal icons) ─
 {
-  const node: any = {
-    id: "1:2", path: "/p", guid: "1:2", type: "frame", name: "Card",
-    box: { x: 0, y: 0, w: 100, h: 50, absX: 0, absY: 0 },
-    layout: { mode: "row", gap: 8, paddingTop: 4, paddingRight: 4, paddingBottom: 4, paddingLeft: 4, align: "center" },
-    style: { cornerRadius: 8, fills: [{ type: "solid", hex: "#ffffff" }] },
-    children: [
-      {
-        id: "1:3", path: "/p/c", guid: "1:3", type: "text", name: "Label",
-        box: { x: 0, y: 0, w: 40, h: 16, absX: 0, absY: 0 },
-        font: { family: "Inter", appFamily: null, weight: "Medium", size: 16, sizeSource: "style", sizeToken: null, styleName: "Body/M", vars: null, lineHeightPx: 20, letterSpacingPx: 0, conflicts: [] },
-        color: { hex: "#111111", var: null, varGuid: null, token: null, match: null },
-        text: { value: "Hi", placeholder: false },
-        style: { fills: [{ type: "solid", hex: "#111111" }] },
-        children: [],
-      },
-    ],
+  // A synthetic decoded index with one VECTOR node "1:1": M0 0 L10 0 Z, solid fill.
+  const blob = (() => {
+    const bytes: number[] = [];
+    const f = (v: number) => { const b = Buffer.alloc(4); b.writeFloatLE(v); bytes.push(b[0], b[1], b[2], b[3]); };
+    bytes.push(1); f(0); f(0);   // M0 0
+    bytes.push(2); f(10); f(0);  // L10 0
+    bytes.push(0);               // Z
+    return { bytes };
+  })();
+  const mkIndex = (color: { r: number; g: number; b: number; a: number }) => {
+    const node: any = {
+      guid: { sessionID: 1, localID: 1 }, type: "VECTOR", visible: true, opacity: 1,
+      size: { x: 24, y: 24 },
+      fillGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+      fillPaints: [{ type: "SOLID", visible: true, opacity: 1, color }],
+    };
+    return { msg: { blobs: [blob] }, byKey: new Map([["1:1", node]]), children: new Map() } as any;
   };
-  const recs = buildContract(node);
-  eq("contract: node count", recs.length, 2);
-  eq("contract: root styleKey matches codegen", recs[0].styleKey, "n_1_2");
-  eq("contract: root childCount", recs[0].childCount, 1);
-  eq("contract: root bg fill", recs[0].invariants.bg, "#ffffff");
-  eq("contract: root radius", recs[0].invariants.radius, "8");
-  check("contract: layout captured", recs[0].invariants.layout === "row gap8 align:center pad[4,4,4,4]", recs[0].invariants.layout);
-  check("contract: font size+family", /size16/.test(recs[1].invariants.font ?? "") && /fam:Inter/.test(recs[1].invariants.font ?? ""), recs[1].invariants.font);
-  eq("contract: text color", recs[1].invariants.color, "#111111");
-  check("contract: text fill not treated as bg", !("bg" in recs[1].invariants), JSON.stringify(recs[1].invariants));
-}
+  const geoBlack = extractGeometry(mkIndex({ r: 0, g: 0, b: 0, a: 1 }), "1:1");
+  eq("svg: one path extracted", geoBlack.paths.length, 1);
+  eq("svg: one distinct fill (mono)", geoBlack.fills.length, 1);
+  eq("svg: fill hex from master paint", geoBlack.fills[0], "#000000");
+  eq("svg: viewBox from node size", geoBlack.viewBox, "0 0 24 24");
 
-// ── fidelity-lib: PNG roundtrip + image diff (the visual backstop) ───────────
-{
-  const img: RGBAImage = { width: 2, height: 2, rgba: new Uint8Array([
-    255, 0, 0, 255,   0, 255, 0, 255,
-    0, 0, 255, 255,   10, 20, 30, 200,
-  ]) };
-  const round = decodePng(encodePng(img));
-  eq("png roundtrip: dims", [round.width, round.height], [2, 2]);
-  eq("png roundtrip: pixels identical", Array.from(round.rgba), Array.from(img.rgba));
+  const geoRed = extractGeometry(mkIndex({ r: 1, g: 0, b: 0, a: 1 }), "1:1");
+  check("svg: geomHash is colour-independent (dedup key)", geoBlack.geomHash === geoRed.geomHash, `${geoBlack.geomHash} vs ${geoRed.geomHash}`);
 
-  const white: RGBAImage = { width: 4, height: 4, rgba: new Uint8Array(4 * 4 * 4).fill(255) };
-  const black: RGBAImage = { width: 4, height: 4, rgba: (() => { const a = new Uint8Array(4 * 4 * 4); for (let i = 0; i < a.length; i++) a[i] = i % 4 === 3 ? 255 : 0; return a; })() };
-  approx("diff: identical → 0%", diffImages(white, white).score, 0);
-  approx("diff: white vs black → 100%", diffImages(white, black).score, 100, 0.5);
+  const cc = toSvgString(geoBlack, { recolor: "currentColor" });
+  check("svg: currentColor mode recolours", /fill="currentColor"/.test(cc) && !/#000000/.test(cc), cc.slice(0, 120));
+  const pre = toSvgString(geoBlack, { recolor: "preserve" });
+  check("svg: preserve mode keeps the hex", /fill="#000000"/.test(pre), pre.slice(0, 120));
+
+  const webMono = emitIconComponent("HouseSimpleIcon", geoBlack, { web: true, mono: true });
+  check("svg: web mono icon = currentColor + color prop", /fill="currentColor"/.test(webMono) && /style=\{\{ color/.test(webMono), webMono.slice(0, 160));
+  const rnMono = emitIconComponent("HouseSimpleIcon", geoBlack, { web: false, mono: true });
+  check("svg: rn mono icon = react-native-svg + fill={color}", /react-native-svg/.test(rnMono) && /fill=\{color\}/.test(rnMono), rnMono.slice(0, 160));
 }
 
 // ── raw.mts: dispatch smoke (confirms all 8 folded lib imports resolve) ──────

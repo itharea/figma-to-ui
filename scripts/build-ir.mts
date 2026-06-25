@@ -1,12 +1,12 @@
 // build-ir.mts — the deterministic IR compiler (IR-PLAN Phases 0–1 / spec phase-06).
 // Stands up a scoped, provenance-stamped IR: manifest + raw-map + fonts + tokens/*
 // + components/*. NO screen resolution yet (Phase 7). Everything emitted here is a
-// PURE FUNCTION OF THE BYTES — no heuristic picks. The only judgment slot is
-// fonts.json's empty appFamily (pre-seeded only from an explicit --decisions map).
+// PURE FUNCTION OF THE BYTES — no heuristic picks, no decisions overlay. The only
+// human choice is --mode (which variable mode to resolve styles at).
 //
 // Usage:
 //   node build-ir.mts <message.json> --scope <pages|guids>
-//        [--theme <path>] [--decisions <decisions.json>] [--out ir-<name>] [--force]
+//        [--theme <path>] [--mode <name>] [--out ir-<name>] [--force]
 //
 // IMPORTANT: imports ONLY *-lib.mts modules (never a CLI script) — those run work
 // at import time. console.error = progress; console.log = the artifact summary.
@@ -26,18 +26,14 @@ import {
 import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
 import { buildScreen, registerRawMap, provenanceViolations, type IRNode, type VarIndex } from "./screens-lib.mts";
 import {
-  fontMapOf,
-  decisionKey,
   mapNodeTokens,
-  applyFontMap,
-  applyPlaceholders,
   aggregateScreenIntent,
   collectConflictItems,
   buildDefaultVariantMap,
   fontTokenCollisions,
-  type Decisions,
   type IntentItem,
 } from "./mapping-lib.mts";
+import { unionModes, primaryMode } from "./theme-lib.mts";
 import {
   uniqueSlug,
   splitTokens,
@@ -57,7 +53,7 @@ const argv = process.argv.slice(2);
 const msgPath = argv[0];
 if (!msgPath || msgPath.startsWith("--"))
   throw new Error(
-    "usage: build-ir.mts <message.json> --scope <pages|guids> [--theme <path>] [--decisions <decisions.json>] [--out ir-<name>] [--force]"
+    "usage: build-ir.mts <message.json> --scope <pages|guids> [--theme <path>] [--mode <name>] [--out ir-<name>] [--force]"
   );
 
 // positionally-tolerant flag scan
@@ -69,39 +65,25 @@ const hasFlag = (name: string) => argv.includes(name);
 
 const scopeArg = flag("--scope");
 if (!scopeArg) throw new Error("--scope is mandatory: --scope <comma-separated page names | guidKeys | 'all'>");
-const themePath = flag("--theme"); // Phase 8: map IR color/font.size → code tokens by value
-const decisionsPath = flag("--decisions");
+const themePath = flag("--theme"); // brownfield: map IR color/font.size → code tokens by value
 const force = hasFlag("--force");
+// The single style decision: which variable MODE to resolve styles at (Light/Dark/brand).
+// Empty ⇒ each variable's own collection default. The harness asks only when >1 mode exists.
+const modeArg = flag("--mode") ?? "";
 
 const name = path.basename(msgPath).replace(/^(msg-|message[-_]?)/, "").replace(/\.json$/, "") || "new";
 const outDir = flag("--out") ?? `ir-${name}`;
 
-// --- source hash + decisions identity (staleness contract) ------------------
+// --- source hash (staleness contract) ---------------------------------------
 const srcBytes = fs.readFileSync(msgPath);
 const sourceHash = crypto.createHash("sha256").update(srcBytes).digest("hex");
-let decisions: Decisions = {};
-let decisionsHash = "";
-if (decisionsPath && fs.existsSync(decisionsPath)) {
-  const dBytes = fs.readFileSync(decisionsPath);
-  decisionsHash = crypto.createHash("sha256").update(dBytes).digest("hex");
-  try {
-    decisions = JSON.parse(dBytes.toString("utf8"));
-  } catch {
-    throw new Error(`--decisions: ${decisionsPath} is not valid JSON`);
-  }
-}
-// decisions: fontMap (alias appFamily seed), tokenConfirms/tokenRejects, placeholders.
-const fontMap = fontMapOf(decisions);
-const tokenConfirms: Record<string, string> = decisions.tokenConfirms ?? {};
-const tokenRejects = new Set<string>(decisions.tokenRejects ?? []);
-const placeholders = decisions.placeholders ?? {};
 
 // --- re-run / overwrite guard ----------------------------------------------
 const manifestPath = path.join(outDir, "manifest.json");
 if (fs.existsSync(manifestPath)) {
   const prev = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  if (prev.sourceHash === sourceHash && (prev.decisionsHash ?? "") === decisionsHash && !force) {
-    console.error(`no-op: ${outDir} already built from this source + decisions (use --force to rebuild)`);
+  if (prev.sourceHash === sourceHash && (prev.requestedMode ?? "") === modeArg && !force) {
+    console.error(`no-op: ${outDir} already built from this source + mode (use --force to rebuild)`);
     console.log(JSON.stringify({ noop: true, out: outDir, sourceHash }, null, 2));
     process.exit(0);
   }
@@ -148,15 +130,24 @@ const variables = toIRTokens(resolvedVars);
 // GROUND TRUTH — never re-resolved per node. SCOPED to COLOR bindings (fill/text
 // colorVar); numeric bindings (cornerRadius/stackSpacing via variableConsumptionMap)
 // are a clear TODO — that map's structure is ambiguous and would be a guess here.
+// Modes (the single style decision). `modes` = every mode name across the catalog; the
+// harness asks the user which to use only when there's more than one. `activeMode` is the
+// chosen mode if valid, else the catalog's primary (most-common collection default). Every
+// variable-bound value below resolves at activeMode, so the whole IR is pinned to one mode.
+const modes = unionModes(variables);
+const activeMode = modeArg && modes.includes(modeArg) ? modeArg : primaryMode(variables);
+if (modeArg && !modes.includes(modeArg))
+  console.error(`  ⚠ --mode "${modeArg}" not in [${modes.join(", ")}] — using primary "${activeMode}"`);
+
 const varIndex: VarIndex = new Map();
 for (const t of resolvedVars)
   if (t.type === "COLOR")
     varIndex.set(t.guid, {
       name: t.name,
-      value: t.modes[t.defaultMode] ?? Object.values(t.modes)[0] ?? null,
-      mode: t.defaultMode,
+      value: t.modes[activeMode] ?? t.modes[t.defaultMode] ?? Object.values(t.modes)[0] ?? null,
+      mode: t.modes[activeMode] != null ? activeMode : t.defaultMode,
     });
-console.error(`  variable-binding index: ${varIndex.size} color variable(s); ${variables.length} variable(s) total`);
+console.error(`  variable-binding index: ${varIndex.size} color variable(s); ${variables.length} variable(s) total; mode "${activeMode}" of [${modes.join(", ")}]`);
 
 // --- pass 2b: composite styles ---------------------------------------------
 console.error("pass 2b: composite typography + effects");
@@ -165,7 +156,9 @@ const effects = assembleEffects(index);
 
 // --- pass 3: fonts ----------------------------------------------------------
 console.error("pass 3: fonts (raw fontName.family over scoped nodes + typography)");
-const fonts = collectFonts(scoped, typography, fontMap);
+const fonts = collectFonts(scoped, typography, {});
+// Faithful default (decisions removed): a font with no app-side override IS the Figma family.
+for (const f of fonts) if (!f.appFamily) f.appFamily = f.family;
 
 // --- pass 4: components -----------------------------------------------------
 console.error("pass 4: component sets + variant matrix + prop API");
@@ -298,11 +291,9 @@ for (const { page, root } of screenRoots) {
     console.error(`  ⚠ screen ${rootKey} (${root.name}): ${(e as Error).message} — skipped`);
     continue;
   }
-  // §6a: map color/font.size → code tokens by value (no --theme → all null).
-  if (theme.length) mapNodeTokens(irRoot, theme, tokenConfirms, tokenRejects);
-  // §6c decisions overlay: fontMap → appFamily, placeholders → text.
-  if (Object.keys(fontMap).length) applyFontMap(irRoot, fontMap);
-  if (Object.keys(placeholders).length) applyPlaceholders(irRoot, placeholders);
+  // brownfield: map color/font.size → code tokens BY VALUE (no --theme → all null). With
+  // decisions removed there is no confirm/reject overlay — pure value-matching, faithful.
+  if (theme.length) mapNodeTokens(irRoot, theme, {}, new Set());
   // §6b intent aggregation: predicates over the RESOLVED tree + the IR's conflicts.
   const screenLabel = `${root.name ?? root.type} [${rootKey}]`;
   intentItems.push(...aggregateScreenIntent(resolved, screenLabel, defaultVariant));
@@ -333,9 +324,9 @@ if (allViolations.length)
   for (const v of allViolations.slice(0, 10)) console.error(`    ⚠ ${v}`);
 
 // --- pass 6: aggregate intent.json + issues.json (Phase 8 §6b) --------------
-// intent.json = the per-build designer-intent gap list (P2-5), aggregated across
-// every scoped screen. issues.json = the automated ask-don't-ship list: build-time
-// conflicts/warnings the human must resolve into decisions.json.
+// intent.json = the per-build designer-intent gap list (P2-5), aggregated across every
+// scoped screen. issues.json = build-time conflicts/warnings. Both are INFORMATIONAL
+// review notes (no gate, no decisions overlay) — the faithful default already shipped.
 console.error("pass 6: aggregate intent.json + issues.json");
 
 const intentByKind: Record<string, IntentItem[]> = {};
@@ -353,10 +344,7 @@ writeJSON("intent.json", intent);
 type Issue = { kind: string; detail: string; guid?: string; path?: string; token?: string };
 const issues: Issue[] = [];
 
-// unmapped fonts: a collected family with empty appFamily and no fontMap entry.
-for (const f of fonts)
-  if (!f.appFamily && !fontMap[f.family])
-    issues.push({ kind: "unmapped-font", detail: `font "${f.family}" has no appFamily and no decisions.fontMap entry (used ${f.count}×)`, token: f.family });
+// (fonts always carry a faithful appFamily now — no unmapped-font gate)
 
 // token name-collisions (the praline-ramp trap): only meaningful with a theme.
 if (theme.length) {
@@ -379,15 +367,15 @@ const walkIssues = (n: IRNode) => {
     issues.push({ kind: "reconcile-conflict", detail: `${n.name}: ${cf.field} ${cf.declared}→~${cf.chosen} (${cf.reason})`, guid: n.guid, path: n.path });
   if (n.styleRuns)
     issues.push({ kind: "style-runs", detail: `${n.name}: ${n.styleRuns} styleOverrideTable run(s) — node-level font may not match all runs`, guid: n.guid, path: n.path });
-  // match:none / unconfirmed nearest colors (theme present only). "rejected"
-  // (tokenRejects) suppresses the warning; "exact" is fine; "nearest" is surfaced.
+  // match:none / unconfirmed nearest colors (theme present only). "exact" is fine;
+  // "nearest"/"none" are surfaced as informational review items (never a gate).
   if (theme.length && n.color?.hex) {
     const m = n.color.match;
     if (m === "none" && !seenColorNone.has(n.color.hex)) {
       seenColorNone.add(n.color.hex);
       issues.push({ kind: "color-unmatched", detail: `color ${n.color.hex} matched no theme token (match:none)`, token: n.color.hex });
     } else if (typeof m === "string" && m.startsWith("nearest")) {
-      issues.push({ kind: "color-nearest", detail: `color ${n.color.hex} only a ${m} theme match — confirm or reject in decisions.json`, guid: n.guid, path: n.path, token: n.color.hex });
+      issues.push({ kind: "color-nearest", detail: `color ${n.color.hex} only a ${m} theme match — review (kept as the literal)`, guid: n.guid, path: n.path, token: n.color.hex });
     }
   }
   if (theme.length && n.font && typeof n.font.size === "number") {
@@ -420,7 +408,9 @@ const manifest = {
   irSchemaVersion: IR_SCHEMA_VERSION,
   source: { path: path.resolve(msgPath), hash: sourceHash },
   sourceHash, // top-level mirror for the staleness re-read (Phase 9 diff-ir)
-  decisionsHash,
+  modes, // every variable mode in the catalog (the single style decision)
+  activeMode, // the mode every variable-bound value was resolved at
+  requestedMode: modeArg || null, // the raw --mode flag (staleness identity)
   figFormatVersion: index.msg?.figFormatVersion ?? null,
   builtAt: new Date().toISOString(),
   scope: { kind: "pages", value: allPages ? "all" : scopeRaw },
@@ -442,7 +432,6 @@ const manifest = {
     issues: issues.length,
   },
   theme: themePath ? { path: path.resolve(themePath), entries: theme.length } : null,
-  decisions: decisionsPath ? { path: path.resolve(decisionsPath), hash: decisionsHash } : null,
   artifacts: {
     tokens: ["variables.json", "colors.json", "spacing.json", "radius.json", "typography.json", "effects.json"],
     fonts: "fonts.json",
