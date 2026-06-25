@@ -45,9 +45,13 @@ const argv = process.argv.slice(2);
 const dir = argv[0];
 const setName = argv[1];
 if (!dir || !setName || setName.startsWith("--"))
-  throw new Error("usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>]");
+  throw new Error("usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>]");
 const flag = (n: string) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 const outDir = flag("--out");
+// Decoded .fig images dir (the unzipped fig's `images/`, raster fills by content hash).
+// When given (with --out), codegen EXTRACTS each referenced image fill into the component
+// folder's assets/ and emits a real src reference instead of a placeholder TODO.
+const imagesDir = flag("--images");
 const framework = (flag("--framework") ?? "rn").toLowerCase();
 if (framework !== "rn" && framework !== "web")
   throw new Error(`--framework must be rn|web (got "${framework}")`);
@@ -110,7 +114,16 @@ if (!comp) {
 // --- axes / default variant ---------------------------------------------------
 const axes: Record<string, string[]> = comp.axes ?? {};
 const axisNames = Object.keys(axes);
-const variants: any[] = comp.variants ?? [];
+// A component with NO detected variants (a heuristic single-frame component — e.g.
+// `stroke-hint` detected a bordered frame, no variant axis) still IS a component: treat
+// the set frame itself as one default variant rendered from its own subtree, instead of
+// crashing on an empty `rendered[]` (its guid resolves in the screens IR like any variant).
+const variants: any[] =
+  comp.variants?.length
+    ? comp.variants
+    : comp.guid
+      ? [{ guidKey: comp.guid, props: {}, rawName: comp.name ?? "default", bindings: [], size: comp.size }]
+      : [];
 const isDefaultVariant = (v: any) =>
   axisNames.every((a) => (axes[a]?.[0] !== undefined ? v.props[a] === axes[a][0] : true));
 const defaultVariant = variants.find(isDefaultVariant) ?? variants[0];
@@ -222,6 +235,44 @@ const { logicals, logicalByDefKey } = deriveLogicals(comp);
 // --- identifiers --------------------------------------------------------------
 const Comp = compIdent(comp.name ?? setName);
 const slug = slugify(comp.name ?? setName) || "component";
+
+// --- image-fill asset extraction (--images) -----------------------------------
+// Copy a referenced raster fill (by content hash) out of the decoded .fig images dir
+// into <out>/<slug>/assets/, so codegen can emit a REAL reference (web backgroundImage /
+// rn <Image source>) instead of a placeholder TODO. Memoized; returns the written
+// basename (e.g. "<hash>.png") or null when no --images/--out or the asset is absent.
+// Extension is sniffed from magic bytes (the fig stores fills extension-less).
+const extFromMagic = (b: Buffer): string => {
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return ".png";
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return ".jpg";
+  if (b.length >= 12 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP") return ".webp";
+  if (b.length >= 6 && b.toString("ascii", 0, 4) === "GIF8") return ".gif";
+  return "";
+};
+const assetCache = new Map<string, string | null>(); // hash → written basename | null
+function assetRef(hash: string | undefined): string | null {
+  if (!hash || !imagesDir || !outDir) return null;
+  if (assetCache.has(hash)) return assetCache.get(hash)!;
+  let src: string | null = null;
+  const direct = path.join(imagesDir, hash);
+  if (fs.existsSync(direct)) src = direct;
+  else if (fs.existsSync(imagesDir)) {
+    const f = fs.readdirSync(imagesDir).find((x) => x === hash || x.startsWith(hash + "."));
+    if (f) src = path.join(imagesDir, f);
+  }
+  if (!src) { assetCache.set(hash, null); return null; }
+  const buf = fs.readFileSync(src);
+  const file = hash + (path.extname(src) || extFromMagic(buf));
+  const destDir = path.join(outDir, slug, "assets");
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.writeFileSync(path.join(destDir, file), buf);
+  assetCache.set(hash, file);
+  return file;
+}
+const imageHashOf = (n: IRNode): string | undefined => {
+  const f = (n.style?.fills ?? []).find((x: any) => x.type === "image" && x.imageHash);
+  return f ? ((f as any).imageHash as string) : undefined;
+};
 function variantComponentName(v: any): string {
   const k = variantPropKey(v);
   const camel = k.replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase()).replace(/\s/g, "");
@@ -297,24 +348,27 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
       const ref = colorRef({ hex: fill.hex ?? null, var: (fill as any).var ?? null, match: (fill as any).var ? "bound" : null }, `${n.name} background`, push);
       lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
     }
-    // image fill (improvement 5-image-fills): codegen can't embed bytes, so flag for
-    // export + leave a placeholder bg. Emitted AFTER the solid fill so a node with both
-    // keeps its solid bg AND still gets flagged. Skipped in override mode (`only`): a
-    // bare comment inside an inline `style={{…}}` prop is noise — the caller's instance
-    // override TODO already flags an image/icon override for wiring.
-    const imgFill = !only && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
+    // image fill (improvement 5-image-fills): with --images, EXTRACT the raster fill into
+    // assets/ and emit a real backgroundImage reference; without it, leave a placeholder
+    // TODO. Emitted AFTER the solid fill so a node with both keeps its solid bg too.
+    // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
+    // (handled there). Skipped in override mode (`only`): an image override is flagged by
+    // the caller's instance-override TODO, not inlined into a `style={{…}}` prop.
+    const imgFill = !only && web && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
     if (imgFill) {
       const hash = (imgFill as any).imageHash as string;
-      push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — export to images/ and wire the src`);
-      // Round 2 (C): do NOT emit an opaque placeholder bg. Image-fill nodes are often
-      // image-ONLY (no solid in the design) and the assets are transparent PNGs meant to
-      // composite over the parent surface — an opaque #eee would show through their alpha.
-      // Leave the background transparent; the TODO flags the node for wiring.
-      if (web) {
-        lines.push(`// TODO: image — backgroundImage: 'url(images/${hash.slice(0, 16)}…)'`);
+      const file = assetRef(hash);
+      if (file) {
+        lines.push(`backgroundImage: "url('./assets/${file}')",`);
         lines.push(`backgroundSize: 'cover',`);
+        lines.push(`backgroundPosition: 'center',`);
+        lines.push(`backgroundRepeat: 'no-repeat',`);
       } else {
-        lines.push(`// TODO: image — render as <Image source={{ uri: '…/${hash.slice(0, 16)}…' }} />`);
+        push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — pass --images <dir> to extract + wire the src`);
+        // No opaque placeholder bg: image-only fills are often transparent PNGs meant to
+        // composite over the parent surface (an opaque #eee would show through their alpha).
+        lines.push(`// TODO: image — backgroundImage: "url('./assets/${hash.slice(0, 16)}…')" (re-run codegen with --images)`);
+        lines.push(`backgroundSize: 'cover',`);
       }
     }
   }
@@ -634,6 +688,7 @@ type VariantRender = {
   usedProps: Set<string>; // logical prop names this variant references
   refImports: Map<string, string>; // referenced child component: Comp identifier → file slug
   usesStyleProp: boolean; // root merges the `style` override prop → destructure it
+  rnImageUsed: boolean; // an rn <Image> was emitted → import it
   todos: string[];
 };
 
@@ -645,6 +700,7 @@ function renderVariant(v: any): VariantRender {
   const usedProps = new Set<string>();
   const refImports = new Map<string, string>(); // nested child components referenced here
   let usesStyleProp = false; // set when the root node merges the `style` override prop
+  let rnImageUsed = false; // set when an rn <Image> is emitted for an extracted fill
 
   // node guid → logical prop, via THIS variant's bindings (defKey-joined). A node may
   // carry a text binding, a visibility binding, an instance-swap binding, or several.
@@ -662,7 +718,7 @@ function renderVariant(v: any): VariantRender {
   const subtree = findNodeByGuid(v.guidKey);
   if (!subtree) {
     push(`variant subtree not found by guid ${v.guidKey} — emitting an empty shell`);
-    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, usesStyleProp, todos };
+    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, usesStyleProp, rnImageUsed, todos };
   }
 
   const Box = web ? "div" : "View";
@@ -828,6 +884,24 @@ function renderVariant(v: any): VariantRender {
       push(`instance "${n.name}" (${n.guid}) has no resolved children — confirm the icon master`);
       inner = `${"  ".repeat(depth + 1)}{/* TODO: instance "${n.name}" — confirm icon master (${n.guid}) */}`;
     }
+    // rn: a View style can't hold a background image, so render an absolute-fill <Image>
+    // BEHIND the children (web set backgroundImage in the style above). Needs --images to
+    // extract the asset; without it, flag the node so nothing is silently dropped.
+    if (!web) {
+      const ih = imageHashOf(n);
+      if (ih) {
+        const file = assetRef(ih);
+        if (file) {
+          rnImageUsed = true;
+          const ik = `${sk}__img`;
+          styles.push({ key: ik, body: "position: 'absolute',\ntop: 0,\nleft: 0,\nright: 0,\nbottom: 0," });
+          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="cover" />`;
+          inner = inner ? `${imgEl}\n${inner}` : imgEl;
+        } else {
+          push(`image fill "${n.name}" (${n.guid}) hash ${ih.slice(0, 8)}… — pass --images <dir> to extract + render <Image>`);
+        }
+      }
+    }
     const el = inner
       ? `${pad}<${Box} ${styleAttr}>\n${inner}\n${pad}</${Box}>`
       : `${pad}<${Box} ${styleAttr} />`;
@@ -847,10 +921,12 @@ function renderVariant(v: any): VariantRender {
   }
 
   const jsx = emit(subtree, 0, false);
-  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, usesStyleProp, todos };
+  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, usesStyleProp, rnImageUsed, todos };
 }
 
 const rendered = variants.map(renderVariant);
+if (!rendered.length)
+  throw new Error(`component set "${comp.name ?? setName}" has no variants and no set guid to render — nothing to generate (check the component detection in build-ir)`);
 for (const r of rendered) allTodos.push(...r.todos);
 
 // === FILE EMISSION ============================================================
@@ -910,10 +986,11 @@ function variantFile(r: VariantRender): string {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([Ref, refSlug]) => `import { ${Ref} } from '../${refSlug}';`)
     .join("\n");
+  const rnImports = ["View", "Text", "StyleSheet", ...(r.rnImageUsed ? ["Image"] : [])].join(", ");
   const imports =
     (web
       ? `import * as React from 'react';`
-      : `import * as React from 'react';\nimport { View, Text, StyleSheet } from 'react-native';`) +
+      : `import * as React from 'react';\nimport { ${rnImports} } from 'react-native';`) +
     (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "") +
     (refImportLines ? `\n${refImportLines}` : "");
   const todoBlock = r.todos.length
