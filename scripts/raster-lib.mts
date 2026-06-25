@@ -1,5 +1,5 @@
-// Headless-Chrome rasterization helper (SKILL.md §6). One implementation, reused
-// by export-svg.mts (--png) and render.mts. NO top-level side effects.
+// Headless-Chrome rasterization helper. One implementation, reused by
+// export-svg.mts (--png). NO top-level side effects.
 //
 // GRACEFUL DEGRADATION (phase-05 fallback rule): if no Chrome binary is found, or
 // the screenshot subprocess fails, return {ok:false,reason} instead of throwing —

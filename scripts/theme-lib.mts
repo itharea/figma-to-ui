@@ -318,9 +318,11 @@ function emitRn(vars: ThemeVar[], modes: string[], primary: string): ThemeResult
 }
 
 // Emit a theme for ONE framework. theme-gen calls this once per requested framework.
-export function emitTheme(vars: ThemeVar[], opts: { framework: Framework }): ThemeResult {
+export function emitTheme(vars: ThemeVar[], opts: { framework: Framework; activeMode?: string }): ThemeResult {
   const modes = unionModes(vars);
-  const primary = primaryMode(vars);
+  // The active mode (the single style decision) becomes :root / defaultMode; if it isn't a
+  // real mode, fall back to the catalog's primary. All modes are still emitted (switchable).
+  const primary = opts.activeMode && modes.includes(opts.activeMode) ? opts.activeMode : primaryMode(vars);
   if (modes.length === 0) return { code: opts.framework === "web" ? ":root {}\n" : "export const theme = {} as const;\n", warnings: ["no variables — emitted an empty theme"] };
   return opts.framework === "web" ? emitWeb(vars, modes, primary) : emitRn(vars, modes, primary);
 }

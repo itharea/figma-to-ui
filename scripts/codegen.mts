@@ -41,6 +41,8 @@ import { mapValue, deriveLogicals, type Logical } from "./components-lib.mts";
 import { disambiguateJustify } from "./reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "./theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap } from "./layout-lib.mts";
+import { load, colorStr } from "./lib.mts";
+import { extractGeometry, emitIconComponent } from "./svg-lib.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];
@@ -138,6 +140,26 @@ function variantPropKey(v: any): string {
 
 // --- locate a variant's RESOLVED subtree in the screens IR --------------------
 const manifest = readJSON("manifest.json") ?? {};
+
+// --- internal SVG/icon source (icons are an internal codegen step now) ---------
+// The decoded message.json carries vector GEOMETRY (path data) the IR doesn't. With it,
+// codegen exports each icon's geometry into an owned, recolorable component and wires the
+// IR's (override-aware) colour — no manual export-svg + re-map. Defaults to the IR's own
+// source pointer; pass --svg/--message to point at a relocated decode. Absent ⇒ icons fall
+// back to the placeholder + export-svg TODO (offline-safe; never hard-fails).
+const svgArg = flag("--svg") ?? flag("--message");
+const msgPath = svgArg ?? manifest.source?.path;
+const svgIndex = msgPath && fs.existsSync(msgPath) ? load(msgPath) : null;
+// Mode coherence guard (the single style decision): build-ir + theme-gen must share --mode.
+const modeArg = flag("--mode");
+if (modeArg && manifest.activeMode && modeArg !== manifest.activeMode)
+  console.error(`⚠ codegen --mode "${modeArg}" ≠ manifest.activeMode "${manifest.activeMode}" — rebuild IR + theme with the same mode`);
+
+// variable guid → token name, to resolve icon colour overrides read straight from the raw
+// message (the IR drops deep-node colour overrides on icons — see iconOverrideColor).
+const varNameByGuid = new Map<string, string>();
+for (const v of (readJSON("tokens/variables.json") ?? [])) if (v?.guid && v?.name) varNameByGuid.set(v.guid, v.name);
+
 function findNodeByGuid(guid: string): IRNode | null {
   for (const rel of manifest.artifacts?.screens ?? []) {
     const root = readJSON(rel);
@@ -232,6 +254,64 @@ function styleOverridePropName(c: any): string {
 }
 const STYLE_PROP = styleOverridePropName(comp); // the override-prop name for THIS component
 
+// --- owned icon component extraction (internal SVG export) --------------------
+// Geometry comes from svg-lib (the decoded message.json); colour comes from the IR
+// (override-aware) via the caller's `color` prop. Icons are DEDUPED by geometry into a
+// SHARED <out>/icons/ dir (sibling to each <slug>/), so repeated glyphs converge to one
+// file and every variant references it (the RoastSquare pattern).
+const iconByKey = new Map<string, { Name: string; file: string; mono: boolean }>();
+const iconTakenNames = new Set<string>();
+const iconFiles = new Map<string, string>(); // "icons/<Name>.tsx" → file content
+
+// The contextual colour of an icon instance, read from its raw symbolOverrides (fill OR
+// stroke paint). resolve-lib drops deep-node colour overrides on icons, so the resolved IR
+// carries no fill/stroke on the icon's vectors — we read the raw message directly: a bound
+// colorVar → its theme token (var), else the literal hex. null when the instance carries no
+// colour override (the icon then renders its currentColor default, inheriting from context).
+function iconOverrideColor(guid: string): { hex: string; var: string | null } | null {
+  if (!svgIndex) return null;
+  const raw = svgIndex.byKey.get(guid);
+  for (const o of raw?.symbolData?.symbolOverrides ?? []) {
+    for (const paints of [o.fillPaints, o.strokePaints]) {
+      const p = (paints ?? []).find((x: any) => x.type === "SOLID" && x.visible !== false && x.color);
+      if (!p) continue;
+      const ag = p.colorVar?.value?.alias?.guid;
+      const vk = ag ? `${ag.sessionID}:${ag.localID}` : null;
+      return { hex: colorStr(p.color), var: (vk && varNameByGuid.get(vk)) || null };
+    }
+  }
+  return null;
+}
+
+// PascalCase glyph name from a node/instance name ("icons/Tabbar/HouseSimple" → "HouseSimple").
+function iconExportName(n: { name?: string | null }): string {
+  const raw = (n.name ?? "").split("/").pop() ?? "";
+  return raw.replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase()).replace(/\s/g, "");
+}
+
+// Extract geometry for a node and generate (or reuse) an owned icon component. Returns its
+// identifier + import file + mono flag, or null (caller keeps the placeholder). monoHint:
+// true/false from the IR's resolved fills; undefined ⇒ decide from the extracted geometry.
+function ownIcon(n: { guid: string; name?: string | null }, monoHint?: boolean): { Name: string; file: string; mono: boolean } | null {
+  if (!svgIndex || !outDir) return null;
+  let geo;
+  try { geo = extractGeometry(svgIndex, n.guid); } catch { return null; }
+  if (!geo.paths.length) return null;
+  const mono = monoHint != null ? monoHint : geo.fills.length === 1;
+  // mono recolours via the caller's `color` prop ⇒ dedup on shape only; multi bakes its fills.
+  const dedupKey = mono ? geo.geomHash : `${geo.geomHash}#${geo.fills.join(",")}`;
+  const hit = iconByKey.get(dedupKey);
+  if (hit) return hit;
+  const base = (iconExportName(n) || `Icon${geo.geomHash.slice(0, 6)}`) + "Icon";
+  let Name = base, i = 2;
+  while (iconTakenNames.has(Name)) Name = `${base}${i++}`;
+  iconTakenNames.add(Name);
+  const rec = { Name, file: Name, mono };
+  iconByKey.set(dedupKey, rec);
+  iconFiles.set(`icons/${Name}.tsx`, emitIconComponent(Name, geo, { web, mono }));
+  return rec;
+}
+
 // === per-node JSX rendering (a variant's resolved subtree → a JSX tree) =========
 const allTodos: string[] = [];
 const ind = (s: string, n: number) => s.split("\n").map((l) => (l ? " ".repeat(n) + l : l)).join("\n");
@@ -249,8 +329,8 @@ function colorRef(
   if (c.var) return themeRef(c.var, false);
   if (c.token) return c.token;
   if (c.match === "none" || (typeof c.match === "string" && c.match.startsWith("nearest"))) {
-    todos.push(`${label} color ${c.hex} is "${c.match}" against the theme — adjudicate in decisions.json before shipping the literal`);
-    return `'${c.hex}' /* TODO: ${c.match} — adjudicate token */`;
+    todos.push(`${label} color ${c.hex} is "${c.match}" against the theme — review the literal during elevation (kept faithfully)`);
+    return `'${c.hex}' /* REVIEW: ${c.match} token */`;
   }
   return `'${c.hex}'`;
 }
@@ -284,7 +364,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   const lines: string[] = [];
   const s = n.style;
   const want = (f: string) => !only || only.has(f);
-  // size: emit when fixed (a hug/grow child sizes itself; still record for fidelity).
+  // size: emit when fixed (a hug/grow child sizes itself; still record for faithful sizing).
   if (want("size") && n.box) { if (n.box.w) lines.push(`width: ${n.box.w},`); if (n.box.h) lines.push(`height: ${n.box.h},`); }
   // background = first solid fill (bound var wins as a token comment).
   if (want("fillPaints")) {
@@ -403,7 +483,7 @@ function rootOverrideStyle(n: IRNode, fields: string[], push: (m: string) => voi
 }
 
 // A node's sizing AS A FLEX CHILD (improvement 3): grow/alignSelf/min/aspect. Shared
-// by nodeStyleBody (frames) and textStyleBody (text) — render.mts calls childSizingCss
+// by nodeStyleBody (frames) and textStyleBody (text) — both flex parents size children
 // for text too, so text nodes need the same grow/alignSelf/minW/minH.
 function flexChildLines(n: IRNode): string[] {
   const lines: string[] = [];
@@ -644,6 +724,7 @@ type VariantRender = {
   styles: { key: string; body: string }[];
   usedProps: Set<string>; // logical prop names this variant references
   refImports: Map<string, string>; // referenced child component: Comp identifier → file slug
+  iconImports: Map<string, string>; // owned icon component: identifier → file (in ../icons)
   usesStyleProp: boolean; // root merges the `style` override prop → destructure it
   rnImageUsed: boolean; // an rn <Image> was emitted → import it
   todos: string[];
@@ -656,6 +737,7 @@ function renderVariant(v: any): VariantRender {
   const styles: { key: string; body: string }[] = [];
   const usedProps = new Set<string>();
   const refImports = new Map<string, string>(); // nested child components referenced here
+  const iconImports = new Map<string, string>(); // owned icons referenced here (../icons/<file>)
   let usesStyleProp = false; // set when the root node merges the `style` override prop
   let rnImageUsed = false; // set when an rn <Image> is emitted for an extracted fill
 
@@ -675,7 +757,7 @@ function renderVariant(v: any): VariantRender {
   const subtree = findNodeByGuid(v.guidKey);
   if (!subtree) {
     push(`variant subtree not found by guid ${v.guidKey} — emitting an empty shell`);
-    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, usesStyleProp, rnImageUsed, todos };
+    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, iconImports, usesStyleProp, rnImageUsed, todos };
   }
 
   const Box = web ? "div" : "View";
@@ -803,13 +885,28 @@ function renderVariant(v: any): VariantRender {
       // artifacts) — otherwise the zero-prop render is silently empty with nothing to catch.
       const slotLg = binds.slot;
       const defSym = slotLg.role === "slot" ? slotLg.defSym : null;
+      // Render the default glyph BEHIND the prop ({slot ?? <Default/>}) so a zero-prop render
+      // shows the master's default icon instead of nothing (findings #2 / defects D2,D3).
+      let defaultEl = "null";
       if (defSym) {
-        const defName = findNodeByGuid(defSym)?.name;
-        push(`instance-swap "${slotLg.name}": default ${defName ? `"${defName}" ` : ""}(${defSym}) — wire the default icon (export-svg/library per the icon policy) or pass ${slotLg.name}; renders empty otherwise`);
+        const defNode = findNodeByGuid(defSym);
+        const defFills = defNode ? collectVectorFills(defNode) : [];
+        const icon = ownIcon({ guid: defSym, name: defNode?.name }, defFills.length ? defFills.length === 1 : undefined);
+        if (icon) {
+          iconImports.set(icon.Name, icon.file);
+          const sizeAttr = defNode?.box?.w ? ` size={${defNode.box.w}}` : "";
+          const colorAttr =
+            icon.mono && defFills.length === 1
+              ? ` color={${colorRef({ hex: defFills[0].hex, var: defFills[0].var, match: defFills[0].var ? "bound" : null }, `${n.name} default icon`, push)}}`
+              : "";
+          defaultEl = `<${icon.Name}${sizeAttr}${colorAttr} />`;
+        } else {
+          push(`instance-swap "${slotLg.name}": default ${defNode?.name ? `"${defNode.name}" ` : ""}(${defSym}) — no geometry extracted; pass ${slotLg.name} or it renders empty`);
+        }
       } else {
         push(`instance-swap "${slotLg.name}": no IR default — pass ${slotLg.name} or it renders empty`);
       }
-      const el = `${pad}<${Box} ${styleAttr}>{${slotLg.name}}</${Box}>`;
+      const el = `${pad}<${Box} ${styleAttr}>{${slotLg.name} ?? ${defaultEl}}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
 
@@ -827,26 +924,40 @@ function renderVariant(v: any): VariantRender {
     // boxes (codegen can't draw vector paths; export-svg.mts does). The placeholder
     // box flex-centers (improvement 4) so the inlined <svg>/<Image> ends up centered.
     if (n.type === "vector" || n.type === "boolean_operation" || (n.type === "instance" && isVectorOnly(n))) {
-      // Carry the IR's vector data through instead of dropping it (finding #1): collect the
-      // resolved fills (hex + token) from the whole vector subtree. For a MONO-fill icon set
-      // `color` (web only — RN ViewStyle has no `color`) so an inlined currentColor <svg>
-      // inherits the right colour; bound tokens resolve to the theme exactly like every other
-      // colour. Every distinct fill is named in the TODO so the scaffold is self-contained.
+      // Icons are an INTERNAL codegen step: export the geometry (svg-lib, from the decoded
+      // message.json) into an owned recolorable component and drive its colour from the IR's
+      // (override-aware) resolved fills — a mono icon gets currentColor + the resolved token
+      // (fixes the baked-master-fill defect). The sized wrapper still flex-centres the glyph;
+      // absolute placement / root-style merge ride on it exactly as before.
       const fills = collectVectorFills(n);
-      const colorExpr = (f: { hex: string; var: string | null }) => (f.var ? themeRef(f.var, false) : `'${f.hex}'`);
-      const colorLine = web && fills.length === 1 ? `color: ${colorExpr(fills[0])},` : "";
+      // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
+      // fill/stroke colour override (the common case — icons are recoloured via an override
+      // the IR drops). null ⇒ the icon keeps its currentColor default and inherits context.
+      const iconColor = fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
+      const monoHint = fills.length ? fills.length === 1 : iconColor ? true : undefined;
+      const icon = ownIcon(n, monoHint);
       const box = [
         n.box?.w ? `width: ${n.box.w},` : "",
         n.box?.h ? `height: ${n.box.h},` : "",
-        colorLine,
         `display: 'flex',`,
         `alignItems: 'center',`,
         `justifyContent: 'center',`,
       ].filter(Boolean).join("\n");
       styles.push({ key: sk, body: prefixBody(box) });
+      if (icon) {
+        iconImports.set(icon.Name, icon.file);
+        const sizeAttr = n.box?.w ? ` size={${n.box.w}}` : "";
+        const colorAttr =
+          icon.mono && iconColor
+            ? ` color={${colorRef({ hex: iconColor.hex, var: iconColor.var, match: iconColor.var ? "bound" : null }, `${n.name} icon`, push)}}`
+            : "";
+        const el = `${pad}<${Box} ${styleAttr}><${icon.Name}${sizeAttr}${colorAttr} /></${Box}>`;
+        return wrapConditional(el, binds, depth, n);
+      }
+      // fallback (no svg source / no geometry / no --out) → keep the export-svg placeholder.
       const fillNote = fills.length ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]` : "";
       const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
-      push(`icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — export via export-svg.mts (carries all fills) and inline as <Svg>/<Image>`);
+      push(`icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — pass --svg <message.json> to export + wire it (or run export-svg.mts and inline)`);
       const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid})${fillNote} */}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
@@ -901,7 +1012,7 @@ function renderVariant(v: any): VariantRender {
   }
 
   const jsx = emit(subtree, 0, false);
-  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, usesStyleProp, rnImageUsed, todos };
+  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, iconImports, usesStyleProp, rnImageUsed, todos };
 }
 
 const rendered = variants.map(renderVariant);
@@ -971,13 +1082,19 @@ function variantFile(r: VariantRender): string {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([Ref, refSlug]) => `import { ${Ref} } from '../${refSlug}';`)
     .join("\n");
+  // owned icons live in the SHARED <out>/icons/ dir (sibling to this <slug>/ folder).
+  const iconImportLines = [...r.iconImports.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([Name, file]) => `import { ${Name} } from '../icons/${file}';`)
+    .join("\n");
   const rnImports = ["View", "Text", "StyleSheet", ...(r.rnImageUsed ? ["Image"] : [])].join(", ");
   const imports =
     (web
       ? `import * as React from 'react';`
       : `import * as React from 'react';\nimport { ${rnImports} } from 'react-native';`) +
     (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "") +
-    (refImportLines ? `\n${refImportLines}` : "");
+    (refImportLines ? `\n${refImportLines}` : "") +
+    (iconImportLines ? `\n${iconImportLines}` : "");
   const todoBlock = r.todos.length
     ? "\n// === TODO (this variant — unconfirmed values) ===\n" + r.todos.map((t) => `// TODO: ${t}`).join("\n") + "\n"
     : "\n// (no open TODOs for this variant)\n";
@@ -1042,6 +1159,12 @@ if (outDir) {
   for (const f of files) fs.writeFileSync(path.join(folder, f.rel), f.content);
   console.error(`wrote ${folder}/ (${files.length} files):`);
   for (const f of files) console.error(`  ${slug}/${f.rel}`);
+  // owned icons → the SHARED <out>/icons/ dir (siblings of every component folder).
+  if (iconFiles.size) {
+    fs.mkdirSync(path.join(outDir, "icons"), { recursive: true });
+    for (const [rel, content] of iconFiles) fs.writeFileSync(path.join(outDir, rel), content);
+    console.error(`wrote ${path.join(outDir, "icons")}/ (${iconFiles.size} owned icon(s))`);
+  }
 } else {
   // no --out: print the folder contents to stdout (each file headed by its path).
   console.error(`(no --out — printing ${files.length} file(s) to stdout)`);

@@ -1,11 +1,10 @@
-// IR token mapping + intent/issues aggregation + decisions overlay (Phase 8 /
-// IR-PLAN Phase 3). NO top-level side effects — build-ir.mts imports these at
-// build time. Determinism contract (README): MAPPING by value is exact and
-// always runs (matchTokenByValue is pure); the only judgment is the labeled
-// `nearest(Δ)`/`placeholder` flags, which a `decisions.json` overlay confirms.
-// Reuses the deterministic predicates verbatim (principle #2): placeholder via
-// reconcile-lib, denylist/repeated/mono-icon via intent-lib, default-variant via
-// components-lib — NO re-implementation.
+// IR token mapping + intent/issues aggregation (Phase 8 / IR-PLAN Phase 3). NO
+// top-level side effects — build-ir.mts imports these at build time. MAPPING by
+// value is exact and always runs (matchTokenByValue is pure); the labeled
+// `nearest(Δ)`/`placeholder` flags are informational (surfaced as scaffold // TODO
+// notes, never a gate). Reuses the deterministic predicates verbatim (principle #2):
+// placeholder via reconcile-lib, denylist/repeated/mono-icon via intent-lib,
+// default-variant via components-lib — NO re-implementation.
 import { load, key } from "./lib.mts";
 import { matchTokenByValue, type ThemeEntry, type ThemeKind, type Token } from "./tokens-lib.mts";
 import { classifyPlaceholderText } from "./reconcile-lib.mts";
@@ -14,18 +13,8 @@ import { findComponentSets, parseVariantMatrix } from "./components-lib.mts";
 import type { IRNode } from "./screens-lib.mts";
 import type { ResolvedNode } from "./resolve-lib.mts";
 
-// --- decisions.json overlay (INPUT, schema in phase-08 §5) ------------------
-export type Decisions = {
-  fontMap?: Record<string, string>;
-  tokenConfirms?: Record<string, string>; // "kind:value" → token path
-  tokenRejects?: string[]; // ["kind:value", …]
-  placeholders?: Record<string, { placeholder?: boolean; text?: string }>;
-  canonicalPages?: string[];
-  appFamily?: Record<string, string>; // legacy alias for fontMap (Phase 6 seed)
-};
-
-// Canonicalize a value the SAME way for a decisions key and an IR value, so a
-// `kind:value` key reliably matches (phase-08 §5 "Value normalization"): hex →
+// Canonicalize a value the SAME way for a token key and an IR value, so a
+// `kind:value` key reliably matches (value normalization): hex →
 // lower-case 6-digit `#rrggbb`; numbers → bare, unit-less. `kind` namespaces the
 // key so fontSize:16 ≠ spacing:16.
 export function canonValue(value: string): string {
@@ -44,12 +33,6 @@ export function canonValue(value: string): string {
 }
 export const decisionKey = (kind: ThemeKind, value: string): string =>
   `${kind}:${canonValue(value)}`;
-
-// fontMap may be authored as `fontMap` (phase-08 §5) or carried as the Phase-6
-// `appFamily` seed — accept either, fontMap wins on conflict.
-export function fontMapOf(d: Decisions): Record<string, string> {
-  return { ...(d.appFamily ?? {}), ...(d.fontMap ?? {}) };
-}
 
 // --- token mapping over the IR (pass 5 §6a) ---------------------------------
 // Map each IR value to a code token BY VALUE, WITHIN ITS OWN KIND. A paint →
@@ -103,28 +86,6 @@ function apply(
     // a rejected value is a deliberate literal — label it so issues.json suppresses
     obj[matchField] = rejects.has(dk) ? "rejected" : "none";
   }
-}
-
-// --- decisions: fontMap → appFamily, placeholders → text -------------------
-export function applyFontMap(node: IRNode, fontMap: Record<string, string>): void {
-  if (node.font && node.font.family && fontMap[node.font.family])
-    node.font.appFamily = fontMap[node.font.family];
-  for (const c of node.children) applyFontMap(c, fontMap);
-}
-
-export function applyPlaceholders(
-  node: IRNode,
-  placeholders: Record<string, { placeholder?: boolean; text?: string }>
-): void {
-  if (node.text && placeholders[node.guid]) {
-    const p = placeholders[node.guid];
-    if (typeof p.placeholder === "boolean") {
-      node.text.placeholder = p.placeholder;
-      node.text.reason = "decisions.json";
-    }
-    if (typeof p.text === "string") node.text.value = p.text;
-  }
-  for (const c of node.children) applyPlaceholders(c, placeholders);
 }
 
 // --- intent.json aggregation over a RESOLVED screen (pass 6 §6b) ------------

@@ -1,8 +1,8 @@
 // Deterministic IR assembly helpers (IR-PLAN Phase 1). NO top-level side effects
 // — build-ir.mts imports these at build time. Everything here is a pure function
 // of the decoded bytes: slug derivation, token kind-split, composite typography/
-// effect assembly, and font collection. Judgment (font substitution, conflict
-// resolution) is NOT here — that is decisions.json (Phase 8).
+// effect assembly, and font collection. Faithful defaults handle the rest (the Figma
+// family for fonts, the literal hex for unmatched colours); no decisions overlay.
 import { load, key, colorStr } from "./lib.mts";
 import { letterSpacingToPx, lineHeightPx } from "./reconcile-lib.mts";
 import type { Token } from "./tokens-lib.mts";
@@ -252,12 +252,11 @@ export function assembleEffects(index: ReturnType<typeof load>): IREffect[] {
 // --- fonts (pass 3) ---------------------------------------------------------
 // Distinct fontName.family over the RAW nodes in the scoped pages plus the
 // typography tokens, with a usage list. Reads fontName directly — no instance
-// resolution needed (family is on the raw node). Each family gets an EMPTY
-// appFamily slot (P2-11 substitution map); pre-seed ONLY from a --decisions
-// appFamily map (deterministic input).
+// resolution needed (family is on the raw node). appFamily is the app-side family;
+// build-ir defaults it to the Figma family (the faithful default — swap during elevation).
 export type IRFont = {
   family: string;
-  appFamily: string; // "" unless pre-seeded from --decisions
+  appFamily: string; // defaults to the Figma family (build-ir)
   usedBy: string[]; // up to N sample usage labels (node names / token names)
   count: number;
 };

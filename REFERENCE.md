@@ -215,7 +215,10 @@ bound nodes.
 
 ## 6. Vector geometry → SVG (logos, illustrations, custom icons)
 
-Vector shapes index into `message.blobs`:
+The geometry walker lives in `svg-lib.mts` (`extractGeometry`/`toSvgString`/`emitIconComponent`),
+shared by `codegen.mts` (component icons, internal) and `export-svg.mts` (standalone CLI).
+Component icons are handled inside codegen (`--svg`) — this section is the CLI path for
+standalone logos/illustrations. Vector shapes index into `message.blobs`:
 
 - `node.fillGeometry[] = {windingRule, commandsBlob}`; likewise `strokeGeometry`
   (already stroke-outlined — render it as a **fill**).
@@ -228,12 +231,14 @@ Vector shapes index into `message.blobs`:
 - Fill color from `fillPaints[0].color`; multiply node × paint opacities.
 
 ```sh
-node export-svg.mts $WORK/msg-<name>.json <guidKey> out.svg [--png]
+node export-svg.mts $WORK/msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
 ```
 
-`export-svg.mts` follows `symbolData.symbolID` into masters, so icons/logos that
-wrap component instances export correctly (per-instance fill overrides are not
-applied — recolor in the consuming component).
+`export-svg.mts` (and `extractGeometry`) follow `symbolData.symbolID` into masters, so
+icons/logos that wrap component instances export correctly. The master's baked paints are
+emitted; per-instance colour overrides are NOT applied to the geometry — `--recolor=currentColor`
+makes fills inherit a `color`, and for component icons codegen drives that `color` from the IR's
+override-aware resolved value (so a recoloured icon ships its real colour, not the master default).
 
 Small results (logos, icons) → inline `<svg>` / `react-native-svg` components.
 Large hand-drawn ones (100+ paths) → rasterize for runtime performance. Headless
@@ -311,7 +316,7 @@ This extraction is a pure function of the bytes and always runs (no `--theme`).
 With `--theme <p>`, each **unbound** `color.hex`/`font.size` also gets a code
 token **by value, within kind** (`color.{token,match}`,
 `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`; bound colors stay
-`"bound"`). See SKILL.md for the `issues.json`/`intent.json`/`decisions.json` loop.
+`"bound"`). `issues.json`/`intent.json` are informational review notes (never a gate; there is no `decisions.json`).
 
 ## 9. Pitfalls checklist
 
@@ -361,11 +366,11 @@ token **by value, within kind** (`color.{token,match}`,
       `position:'absolute'` + `left`/`top` with the parent `position:'relative'`.
       Icon wrappers **center** their content; image fills emit a `// TODO: image`
       marker + placeholder.
-- [ ] **State the font-substitution map up front** — fig families are often
-      commercial/unavailable; pick the app-family per fig-family before coding so
-      sizes/line-heights stay consistent (e.g. `Neulis Sans → Figtree`, keep
-      `Geist Mono`, keep `Lora`). `render.mts` renders the fig family name as-is —
-      a missing font silently falls back, so a wrong substitution shows up there.
+- [ ] **Font substitution is the app's job** — codegen emits each node's Figma family
+      name as-is (the faithful default); fig families are often commercial/unavailable, so
+      register the face under that name in the app, or swap it (e.g. `Neulis Sans → Figtree`,
+      keep `Geist Mono`, keep `Lora`) during elevation. A missing font silently falls back,
+      so a wrong substitution shows up in the running app.
 
 ## 10. Complete script reference
 
@@ -386,15 +391,12 @@ Runtime: plain Node-compatible `.mts` (Node ≥ 22.18 runs them directly; Bun an
 
 | Script | Usage | Purpose |
 |---|---|---|
-| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--decisions <p>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` + `raw-map.json` + `fonts.json` + `tokens/*` (incl. `variables.json` = the COMPLETE soft-delete-filtered catalog) + `components/*` (variant matrix + prop API + non-variant `props`/`propGroups` + per-variant `bindings`) + `screens/<page>/<screen>.json` (resolved, reconciled, placeholder-detected, abs-coordinated, full `style`/`layout`). With `--theme`: value-maps each unbound color/size to a code token and writes `issues.json` + `intent.json`. `--decisions` folds the overlay back in. Re-runs with same source+decisions are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
-| `theme-gen.mts` | `node theme-gen.mts <ir-dir> [--framework web\|rn] [--out <dir>]` | the IR's complete variable catalog → a typed theme. No `--framework` → both `theme.ts` (rn) + `theme.css` (web). Mirrors Figma's `/`-hierarchy (`Color/praline/950` → `color.praline['950']`), keyed by mode. **Aliases emitted as CODE REFERENCES to the direct target** (CSS `var(--…)`; RN per-mode IIFE in topological order). Pure logic in `theme-lib.mts` (shared with `codegen.mts`) |
-| `codegen.mts` | `node codegen.mts <ir-dir> <set> [--out <dir>] [--framework rn\|web] [--theme-import <module>]` | multi-file component **scaffold** from `components/<set>.json`: `<out>/<slug>/` = `index.tsx` (variant dispatcher) + `types.ts` (`Props` = variant union + COLLAPSED non-variant props) + one `<variant>.tsx` per variant (each renders THAT variant's OWN resolved subtree as JSX — rn View/Text + StyleSheet, web div/span + style objects — with reconciled style/layout/font/text). A value **bound to a Figma variable** is emitted as a **reference into the theme-gen theme**; unbound values keep the reconciled literal + a `// TODO` adjudication. PROP COLLAPSE: TEXT→`name?: string`, BOOL-visible→conditional render, BOOL ⊕ TEXT on one node→ONE optional string, INSTANCE_SWAP→`React.ReactNode` slot. Default framework React Native |
-| `fidelity.mts` | `node fidelity.mts <ir-dir> <id> [--variant <v>] [--candidate <png>] [--out <heatmap.png>] [--json] [--images <dir>] [--cell <px>] [--max-diff <pct>]` | the elevation guardrail (logic in `fidelity-lib.mts`). **Contract mode** (default, deterministic): print the per-node invariants the elevated component MUST preserve (geometry, typography, color token, layout, borders, the variant→structure tree); `styleKey` maps each row to the scaffold's style block. **Image-diff mode** (`--candidate`): render the IR reference (via `render.mts --ir`) and diff your app screenshot against it → a drift score + worst regions (+ optional heatmap). `<id>` = a component set name/slug, screen slug, node id, or guid |
-| `ir-validate.mts` | `node ir-validate.mts <ir-dir>` | the **ship gate** (exits non-zero on failure). Asserts from the IR alone: every color adjudicated against the theme (skipped greenfield; `bound` always passes), every font has a non-null `appFamily`, no unresolved `placeholder:true`, no open `conflicts[]`, no missing provenance. Each failure names the node `guid` + the `decisions.json` entry that resolves it |
-| `render.mts` | `node render.mts <msg.json> <frame-guidKey> <out.png> [--images <dir>]` • `node render.mts --ir <ir-dir> <screen-id> <out.png> [--images <dir>]` | resolved frame → self-contained `<out>.html` + screenshot PNG; text uses the **reconciled** size. **`--ir` mode** renders OVER an emitted IR in one step (no re-resolve, no blob re-decode); uses node `style`/`layout`/`text`. Sidecar asset bytes (images via `--images`/sibling `images/`; pre-exported `vectors/<id>.svg`) fill image/vector slots; a missing asset → labeled placeholder. Not pixel-perfect — catches "obviously wrong". Writes HTML even if Chrome is absent |
+| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--mode <name>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` (incl. `modes` + the resolved `activeMode`) + `raw-map.json` + `fonts.json` + `tokens/*` (incl. `variables.json` = the COMPLETE soft-delete-filtered catalog) + `components/*` (variant matrix + prop API + non-variant `props`/`propGroups` + per-variant `bindings`) + `screens/<page>/<screen>.json` (resolved, reconciled, placeholder-detected, abs-coordinated, full `style`/`layout`). `--mode <name>` pins every variable-bound value to one mode (default: the catalog's primary). With `--theme`: value-maps each unbound color/size to a code token and writes informational `issues.json` + `intent.json` (review notes, never a gate). Faithful defaults: unmapped font → its Figma family; unmatched colour → its literal hex. Re-runs with same source+mode are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
+| `theme-gen.mts` | `node theme-gen.mts <ir-dir> [--framework web\|rn] [--mode <name>] [--out <dir>]` • `node theme-gen.mts <ir-dir> --list-modes` | the IR's complete variable catalog → a typed theme. No `--framework` → both `theme.ts` (rn) + `theme.css` (web). Mirrors Figma's `/`-hierarchy (`Color/praline/950` → `color.praline['950']`), emitting EVERY mode but making `--mode <name>` (default: `manifest.activeMode`) the active block — web `:root`, RN `defaultMode`. `--list-modes` prints the catalog's modes (the active one marked). **Aliases emitted as CODE REFERENCES to the direct target** (CSS `var(--…)`; RN per-mode IIFE in topological order). Pure logic in `theme-lib.mts` (shared with `codegen.mts`) |
+| `codegen.mts` | `node codegen.mts <ir-dir> <set> [--out <dir>] [--framework rn\|web] [--theme-import <module>] [--mode <name>] [--svg <msg.json>] [--images <dir>]` | multi-file component **scaffold** from `components/<set>.json`: `<out>/<slug>/` = `index.tsx` (variant dispatcher) + `types.ts` (`Props` = variant union + COLLAPSED non-variant props) + one `<variant>.tsx` per variant (each renders THAT variant's OWN resolved subtree as JSX — rn View/Text + StyleSheet, web div/span + style objects — with reconciled style/layout/font/text). A value **bound to a Figma variable** is emitted as a **reference into the theme-gen theme**; unbound values keep the reconciled literal + a `// TODO` adjudication. **`--svg <msg.json>`** exports each icon's geometry into a deduplicated owned, recolorable component under `<out>/icons/` (geometry via `svg-lib.mts`; colour from the IR's override-aware resolved value — mono icons use `currentColor` + the token), and renders instance-swap slots as `{slot ?? <Default/>}`. **`--images <dir>`** extracts raster fills into `<slug>/assets/`. PROP COLLAPSE: TEXT→`name?: string`, BOOL-visible→conditional render, BOOL ⊕ TEXT on one node→ONE optional string, INSTANCE_SWAP→`React.ReactNode` slot. Default framework React Native |
 | `diff-ir.mts` | `node diff-ir.mts <ir-old> <ir-new>` | design-version diff over two emitted IRs (no decode): added/removed screens & components, changed tokens per mode, drifted type specs, per-screen node/color drift (aligned by `path`, never `guid`). Compares reconciled **truth vs truth**; refuses to diff an IR against itself |
 | `ir.mts` | `node ir.mts <ir-dir> <query>` | dumb reader over an emitted IR (no decode): `"fonts where appFamily is empty"`, `"colors with match=none"`, `"nodes with conflicts"`. Otherwise read the small per-screen JSON directly |
-| `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg> [--png]` | vector → SVG (`--png` rasterizes via headless Chrome @3×; degrades gracefully if Chrome is absent) |
+| `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]` | a STANDALONE vector → SVG (logos/illustrations; codegen does component icons internally via the same core). Geometry from `svg-lib.mts`. `--recolor=currentColor` emits recolorable fills; `--png` rasterizes via headless Chrome @3× (degrades gracefully if Chrome is absent) |
 | `icons.mts` | `node icons.mts <msg.json> <screen-guidKey>` | inventory icon instances under a screen, resolve each to its library export name (Phosphor `MagnifyingGlass`…), emit the exact `AppIconName` union additions |
 
 ### Raw query / verify multiplexer
@@ -420,5 +422,5 @@ Pure modules imported by the CLIs (no top-level side effects), so deterministic
 logic is written once and never drifts: `lib.mts`, `resolve-lib.mts`,
 `screens-lib.mts`, `components-lib.mts`, `reconcile-lib.mts`, `tokens-lib.mts`,
 `mapping-lib.mts`, `theme-lib.mts`, `intent-lib.mts`, `ir-lib.mts`,
-`raster-lib.mts`, `describe-lib.mts`, `fidelity-lib.mts`. Run the regression
+`raster-lib.mts`, `describe-lib.mts`, `svg-lib.mts`. Run the regression
 suite with `npm test` (`selftest.mts`).

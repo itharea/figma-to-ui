@@ -869,7 +869,7 @@ export function registerRawMap(node: IRNode, out: Record<string, { guid: string;
 
 // Structural provenance check (load-bearing, §7): every reconciled font/text/color
 // object on every node carries its *Source/match key. Returns the list of
-// violations ([] = clean). Phase 9's ir-validate shares this.
+// violations ([] = clean). build-ir surfaces any in issues.json (informational).
 export function provenanceViolations(node: IRNode, acc: string[] = []): string[] {
   if (node.font) {
     if (node.font.sizeSource == null) acc.push(`${node.id}: font.sizeSource missing`);
