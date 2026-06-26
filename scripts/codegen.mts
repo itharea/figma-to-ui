@@ -181,7 +181,12 @@ const { logicals, logicalByDefKey } = deriveLogicals(comp);
 
 // --- identifiers --------------------------------------------------------------
 const Comp = compIdent(comp.name ?? setName);
-const slug = slugify(comp.name ?? setName) || "component";
+// Output dir = the IR component's UNIQUE filename slug (build-ir already disambiguated
+// same-named sets as <name>, <name>-2, ...). Using slugify(comp.name) instead would make
+// two distinct sets sharing a display name (e.g. two "slider"/"Ticket" sets) collide and
+// overwrite each other's folder. Fall back to the name slug only if no file matched.
+const slug =
+  (compFile ? compFile.replace(/\.json$/, "") : slugify(comp.name ?? setName)) || "component";
 
 // --- image-fill asset extraction (--images) -----------------------------------
 // Copy a referenced raster fill (by content hash) out of the decoded .fig images dir
@@ -302,7 +307,16 @@ function ownIcon(n: { guid: string; name?: string | null }, monoHint?: boolean):
   const dedupKey = mono ? geo.geomHash : `${geo.geomHash}#${geo.fills.join(",")}`;
   const hit = iconByKey.get(dedupKey);
   if (hit) return hit;
-  const base = (iconExportName(n) || `Icon${geo.geomHash.slice(0, 6)}`) + "Icon";
+  // CONTENT-ADDRESSED name (fix): the Figma node name is generic ("Vector" for every
+  // Phosphor glyph), and codegen is invoked once-per-set into a SHARED icons/ dir, so a
+  // per-invocation counter ("VectorIcon","VectorIcon2"...) makes different glyphs from
+  // different sets collide on the same filename and clobber each other. Folding the
+  // geometry hash into the name makes it stable+unique per geometry across invocations:
+  // same glyph → same file (idempotent), different glyph → different file (no clobber).
+  let stem = iconExportName(n) || "Glyph";
+  // A glyph named e.g. "941" (the iOS 9:41 time) yields an invalid identifier start; prefix it.
+  if (!/^[A-Za-z_]/.test(stem)) stem = "Glyph" + stem;
+  const base = `${stem}_${geo.geomHash.slice(0, 8)}Icon`;
   let Name = base, i = 2;
   while (iconTakenNames.has(Name)) Name = `${base}${i++}`;
   iconTakenNames.add(Name);
@@ -566,6 +580,20 @@ function isVectorOnly(n: IRNode): boolean {
   if (n.type === "text" || n.type === "image") return false;
   const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
   return kids.length > 0 && kids.every(isVectorOnly);
+}
+
+// A COMPOSITE GLYPH: a frame/group whose whole subtree is RAW vector geometry — no
+// instances, text or images. Such a node is ONE drawing split across several vector
+// nodes (a stroke arrow = shaft + head; a multi-letter logo), so it must be extracted as
+// ONE composed SVG (export-svg style), not one sub-icon per child. The instance exclusion
+// is the key difference from isVectorOnly: an instance child means a SLOT/nested component
+// (e.g. a square button wrapping a swappable icon) — that's a CONTAINER, not a glyph, and
+// must keep its background + slot rather than being flattened into a single icon.
+function isCompositeVectorGlyph(n: IRNode): boolean {
+  if (n.type === "vector" || n.type === "boolean_operation") return true;
+  if (n.type === "instance" || n.type === "text" || n.type === "image") return false;
+  const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
+  return kids.length > 0 && kids.every(isCompositeVectorGlyph);
 }
 
 // A single-icon WRAPPER: an instance/frame whose only visible child is itself a pure
@@ -895,9 +923,16 @@ function renderVariant(v: any): VariantRender {
         if (icon) {
           iconImports.set(icon.Name, icon.file);
           const sizeAttr = defNode?.box?.w ? ` size={${defNode.box.w}}` : "";
+          // Icon colour: the default symbol's own fill if it has one, ELSE the CONTEXTUAL
+          // colour this slot is recoloured to (read from the slot instance's override — e.g. a
+          // filled button paints its icon praline-50). Without this a mono icon falls back to
+          // currentColor and renders the wrong colour (dark icon on a dark button).
+          const slotColor = defFills.length === 1
+            ? { hex: defFills[0].hex, var: defFills[0].var as string | null }
+            : iconOverrideColor(n.guid);
           const colorAttr =
-            icon.mono && defFills.length === 1
-              ? ` color={${colorRef({ hex: defFills[0].hex, var: defFills[0].var, match: defFills[0].var ? "bound" : null }, `${n.name} default icon`, push)}}`
+            icon.mono && slotColor && slotColor.hex
+              ? ` color={${colorRef({ hex: slotColor.hex, var: slotColor.var, match: slotColor.var ? "bound" : null }, `${n.name} default icon`, push)}}`
               : "";
           defaultEl = `<${icon.Name}${sizeAttr}${colorAttr} />`;
         } else {
@@ -923,7 +958,12 @@ function renderVariant(v: any): VariantRender {
     // placeholder + an export-svg TODO, NOT a tree of meaningless empty/recolored
     // boxes (codegen can't draw vector paths; export-svg.mts does). The placeholder
     // box flex-centers (improvement 4) so the inlined <svg>/<Image> ends up centered.
-    if (n.type === "vector" || n.type === "boolean_operation" || (n.type === "instance" && isVectorOnly(n))) {
+    // Extract the WHOLE subtree as ONE composed icon (the export-svg approach) when it is a
+    // composite GLYPH (raw vectors only — e.g. a stroke arrow = shaft + head, or a multi-letter
+    // logo) OR a vector-only icon INSTANCE. NOT one sub-icon per child: the previous per-vector
+    // split left the pieces mis-positioned by their wrappers. A frame with an instance/slot
+    // child is a container (keeps its bg + slot), so it is deliberately excluded here.
+    if (isCompositeVectorGlyph(n) || (n.type === "instance" && isVectorOnly(n))) {
       // Icons are an INTERNAL codegen step: export the geometry (svg-lib, from the decoded
       // message.json) into an owned recolorable component and drive its colour from the IR's
       // (override-aware) resolved fills — a mono icon gets currentColor + the resolved token
@@ -954,7 +994,17 @@ function renderVariant(v: any): VariantRender {
         const el = `${pad}<${Box} ${styleAttr}><${icon.Name}${sizeAttr}${colorAttr} /></${Box}>`;
         return wrapConditional(el, binds, depth, n);
       }
-      // fallback (no svg source / no geometry / no --out) → keep the export-svg placeholder.
+      // fallback — ownIcon produced nothing. Two cases:
+      // (a) the geometry source WAS available (--svg + --out) but the vector yields no drawable
+      //     paths → it's an INVISIBLE structural layer (e.g. a paintless vector-network base in a
+      //     stroke glyph). Emit an empty box, NOT a scary export-svg TODO for something that
+      //     draws nothing.
+      if (svgIndex && outDir) {
+        const el = `${pad}<${Box} ${styleAttr} />`;
+        return wrapConditional(el, binds, depth, n);
+      }
+      // (b) no geometry source (no --svg/--out) → keep the export-svg placeholder so the user
+      //     knows to pass it.
       const fillNote = fills.length ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]` : "";
       const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
       push(`icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — pass --svg <message.json> to export + wire it (or run export-svg.mts and inline)`);

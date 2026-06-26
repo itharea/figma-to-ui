@@ -22,7 +22,8 @@ export type ComponentSet = {
 };
 
 // One or more `prop=value` pairs, comma-separated. Value runs to the next comma.
-const VARIANT_NAME = /^(\w[\w ]*=[^,]+)(,\s*\w[\w ]*=[^,]+)*$/;
+// Axis keys may contain hyphens (e.g. `item-count=more`) — allow `-` in the key.
+const VARIANT_NAME = /^(\w[\w -]*=[^,]+)(,\s*\w[\w -]*=[^,]+)*$/;
 
 function parseProps(rawName: string): Record<string, string> {
   const props: Record<string, string> = {};
