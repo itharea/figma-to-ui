@@ -407,7 +407,10 @@ const bind = (node: string, field: string) => [{ node, field }];
   eq("svg: one path extracted", geoBlack.paths.length, 1);
   eq("svg: one distinct fill (mono)", geoBlack.fills.length, 1);
   eq("svg: fill hex from master paint", geoBlack.fills[0], "#000000");
-  eq("svg: viewBox from node size", geoBlack.viewBox, "0 0 24 24");
+  // viewBox = the icon's natural frame (Figma's exact box, margins intact), expanded only if
+  // geometry spills past it. The synthetic line (0,0)-(10,0) sits inside the 24×24 node → the
+  // frame is used verbatim (1:1), the glyph keeps its real position. No re-centre, no crop.
+  eq("svg: viewBox is the natural frame (1:1)", geoBlack.viewBox, "0 0 24 24");
 
   const geoRed = extractGeometry(mkIndex({ r: 1, g: 0, b: 0, a: 1 }), "1:1");
   check("svg: geomHash is colour-independent (dedup key)", geoBlack.geomHash === geoRed.geomHash, `${geoBlack.geomHash} vs ${geoRed.geomHash}`);
