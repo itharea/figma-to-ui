@@ -1,4 +1,4 @@
-// Deterministic IR assembly helpers (IR-PLAN Phase 1). NO top-level side effects
+// Deterministic IR assembly helpers. NO top-level side effects
 // — build-ir.mts imports these at build time. Everything here is a pure function
 // of the decoded bytes: slug derivation, token kind-split, composite typography/
 // effect assembly, and font collection. Faithful defaults handle the rest (the Figma

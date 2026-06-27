@@ -1,39 +1,28 @@
-// codegen.mts — multi-file component SCAFFOLD from the IR (improvement B-codegen).
+// codegen.mts — multi-file component SCAFFOLD from the IR. Emits a component folder:
+//   <out>/<slug>/index.tsx       — meta component: Props (variant union + COLLAPSED
+//                                   non-variant props) + a dispatcher to the variant files.
+//   <out>/<slug>/types.ts        — the shared Props type (type-only import, so index and
+//                                   the variant files never form a runtime cycle).
+//   <out>/<slug>/<variant>.tsx   — one file per variant, each rendering THAT variant's own
+//                                   resolved subtree as JSX (rn: View/Text/Image + StyleSheet;
+//                                   web: div/span + style objects) with the reconciled per-node
+//                                   style/layout/font/text. Bound nodes consume props (see
+//                                   PROP MODEL).
 //
-// Replaces the old single-default-container output with a real component FOLDER:
-//   <out>/<slug>/index.tsx       — the meta component: Props (variant union + the
-//                                   COLLAPSED non-variant props) + a dispatcher that
-//                                   forwards props to the right per-variant component.
-//   <out>/<slug>/types.ts        — the shared Props type (type-only import, so index
-//                                   and the variant files never form a runtime cycle).
-//   <out>/<slug>/<variant>.tsx   — ONE file per variant, each rendering THAT variant's
-//                                   OWN resolved subtree as a JSX tree (rn: View/Text/
-//                                   Image + StyleSheet; web: div/span + style objects)
-//                                   with the reconciled per-node style/layout/font/text
-//                                   (cornerRadius, strokes incl. per-side borderWidths,
-//                                   effects, opacity, flex layout, fontSize/lineHeight/
-//                                   letterSpacing, text case/align). Bound nodes consume
-//                                   props (the ELEGANT COLLAPSE, see PROP MODEL below).
+// PROP MODEL (driven by Phase A bindings — facts only):
+//   • TEXT prop bound to a node's `characters` → a string prop (falls back to the default).
+//   • BOOL prop bound to a node's `visible`    → the node renders conditionally.
+//   • COLLAPSE: a BOOL-visible prop AND a TEXT prop on the SAME node → ONE optional
+//     `name?: string` (present → render with that text, absent → omit).
+//   • INSTANCE_SWAP prop → a `React.ReactNode` slot, rendered where the instance node sits.
+//   camelCase names from Phase A; collisions de-duped deterministically; each keeps its
+//   original Figma name in a comment.
 //
-// PROP MODEL (idiomatic collapse, driven by Phase A bindings — facts only):
-//   • TEXT prop  bound to a node's `characters` → a string prop; the Text uses the
-//     prop, falling back to the reconciled default text.
-//   • BOOL prop  bound to a node's `visible`    → the node renders conditionally.
-//   • COLLAPSE: when a BOOL-visible prop AND a TEXT prop bind the SAME node, emit ONE
-//     optional `name?: string` (present → render with that text, absent → omit). This
-//     wins over a separate {show, text} pair.
-//   • INSTANCE_SWAP prop → a `React.ReactNode` slot prop, rendered where the bound
-//     instance node sits.
-//   camelCase names (from Phase A `props[].name`); name collisions are de-duped
-//   deterministically; each prop keeps a comment with its original Figma name.
+// A SCAFFOLD, not finished code: every placeholder text, unmapped font, open reconciliation
+// conflict, or match:none gets a `// TODO` attributed to the variant — never a silent value.
 //
-// A SCAFFOLD, not finished code. Leaves a clearly-marked `// TODO` on every
-// placeholder:true text, unmapped font, open reconciliation conflict, or match:none —
-// NEVER bakes an unconfirmed value silently. TODOs are attributed to the variant.
-//
-// Usage: node codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web]
-//   NOTE: --out is now an output DIRECTORY (was a single file). The folder
-//   <out>/<slug>/ is written and a written-files summary is printed to stderr.
+// Usage: node cli/codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web]
+//   (--out is an output DIRECTORY; <out>/<slug>/ is written, a file summary to stderr.)
 import * as fs from "fs";
 import * as path from "path";
 import type { IRNode } from "../lib/screens-lib.mts";
@@ -66,10 +55,10 @@ if (framework !== "rn" && framework !== "web")
   throw new Error(`--framework must be rn|web (got "${framework}")`);
 const web = framework === "web";
 // Module a generated RN component imports `{ theme, defaultMode }` from (theme-gen.mts
-// output). web references CSS custom properties inline (no import). issue #17.
+// output). web references CSS custom properties inline (no import).
 const themeImport = flag("--theme-import") ?? "./theme";
 
-// A bound-variable value as a reference into the generated theme (issue #17), using the
+// A bound-variable value as a reference into the generated theme, using the
 // SHARED theme-lib munging so codegen and theme-gen never drift. web → CSS var() (numeric
 // tokens are unit-less, so a px context wraps them in calc(... * 1px)); rn → a runtime
 // `theme[defaultMode].<path>` member access (requires the import variantFile injects).
@@ -275,7 +264,7 @@ const propKeyExpr =
       ? "variant"
       : axisNames.map((a) => kebab(a)).join(" + '/' + ");
 
-// Name of the per-instance ROOT style-override prop for a component (issue #23). Defaults
+// Name of the per-instance ROOT style-override prop for a component. Defaults
 // to the idiomatic `style`, but a Figma variant axis can literally be named "Style" (→ a
 // `style` variant prop — e.g. Button), which would collide. So fall back to a free name,
 // derived from the component's OWN axes + logical props. Both the generated component and
@@ -392,7 +381,7 @@ function colorRef(
   push: (m: string) => void,
 ): string {
   if (!c || !c.hex) return "'transparent'";
-  // Bound to a Figma variable → reference the generated theme, not the literal (issue #17).
+  // Bound to a Figma variable → reference the generated theme, not the literal.
   if (c.var) return themeRef(c.var, false);
   if (c.token) return c.token;
   if (c.match === "none" || (typeof c.match === "string" && c.match.startsWith("nearest"))) {
@@ -407,7 +396,7 @@ function colorRef(
 // Collect every DISTINCT solid fill {hex, var} across a vector subtree — the vector-branch
 // node itself PLUS its descendants. Icon wrappers (instance/frame) carry empty fills on the
 // branch node; the real colour lives on descendant <vector> nodes, so we must recurse, not
-// just read n.style.fills (finding #1). Order-preserved, deduped by hex|var.
+// just read n.style.fills. Order-preserved, deduped by hex|var.
 function collectVectorFills(n: IRNode): { hex: string; var: string | null }[] {
   const out: { hex: string; var: string | null }[] = [];
   const seen = new Set<string>();
@@ -456,7 +445,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
       );
       lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
     }
-    // image fill (improvement 5-image-fills): with --images, EXTRACT the raster fill into
+    // image fill: with --images, EXTRACT the raster fill into
     // assets/ and emit a real backgroundImage reference; without it, leave a placeholder
     // TODO. Emitted AFTER the solid fill so a node with both keeps its solid bg too.
     // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
@@ -494,10 +483,10 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
       lines.push(`borderBottomLeftRadius: ${s.cornerRadius.bl},`);
     }
   }
-  // strokes + per-side widths (improvement 3-borders).
+  // strokes + per-side widths.
   if ((want("strokePaints") || want("strokeWeight")) && s?.strokes?.length) {
     const st = s.strokes[0];
-    // route through colorRef so a bound stroke references the theme (issue #17), same as fills.
+    // route through colorRef so a bound stroke references the theme, same as fills.
     const cref = colorRef(
       {
         hex: st.hex ?? null,
@@ -547,7 +536,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
       lines.push(`display: 'flex',`);
       lines.push(`flexDirection: '${l.mode}',`);
       if (l.gap !== undefined) lines.push(`gap: ${l.gap},`);
-      // SPACE_EVENLY→SPACE_BETWEEN disambiguation (improvement 8): the helper filters
+      // SPACE_EVENLY→SPACE_BETWEEN disambiguation: the helper filters
       // absolute/invisible children and requires >=2 in-flow.
       const j = disambiguateJustify(l, n.box, n.children ?? []);
       if (j) lines.push(`justifyContent: '${j}',`);
@@ -590,7 +579,7 @@ function rootOverrideStyle(n: IRNode, fields: string[], push: (m: string) => voi
     .join(" ");
 }
 
-// A node's sizing AS A FLEX CHILD (improvement 3): grow/alignSelf/min/aspect. Shared
+// A node's sizing AS A FLEX CHILD: grow/alignSelf/min/aspect. Shared
 // by nodeStyleBody (frames) and textStyleBody (text) — both flex parents size children
 // for text too, so text nodes need the same grow/alignSelf/minW/minH.
 function flexChildLines(n: IRNode): string[] {
@@ -647,8 +636,8 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
     const v = f.vars;
     const varc = (name: string | null | undefined) => (name ? ` // var ${name}` : "");
     if (f.styleName) lines.push(`// token text-style: ${f.styleName}`);
-    // A bound numeric/string typography property references the theme (issue #17);
-    // unbound keeps the reconciled literal. lineHeight (improvement 2): web wants a
+    // A bound numeric/string typography property references the theme;
+    // unbound keeps the reconciled literal. lineHeight: web wants a
     // string '36px' (React treats a unitless number as a multiplier), RN a bare number.
     if (f.size != null)
       lines.push(
@@ -695,7 +684,7 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
   lines.push(`color: ${cref},`);
   if (n.text?.case) lines.push(`textTransform: '${n.text.case}',`);
   if (n.text?.align) lines.push(`textAlign: '${n.text.align}',`);
-  // text node as a flex child (improvement 3): same grow/alignSelf/minW/minH as frames.
+  // text node as a flex child: same grow/alignSelf/minW/minH as frames.
   lines.push(...flexChildLines(n));
   return lines.join("\n");
 }
@@ -733,9 +722,9 @@ function isSingleIconWrapper(n: IRNode): boolean {
 }
 
 // `overlap()` / `hasSignificantNonAdjacentOverlap()` live in layout-lib.mts (pure +
-// unit-tested). Strict bbox intersection (improvement 9): touching edges (==) do NOT count.
+// unit-tested). Strict bbox intersection: touching edges (==) do NOT count.
 
-// Does THIS container position its children absolutely (improvements 6/7/11)?
+// Does THIS container position its children absolutely?
 //   #7: a non-auto-layout container (no layout) positions children absolutely.
 //   #6: an auto-layout container positions children abs when a child is stack-absolute.
 //   #11: an auto-layout container with an authored peek-stack (a significant NON-ADJACENT
@@ -752,7 +741,7 @@ function containerPositionsChildren(n: IRNode, kids: IRNode[]): boolean {
   ); // #11
 }
 
-// Interactive-archetype MARKER (improvement 10): a string TODO (no prop synthesis).
+// Interactive-archetype MARKER: a string TODO (no prop synthesis).
 function interactiveArchetype(n: IRNode): string | null {
   const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
   const named = (re: RegExp) => kids.some((c) => re.test(c.name ?? ""));
@@ -826,7 +815,7 @@ function componentReference(
     } else if (lg.role === "bool" && b.field === "visible") {
       // standalone visibility toggle: pass only when the resolved state differs from the
       // prop default (absent ⇒ the child's IR default — codegen now defaults the bool in the
-      // child's destructure, finding #3 — so omitting the prop reproduces the master).
+      // child's destructure — so omitting the prop reproduces the master).
       const def = propByDefKey.get(b.defKey)?.default;
       const shown = byGuid.has(b.node);
       if (typeof def === "boolean" && shown !== def) {
@@ -840,7 +829,7 @@ function componentReference(
     }
   }
 
-  // ROOT style override (regression fix, issue #23): pre-PR-#22 the instance subtree was
+  // ROOT style override (regression fix): the instance subtree was
   // inlined, so per-instance ROOT box overrides (fill/radius/border/opacity/size/effects)
   // rendered. Referencing dropped them — the child drew its MASTER styles. Re-apply them
   // here as a `style` prop the referenced child merges onto its root (root-container scope;
@@ -853,7 +842,7 @@ function componentReference(
   // overlap escalation), the position/left/top/zIndex prefix MUST ride along — a reference
   // has no JSX box of its own to carry it,
   // so it flows into the parent and the overlap/peek layout collapses to a flat row. Merge it
-  // into the same root style-override prop the child already merges (issue #23 path) so the
+  // into the same root style-override prop the child already merges, so the
   // referenced component's root applies it. posLines wins over master styles (later in merge).
   // Inlined to ONE line: this body lands inside a JSX attr AND inside a `//` TODO message, so
   // an embedded newline would break out of the comment / split the attribute.
@@ -962,7 +951,7 @@ function renderVariant(v: any): VariantRender {
   const Box = web ? "div" : "View";
   const Txt = web ? "span" : "Text";
 
-  // Compute the position/left/top/zIndex prefix for ONE node (improvements 6/7/9). A
+  // Compute the position/left/top/zIndex prefix for ONE node. A
   // node is absolutely placed when it's stack-absolute, the parent positions all its
   // children, or an overlap-group escalation (absOverride) forced it. We prepend these
   // lines to the node's style body (emit holds the parent flag + the overlap decision).
@@ -992,13 +981,13 @@ function renderVariant(v: any): VariantRender {
   }
 
   // Recurse into a node's visible children, computing per-child absolute/zIndex
-  // decisions (improvements 6/7/9). Returns the joined JSX of the children.
+  // decisions. Returns the joined JSX of the children.
   function emitChildren(n: IRNode, kids: IRNode[], depth: number): string {
     const positionsKids = containerPositionsChildren(n, kids);
     // #9 z-index: detect a positioned child overlapping a sibling (strict). If any
     // overlap exists in the set, escalate the WHOLE overlapping set to absolute and
     // emit zIndex by child-array order (later children paint on top → Figma order).
-    // GATE (CODEGEN_BUGS_v2 A): only run this for children ALREADY out of flow. An
+    // GATE: only run this for children ALREADY out of flow. An
     // auto-layout (flex) row places children by flexbox, so their stored bboxes are
     // frozen snapshots — a sub-pixel bbox touch there is not a real z-overlap and must
     // never pull a flex child absolute. positionsKids is true only for a non-auto-layout
@@ -1045,7 +1034,7 @@ function renderVariant(v: any): VariantRender {
     const binds = bindingsOf.get(n.guid);
     // The ROOT node (depth 0) merges the incoming `style` override prop on top of its
     // own style, so a parent referencing this component can re-apply per-instance root
-    // overrides (issue #23). Non-root nodes keep their plain style object.
+    // overrides. Non-root nodes keep their plain style object.
     const isRoot = depth === 0;
     if (isRoot) usesStyleProp = true;
     const styleAttr = isRoot
@@ -1099,7 +1088,7 @@ function renderVariant(v: any): VariantRender {
     // vector art / an icon instance (subtree is purely vectors) → ONE sized
     // placeholder + an export-svg TODO, NOT a tree of meaningless empty/recolored
     // boxes (codegen can't draw vector paths; export-svg.mts does). The placeholder
-    // box flex-centers (improvement 4) so the inlined <svg>/<Image> ends up centered.
+    // box flex-centers so the inlined <svg>/<Image> ends up centered.
     // Extract the WHOLE subtree as ONE composed icon (the export-svg approach) when it is a
     // composite GLYPH (raw vectors only — e.g. a stroke arrow = shaft + head, or a multi-letter
     // logo) OR a vector-only icon INSTANCE. NOT one sub-icon per child: the previous per-vector
@@ -1111,7 +1100,7 @@ function renderVariant(v: any): VariantRender {
     // container / leaf box. Recurse into children.
     styles.push({ key: sk, body: prefixBody(nodeStyleBody(n, push)) });
     const kids = kidsAll;
-    // interactive-archetype MARKER (improvement 10): a TODO in the variant block.
+    // interactive-archetype MARKER: a TODO in the variant block.
     const arch = interactiveArchetype(n);
     if (arch) push(`interactive: ${arch}`);
     let inner = emitChildren(n, kids, depth);
@@ -1174,7 +1163,7 @@ function renderVariant(v: any): VariantRender {
     const { n, depth, binds, pad, sk, styleAttr, prefixBody } = ctx;
     const slotLg = binds!.slot!; // emit() only dispatches here when binds.slot is present
     usedProps.add(slotLg.name);
-    // #4 (round 2): an instance-swap slot is an icon/content placeholder — center the
+    // An instance-swap slot is an icon/content placeholder — center the
     // injected {prop} like a single-icon wrapper, else an inlined <svg>/{icon} aligns
     // to the text baseline (the "Hepsi ›" caret floats). Skip when the slot defines its
     // OWN auto-layout (that flow already positions the content).
@@ -1185,7 +1174,7 @@ function renderVariant(v: any): VariantRender {
           .filter(Boolean)
           .join("\n");
     styles.push({ key: sk, body: prefixBody(body) });
-    // NEVER leave a slot with no default AND no marker (finding #2): the master swaps a
+    // NEVER leave a slot with no default AND no marker: the master swaps a
     // default symbol in here, so always flag it (best-effort named via the screens
     // artifacts) — otherwise the zero-prop render is silently empty with nothing to catch.
     const defSym = slotLg.role === "slot" ? slotLg.defSym : null;
@@ -1323,7 +1312,7 @@ function propsTypeBody(): string {
     lines.push(`  /** Figma: ${fig} */`);
     lines.push(`  ${l.name}?: ${l.tsType};`);
   }
-  // Per-instance ROOT style override, merged onto the component's root node (issue #23).
+  // Per-instance ROOT style override, merged onto the component's root node.
   // A parent referencing this component as a nested instance passes its overridden root
   // box styles here; also usable when assembling screens to nudge an instance.
   lines.push(`  /** Root style override (applied to this component's root element). */`);
@@ -1349,7 +1338,7 @@ ${propsTypeBody()}
 // `withStyle` appends the root `style` override prop when the variant's root merges it.
 function destructure(used: Set<string>, withStyle: boolean): string {
   // bool visibility props default to their IR value so a master-visible node renders at zero
-  // props (finding #3): `{ showHeader = true }`. text/slot props stay plain (text carries its
+  // props: `{ showHeader = true }`. text/slot props stay plain (text carries its
   // master-default fallback at the use site; a slot has no sensible literal default).
   const names = logicals
     .filter((l) => used.has(l.name))
@@ -1363,7 +1352,7 @@ function variantFile(r: VariantRender): string {
     ? `const styles: Record<string, React.CSSProperties> = {\n${r.styles.map((s) => `  ${s.key}: {\n${ind(s.body, 4)}\n  },`).join("\n")}\n};`
     : `const styles = StyleSheet.create({\n${r.styles.map((s) => `  ${s.key}: {\n${ind(s.body, 4)}\n  },`).join("\n")}\n});`;
   // RN files that reference the theme (theme[defaultMode]…) need the import; web uses
-  // inline CSS var() strings and needs none. issue #17.
+  // inline CSS var() strings and needs none.
   const usesTheme = !web && (stylesDecl.includes(THEME_MARK) || r.jsx.includes(THEME_MARK));
   // nested child components referenced by this variant → sibling-folder imports
   // (all component folders share the same --out base, so '../<slug>'). Deterministic

@@ -78,7 +78,7 @@ eq("camel empty → prop", camel("—"), "prop");
 eq("compIdent → PascalCase", compIdent("product-card collections"), "ProductCardCollections");
 eq("compIdent empty → Component", compIdent(""), "Component");
 
-// ── reconcile-lib: placeholder classifier (P0-3 string half) ────────────────
+// ── reconcile-lib: placeholder classifier (string half) ────────────────
 eq(
   "classify Title (no override) → placeholder",
   classifyPlaceholderText("Title", false).placeholder,
@@ -92,7 +92,7 @@ eq(
   true,
 );
 
-// ── reconcile-lib: letterSpacing / lineHeight units (P0-2) ──────────────────
+// ── reconcile-lib: letterSpacing / lineHeight units ──────────────────
 approx(
   "letterSpacingToPx 4% @16 → 0.64",
   letterSpacingToPx({ value: 4, units: "PERCENT" }, 16),
@@ -104,7 +104,7 @@ eq("letterSpacingStr missing → 0", letterSpacingStr(undefined, 16), "0");
 eq("lineHeightPx 36px", lineHeightPx({ value: 36, units: "PIXELS" }, 28), 36);
 eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
 
-// ── reconcile-lib: box-vs-font reconciliation (P0-1) ────────────────────────
+// ── reconcile-lib: box-vs-font reconciliation ────────────────────────
 {
   // SingleLine title shape (mirrors fixture 1273:19842): 28/lh36 in a 20-tall box.
   const r = reconcileTextSize({
@@ -297,7 +297,7 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   );
 }
 
-// ── screens-lib: cornerRadiusOf (CODEGEN_BUGS_v2 B — independent per-corner) ──
+// ── screens-lib: cornerRadiusOf (independent per-corner) ──
 {
   // Independent corners, only the left pair set (slider fill 1153:1957): TR/BR absent
   // (= 0) must NOT drop the radius — it's a left-rounded pill end.
@@ -417,7 +417,7 @@ function makeIndex(nodes: any[]): ReturnType<typeof load> {
   eq("override: hasTextOverride flagged", r.children[0]?.hasTextOverride, true);
 }
 
-// ── theme-lib: name munging, literals, topo order, emit (issue #16/#17) ──────
+// ── theme-lib: name munging, literals, topo order, emit ──────
 {
   // name munging — the ONE rule codegen and theme-gen both consume.
   eq("cssVarName praline", cssVarName("Color/praline/950"), "--color-praline-950");
@@ -545,7 +545,7 @@ const tv = (
   );
 }
 
-// ── components-lib: deriveLogicals prop model (findings #2/#3 — synthetic) ──
+// ── components-lib: deriveLogicals prop model (synthetic) ──
 // Pure transform over synthetic ComponentProp[]; no decode / IR-artifact dependency.
 const bind = (node: string, field: string) => [{ node, field }];
 {

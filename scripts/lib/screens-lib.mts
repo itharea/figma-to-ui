@@ -1,4 +1,4 @@
-// IR screen pass (Phase 7 / IR-PLAN Phase 2) — reconcile once, with provenance.
+// IR screen pass — reconcile once, with provenance.
 // Walks the RESOLVED tree (resolve-lib) and bakes the truth into clean fields PLUS
 // provenance: {value, source, conflicts[]} on every reconciled field and a `guid`
 // on every node. NO top-level side effects — build-ir.mts imports buildScreen().
@@ -32,7 +32,7 @@ export type IRTextField = {
   source: "override" | "master-default";
   placeholder: boolean;
   reason: string;
-  // text transform & alignment (improvement 2-text) — PURE pass-throughs of the
+  // text transform & alignment — PURE pass-throughs of the
   // resolved bytes, emitted ONLY when present/non-default so per-screen files stay
   // lean. resolve-lib FIELD_KEYS already carries textCase/textAlignHorizontal/
   // textAlignVertical through instance overrides, so they are correct on the
@@ -155,7 +155,7 @@ export type IRBox = {
   absY: number;
 };
 
-// --- full box styling + auto-layout (improvement B-style-layout / spec #2) ----
+// --- full box styling + auto-layout ----
 // Carries the COMPLETE box-styling and auto-layout picture so the IR alone
 // suffices for a 1:1 implementation (parity with the raw dump / SKILL §4). Blocks
 // are OMITTED when a node has none, so files stay lean. Bound fill/stroke colors
@@ -175,7 +175,7 @@ export type IRStroke = {
   hex: string | null;
   var?: string | null;
   varGuid?: string | null;
-  // optional stroke detail (improvement 3-borders) — PURE pass-throughs, emitted
+  // optional stroke detail — PURE pass-throughs, emitted
   // only when present/non-default. fig→CSS map (see strokeDetailOf):
   //   strokeCap (BUTT/ROUND/SQUARE/…) → lower-cased; SVG/RN line-cap hint. Confirmed
   //     enum in this decode: ROUND.
@@ -187,7 +187,7 @@ export type IRStroke = {
   join?: string;
   dash?: number[];
 };
-// Per-side border widths (improvement 3-borders): emitted ONLY when the raw node
+// Per-side border widths: emitted ONLY when the raw node
 // sets borderStrokeWeightsIndependent — then the four borderTop/Right/Bottom/Left
 // Weight fields apply INSTEAD of the single strokeWeight, so bottom-only dividers
 // etc. survive. Missing sides default to 0 (a side with no weight = no border on
@@ -206,7 +206,7 @@ export type IRStyle = {
   fills?: IRFill[];
   cornerRadius?: number | { tl: number; tr: number; br: number; bl: number };
   strokes?: IRStroke[];
-  borderWidths?: IRBorderWidths; // per-side widths (improvement 3-borders); see type doc
+  borderWidths?: IRBorderWidths; // per-side widths; see type doc
   effects?: IREffect[];
   opacity?: number;
 };
@@ -231,7 +231,7 @@ export type IRLayout = {
   wrap?: boolean; // stackWrap = WRAP → flex-wrap:wrap
 };
 
-// Per-node responsive picture (improvement 1-sizing / spec sizing): these apply to
+// Per-node responsive picture: these apply to
 // the node AS A FLEX CHILD / sized box (NOT the container — that's IRLayout). Each
 // is a PURE pass-through of the bytes, emitted only when present/non-default so
 // per-screen files stay lean. fig→CSS/RN map:
@@ -259,7 +259,7 @@ export type IRNode = {
   box: IRBox;
   style?: IRStyle;
   layout?: IRLayout;
-  // --- per-node sizing/constraints (improvement 1-sizing) — see IRConstraints doc.
+  // --- per-node sizing/constraints — see IRConstraints doc.
   grow?: number; // stackChildPrimaryGrow → flex-grow
   alignSelf?: string; // stackChildAlignSelf → CSS align-self
   positioning?: "absolute"; // stackPositioning ABSOLUTE inside an auto-layout parent
@@ -331,7 +331,7 @@ function buildColor(node: any, varIndex: VarIndex): IRColor {
   };
 }
 
-// --- style + layout extraction (improvement B-style-layout / spec #2) --------
+// --- style + layout extraction --------
 // All PURE functions of the raw node fields (confirmed against the decode with
 // node.mts), mirroring describe-lib/render's SOLID/GRADIENT/IMAGE/effect handling
 // so the IR and the raw dump agree. Numbers are emitted bare/rounded; hex is the
@@ -378,7 +378,7 @@ export function cornerRadiusOf(n: any): IRStyle["cornerRadius"] {
   const tr = n.rectangleTopRightCornerRadius;
   const br = n.rectangleBottomRightCornerRadius;
   const bl = n.rectangleBottomLeftCornerRadius;
-  // Independent per-corner radii (CODEGEN_BUGS_v2 B): Figma flags this with
+  // Independent per-corner radii: Figma flags this with
   // rectangleCornerRadiiIndependent, and the corners that are 0 are simply ABSENT (e.g.
   // a pill end rounded on the left only). Honor the flag even when not all four fields
   // are present — default the missing corners to 0 — so a single-side rounding survives.
@@ -395,7 +395,7 @@ export function cornerRadiusOf(n: any): IRStyle["cornerRadius"] {
   return undefined;
 }
 
-// Per-side border widths (improvement 3-borders). Returns {top,right,bottom,left}
+// Per-side border widths. Returns {top,right,bottom,left}
 // ONLY when the raw node sets borderStrokeWeightsIndependent === true — then the
 // four borderTop/Right/Bottom/LeftWeight fields apply INSTEAD of the single
 // strokeWeight (a side with no weight defaults to 0 = no border that edge). When
@@ -413,7 +413,7 @@ function borderWidthsOf(n: any): IRBorderWidths | undefined {
   };
 }
 
-// Optional stroke detail (improvement 3-borders): cap/join/dash, each emitted only
+// Optional stroke detail: cap/join/dash, each emitted only
 // when present/non-default. strokeCap & strokeJoin lower-cased; MITER (the join
 // default) is omitted; dashPattern passed through verbatim (non-empty → dashed).
 // These live per-stroke (the raw fields are node-level, shared by every paint).
@@ -466,7 +466,7 @@ function buildStyle(n: any, varIndex: VarIndex): IRStyle | null {
         ...detail,
       };
     });
-    // per-side widths (improvement 3-borders): when independent, the four side
+    // per-side widths: when independent, the four side
     // weights apply INSTEAD of the single weight. Emit a borderWidths block so a
     // bottom-only divider survives. NOT independent → keep the single weight only.
     const bw = borderWidthsOf(n);
@@ -522,7 +522,7 @@ function buildLayout(n: any): IRLayout | null {
     l.justify = STACK_ALIGN[n.stackPrimaryAlignItems] ?? n.stackPrimaryAlignItems;
   if (n.stackCounterAlignItems)
     l.align = STACK_ALIGN[n.stackCounterAlignItems] ?? n.stackCounterAlignItems;
-  // sizing & wrap (improvement 1-sizing): fixed vs hug self-sizing per axis, wrap.
+  // sizing & wrap: fixed vs hug self-sizing per axis, wrap.
   const ps = sizingOf(n.stackPrimarySizing);
   if (ps) l.primarySizing = ps;
   const cs = sizingOf(n.stackCounterSizing);
@@ -546,7 +546,7 @@ function constraintOf(v: any): string | undefined {
   return typeof v === "string" && v ? v.toLowerCase() : undefined;
 }
 
-// Per-node sizing/constraints (improvement 1-sizing). Mutates `node` in place,
+// Per-node sizing/constraints. Mutates `node` in place,
 // attaching only the fields the raw node actually carries (lean files). All are
 // pure pass-throughs of the bytes — they ALWAYS run (no heuristic). See
 // IRConstraints doc for the fig→CSS/RN mapping.
@@ -753,7 +753,7 @@ function reconcileText(
     placeholder: cls.placeholder,
     reason: cls.reason,
   };
-  // text transform & alignment (improvement 2-text): pass-throughs of the resolved
+  // text transform & alignment: pass-throughs of the resolved
   // bytes, attached only when non-default/present (lean files). textCase is part of the
   // node's text-style snapshot, so a STALE cache → take the applied style's case (the
   // SingleLine header is UPPER per its Eyebrow style, not the cached TITLE); a fresh
@@ -847,7 +847,7 @@ function toIR(
   const layout = buildLayout(n as any);
   if (layout) node.layout = layout;
 
-  // per-node sizing/constraints (improvement 1-sizing): grow/alignSelf/positioning/
+  // per-node sizing/constraints: grow/alignSelf/positioning/
   // constraints/min/max/aspectRatio — pure pass-throughs, attached when present.
   applySizing(node, n as any);
 

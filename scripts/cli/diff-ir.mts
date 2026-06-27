@@ -1,5 +1,4 @@
-// diff-ir.mts — design-version diff over two emitted IR trees (Phase 9 / IR-PLAN
-// Phase 4, generalizing P2-4 diff-frames). Consumes the IR ONLY — never re-decodes
+// diff-ir.mts — design-version diff over two emitted IR trees. Consumes the IR ONLY — never re-decodes
 // a blob, never re-resolves instances. Because each IR is already reconciled +
 // provenance-stamped, the diff compares TRUTH vs TRUTH (not raw contradiction vs
 // raw contradiction). It SURFACES drift; it never picks a canonical export.

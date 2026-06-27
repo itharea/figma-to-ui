@@ -155,7 +155,7 @@ export function proposePropApi(matrix: ReturnType<typeof parseVariantMatrix>): s
   return axisNames.map((axis) => `${kebab(axis)}: ${union(matrix.axes[axis])}`).join("; ");
 }
 
-// --- non-variant component property API (improvement A-props) ----------------
+// --- non-variant component property API ----------------
 // The variant matrix above models the SYMBOL-name axes ("Version=Default"). A
 // component set ALSO carries non-variant props on its frame `componentPropDefs`:
 // text / boolean / instance-swap props that bind to specific child node fields.
@@ -293,7 +293,7 @@ export function sameNodeGroups(props: ComponentProp[]): { node: string; props: s
   return groups;
 }
 
-// Per-variant binding resolution (improvement B-codegen). extractComponentProps
+// Per-variant binding resolution. extractComponentProps
 // resolves bindings against ONE representative master, so its binding node guids
 // only address the DEFAULT variant's subtree. To render EACH variant's OWN subtree
 // (codegen multi-file), every variant master must resolve the SAME set props onto
@@ -436,7 +436,7 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
     // default is NOT true — i.e. the node is HIDDEN by default, so "pass a string to
     // show it, omit to hide" matches the master. When the bool defaults to `true` the
     // node is VISIBLE by default with default text, so collapsing-and-gating-on-`!= null`
-    // would wrongly hide it at zero props (finding #3). Keep them as TWO props instead:
+    // would wrongly hide it at zero props. Keep them as TWO props instead:
     // a `show<Bool>` defaulted to its IR value + a text prop with a master-default
     // fallback, so the zero-prop render reproduces the Figma master 1:1.
     if (textP && boolP && boolP.default !== true) {
@@ -478,7 +478,7 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
         ? p.name
         : "show" + p.name.charAt(0).toUpperCase() + p.name.slice(1);
       // carry the IR visibility default so codegen can default the prop in the destructure
-      // (`show<X> = true`) → a master-visible node renders at zero props (finding #3).
+      // (`show<X> = true`) → a master-visible node renders at zero props.
       const lg: Logical = {
         name: uniqueName(showName),
         tsType: "boolean",
@@ -491,7 +491,7 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
       logicalByDefKey.set(p.defKey, lg);
     } else {
       // carry the instance-swap default SYMBOL guid so the slot is never emitted with no
-      // default AND no TODO (finding #2) — the render flags it (best-effort named).
+      // default AND no TODO — the render flags it (best-effort named).
       const lg: Logical = {
         name: uniqueName(p.name),
         tsType: "React.ReactNode",

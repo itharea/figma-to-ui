@@ -1,4 +1,4 @@
-// build-ir.mts — the deterministic IR compiler (IR-PLAN Phases 0–1 / spec phase-06).
+// build-ir.mts — the deterministic IR compiler.
 // Stands up a scoped, provenance-stamped IR: manifest + raw-map + fonts + tokens/*
 // + components/*. NO screen resolution yet (Phase 7). Everything emitted here is a
 // PURE FUNCTION OF THE BYTES — no heuristic picks, no decisions overlay. The only
@@ -137,7 +137,7 @@ const { colors, spacing, radius } = splitTokens(resolvedVars);
 // the lossless source theme-gen reads. splitTokens' colors/spacing/radius are a subset.
 const variables = toIRTokens(resolvedVars);
 
-// Variable-binding index (improvement A-variables / spec #3): variable guidKey →
+// Variable-binding index: variable guidKey →
 // { name, value, mode }, built ONCE from the resolved COLOR variables. `value` is the
 // variable's RESOLVED concrete hex at the variable's collection DEFAULT mode (the set's
 // first variableSetModes entry, by Figma's own ordering) — NOT a blind first-of-object
@@ -235,11 +235,11 @@ const taken = new Set<string>();
 for (const set of sets) {
   const slug = uniqueSlug(set.name, taken);
   const matrix = parseVariantMatrix(set);
-  // Non-variant prop API (improvement A-props): text/boolean/instanceSwap defs on
+  // Non-variant prop API: text/boolean/instanceSwap defs on
   // the set frame, with their bindings into a representative master subtree, plus
   // same-node groupings so Phase-B codegen can collapse bool-visible+text pairs.
   const props = extractComponentProps(index, set.guid);
-  // Per-variant bindings (improvement B-codegen): the multi-file codegen renders
+  // Per-variant bindings: the multi-file codegen renders
   // EACH variant's own subtree, so each variant master must resolve the set props
   // onto ITS OWN node guids (props[].bindings only address the default master).
   // Keyed by variant guidKey; joined to props[] by defKey.
@@ -265,7 +265,7 @@ for (const set of sets) {
       rawName: v.rawName,
       guidKey: v.guid,
       size: v.size ?? null,
-      // bindings resolved against THIS variant's own subtree (improvement B-codegen);
+      // bindings resolved against THIS variant's own subtree;
       // [] when the variant exposes none of the set props. Joined to props[] by defKey.
       bindings: variantBindings[v.guid] ?? [],
       subtree: null as null, // TODO(phase-7): resolved variant subtree

@@ -1,4 +1,4 @@
-// IR token mapping + intent/issues aggregation (Phase 8 / IR-PLAN Phase 3). NO
+// IR token mapping + intent/issues aggregation. NO
 // top-level side effects — build-ir.mts imports these at build time. MAPPING by
 // value is exact and always runs (matchTokenByValue is pure); the labeled
 // `nearest(Δ)`/`placeholder` flags are informational (surfaced as scaffold // TODO
