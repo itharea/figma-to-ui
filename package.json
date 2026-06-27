@@ -23,12 +23,20 @@
     "raw": "node scripts/raw.mts",
     "export-svg": "node scripts/export-svg.mts",
     "selftest": "node scripts/selftest.mts",
-    "test": "node scripts/selftest.mts"
+    "test": "node scripts/selftest.mts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "engines": {
     "node": ">=22.18"
   },
   "dependencies": {
     "kiwi-schema": "^0.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "prettier": "^3.9.0",
+    "typescript": "^6.0.3"
   }
 }

@@ -1,0 +1,19 @@
+node_modules/
+
+# Generated Design IR output + decode artifacts (gitignored too)
+ir-*/
+ir-message_new/
+message.json
+*.message.json
+ex/
+
+# Source design binaries / exported assets
+*.fig
+out.svg
+out.png
+out.html
+
+# Lockfiles
+bun.lock
+bun.lockb
+package-lock.json
