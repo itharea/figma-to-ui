@@ -40,8 +40,8 @@ import {
   type IntentItem,
 } from "./mapping-lib.mts";
 import { unionModes, primaryMode } from "./theme-lib.mts";
+import { uniqueSlug } from "./naming.mts";
 import {
-  uniqueSlug,
   splitTokens,
   toIRTokens,
   assembleTypography,

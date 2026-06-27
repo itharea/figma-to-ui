@@ -34,6 +34,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import { extractGeometry, toSvgString, emitIconComponent } from "./svg-lib.mts";
 import { deriveLogicals } from "./components-lib.mts";
+import { slugify, uniqueSlug, kebab, camel, compIdent } from "./naming.mts";
 
 let pass = 0;
 let fail = 0;
@@ -54,6 +55,28 @@ function eq(name: string, got: unknown, want: unknown) {
 function approx(name: string, got: number, want: number, tol = 0.001) {
   check(name, Math.abs(got - want) <= tol, `got ${got} want ${want}`);
 }
+
+// ── naming: slug / kebab / camel / PascalCase identifiers (shared munging) ───
+eq(
+  "slugify lowercases + collapses",
+  slugify("Product Card / Collections!"),
+  "product-card-collections",
+);
+eq("slugify trims edge runs", slugify("--Hello--"), "hello");
+{
+  const taken = new Set<string>();
+  eq("uniqueSlug first → base", uniqueSlug("Splash", taken), "splash");
+  eq("uniqueSlug collision → -2", uniqueSlug("Splash", taken), "splash-2");
+  eq("uniqueSlug empty → set", uniqueSlug("—", taken), "set");
+}
+eq("kebab splits camel + cleans", kebab("SingleLine"), "single-line");
+eq("kebab snake/space → -", kebab("dropdown_no value"), "dropdown-no-value");
+eq("camel transliterates Turkish", camel("Başlık"), "baslik");
+eq("camel keeps existing camel", camel("actionText"), "actionText");
+eq("camel single word lowercased", camel("Icon"), "icon");
+eq("camel empty → prop", camel("—"), "prop");
+eq("compIdent → PascalCase", compIdent("product-card collections"), "ProductCardCollections");
+eq("compIdent empty → Component", compIdent(""), "Component");
 
 // ── reconcile-lib: placeholder classifier (P0-3 string half) ────────────────
 eq(

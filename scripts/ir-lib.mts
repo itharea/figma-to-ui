@@ -7,24 +7,6 @@ import { load, key, colorStr } from "./lib.mts";
 import { letterSpacingToPx, lineHeightPx } from "./reconcile-lib.mts";
 import type { Token } from "./tokens-lib.mts";
 
-// --- slug (component <set-name> file naming, IR-PLAN layout) ---------------
-// lower-case, keep [a-z0-9], collapse any other run → "-", trim "-".
-// On collision the caller appends "-2","-3",… (use uniqueSlug).
-export function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-export function uniqueSlug(name: string, taken: Set<string>): string {
-  let base = slugify(name) || "set";
-  let slug = base;
-  let i = 2;
-  while (taken.has(slug)) slug = `${base}-${i++}`;
-  taken.add(slug);
-  return slug;
-}
-
 // --- token kind-split (pass 2a) --------------------------------------------
 // COLOR → colors; FLOAT split by semantics (radius-named → radius, else spacing).
 // Typography/line-height FLOATs are grouped into typography (pass 2b), not here,

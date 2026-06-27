@@ -14,7 +14,8 @@
 // praline/950` → `color.praline['950']`). ALIASES are emitted as CODE REFERENCES to the
 // DIRECT target (CSS `var(--numbers-18)`, RN the target's const), never collapsed to a
 // value — so the alias graph survives into the consuming code.
-import { slugify, type IRToken } from "./ir-lib.mts";
+import { type IRToken } from "./ir-lib.mts";
+import { slugify } from "./naming.mts";
 
 export type ThemeVar = IRToken; // the variables.json element shape
 export type Framework = "web" | "rn";

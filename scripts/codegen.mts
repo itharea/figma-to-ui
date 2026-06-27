@@ -43,6 +43,7 @@ import { cssVarName, tsAccessor } from "./theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap } from "./layout-lib.mts";
 import { load, colorStr } from "./lib.mts";
 import { extractGeometry, emitIconComponent } from "./svg-lib.mts";
+import { slugify, compIdent, kebab } from "./naming.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];
@@ -86,18 +87,6 @@ const readJSON = (rel: string): any => {
 };
 
 // --- locate the component file: components/<slug>.json, slug-tolerant ---------
-const slugify = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-// Component identifier (PascalCase) from a Figma name — the meta component name AND
-// the JSX/import name used for nested-component references (parity across both).
-const compIdent = (name: string) =>
-  (name ?? "")
-    .replace(/[^A-Za-z0-9]+/g, " ")
-    .replace(/(?:^|\s)(\w)/g, (_: string, ch: string) => ch.toUpperCase())
-    .replace(/\s/g, "") || "Component";
 const compDir = path.join(dir, "components");
 if (!fs.existsSync(compDir))
   throw new Error(`${dir}: no components/ — not an IR (or no component sets)`);
@@ -284,14 +273,7 @@ const propKeyExpr =
     ? `'${defaultKey}'`
     : axisNames.length === 1
       ? "variant"
-      : axisNames.map((a) => kebabProp(a)).join(" + '/' + ");
-function kebabProp(s: string): string {
-  return s
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-    .replace(/[\s_]+/g, "-")
-    .replace(/[^\w-]/g, "")
-    .toLowerCase();
-}
+      : axisNames.map((a) => kebab(a)).join(" + '/' + ");
 
 // Name of the per-instance ROOT style-override prop for a component (issue #23). Defaults
 // to the idiomatic `style`, but a Figma variant axis can literally be named "Style" (→ a
@@ -302,7 +284,7 @@ function styleOverridePropName(c: any): string {
   const taken = new Set<string>();
   const axNames = Object.keys(c.axes ?? {});
   if (axNames.length === 1) taken.add("variant");
-  else for (const a of axNames) taken.add(kebabProp(a));
+  else for (const a of axNames) taken.add(kebab(a));
   for (const l of deriveLogicals(c).logicals) taken.add(l.name);
   for (const cand of ["style", "rootStyle", "styleOverride", "rootStyleOverride"])
     if (!taken.has(cand)) return cand;
@@ -810,7 +792,7 @@ function componentReference(
   if (entry.variant && axNames.length === 1) {
     attrs += ` variant="${mapValue(String(vprops[axNames[0]] ?? ""))}"`;
   } else if (entry.variant && axNames.length > 1) {
-    for (const a of axNames) attrs += ` ${kebabProp(a)}="${mapValue(String(vprops[a] ?? ""))}"`;
+    for (const a of axNames) attrs += ` ${kebab(a)}="${mapValue(String(vprops[a] ?? ""))}"`;
   }
 
   // guid → resolved IR node for the instance subtree. Invisible nodes were dropped in
@@ -1409,7 +1391,7 @@ function indexFile(): string {
       ? ""
       : axisNames.length === 1
         ? "variant"
-        : axisNames.map(kebabProp).join(", ");
+        : axisNames.map(kebab).join(", ");
   const reviewBlock = allTodos.length
     ? "\n// === REVIEW (all open TODOs, attributed to the variant) ===\n" +
       allTodos.map((t) => `// TODO: ${t}`).join("\n") +

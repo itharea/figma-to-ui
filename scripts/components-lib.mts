@@ -6,6 +6,7 @@
 // the #9747ff dashed-stroke editor hint, which is only a labeled fallback (the
 // purple stroke is a render hint, not a format guarantee — determinism contract).
 import { load, key, colorStr } from "./lib.mts";
+import { kebab, camel } from "./naming.mts";
 
 export type ComponentSet = {
   guid: string;
@@ -138,14 +139,6 @@ const VALUE_SYNONYMS: Record<string, string> = {
   ModalHeader: "modal",
 };
 
-function kebab(s: string): string {
-  return s
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-    .replace(/[\s_]+/g, "-")
-    .replace(/[^\w-]/g, "")
-    .toLowerCase();
-}
-
 // Map one axis VALUE to its prop-union literal (synonym, else kebab-case). Exported
 // so codegen can compute the SAME per-variant prop value the union type uses.
 export const mapValue = (v: string) => VALUE_SYNONYMS[v] ?? kebab(v);
@@ -202,43 +195,6 @@ const NODE_FIELD: Record<string, ComponentProp["bindings"][number]["field"] | un
   VISIBLE: "visible",
   OVERRIDDEN_SYMBOL_ID: "symbolId",
 };
-
-// camelCase from an arbitrary prop name (transliterates Latin letters with
-// diacritics + Turkish specials to ASCII, then splits on non-word / case
-// boundaries). "Başlık" → "baslik"; "actionText" → "actionText"; "Icon" → "icon".
-const TR_MAP: Record<string, string> = {
-  ı: "i",
-  İ: "i",
-  ş: "s",
-  Ş: "s",
-  ç: "c",
-  Ç: "c",
-  ğ: "g",
-  Ğ: "g",
-  ü: "u",
-  Ü: "u",
-  ö: "o",
-  Ö: "o",
-};
-function camel(s: string): string {
-  const ascii = [...s]
-    .map((ch) => TR_MAP[ch] ?? ch)
-    .join("")
-    .normalize("NFKD")
-    .replace(/\p{M}+/gu, "");
-  const words = ascii
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .split(/[^A-Za-z0-9]+/)
-    .filter(Boolean);
-  if (!words.length) return "prop";
-  return words
-    .map((w, i) =>
-      i === 0
-        ? w.charAt(0).toLowerCase() + w.slice(1)
-        : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(),
-    )
-    .join("");
-}
 
 // Pull the set-def default out of its varValue/value (else initialValue), per kind.
 // Returns null when the value is absent/unexpected so codegen can leave a TODO.
