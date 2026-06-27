@@ -9,10 +9,11 @@ code, 1:1.
 
 The harness compiles the `.fig` into a **Design IR** once, then drives a fixed sequence:
 build IR → generate a theme from the file's variables (pick the mode) → scaffold each
-component set with its icons and image fills wired in → elevate each scaffold into a clean
-component (one subagent per component) → assemble the screens (one subagent per screen) by
-locating the designer's component instances under the screen nodes. `SKILL.md` is that
-harness; `REFERENCE.md` is the `.fig` format and node-field encyclopedia it points to.
+component set with its icons and image fills wired in → elevate the scaffolds into clean
+components → assemble the screens by locating the designer's component instances under the
+screen nodes. Elevate and assemble are grouped into subagent batches — one subagent per
+group — so a large design system stays affordable. `SKILL.md` is that harness; `REFERENCE.md`
+is the `.fig` format and node-field encyclopedia it points to.
 
 It's model-, company-, and toolchain-agnostic. The scripts are plain Node-compatible
 TypeScript (run them with Node, Bun, or tsx; install with npm, pnpm, yarn, or bun), and
