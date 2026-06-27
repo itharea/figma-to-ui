@@ -12,7 +12,13 @@
 //   - --out <dir>    → write the file(s) into <dir>; without --out → print to stdout
 import * as fs from "fs";
 import * as path from "path";
-import { emitTheme, unionModes, primaryMode, type Framework, type ThemeVar } from "./theme-lib.mts";
+import {
+  emitTheme,
+  unionModes,
+  primaryMode,
+  type Framework,
+  type ThemeVar,
+} from "../lib/theme-lib.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];

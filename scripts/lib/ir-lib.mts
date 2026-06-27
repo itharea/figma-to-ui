@@ -3,7 +3,7 @@
 // of the decoded bytes: slug derivation, token kind-split, composite typography/
 // effect assembly, and font collection. Faithful defaults handle the rest (the Figma
 // family for fonts, the literal hex for unmatched colours); no decisions overlay.
-import { load, key, colorStr } from "./lib.mts";
+import { load, key, colorStr } from "./figma-index.mts";
 import { letterSpacingToPx, lineHeightPx } from "./reconcile-lib.mts";
 import type { Token } from "./tokens-lib.mts";
 

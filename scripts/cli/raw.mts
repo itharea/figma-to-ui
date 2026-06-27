@@ -16,13 +16,22 @@
 //   intent      <message.json> <screen-guidKey>
 //   match-tokens <message.json> <theme.(ts|json)> [guidKey]
 //   diff-frames <message.json> <guidA> <guidB>
-import { load, key, colorStr, absCoords } from "./lib.mts";
-import { describeNode } from "./describe-lib.mts";
-import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
-import { letterSpacingStr, reconcileTextSize, classifyPlaceholderText } from "./reconcile-lib.mts";
-import { findComponentSets, parseVariantMatrix, proposePropApi } from "./components-lib.mts";
-import { isDenylistedText, repeatedStrings, isMonoColorIconFill } from "./intent-lib.mts";
-import { resolveVariables, loadTheme, matchTokenByValue, type ThemeKind } from "./tokens-lib.mts";
+import { load, key, colorStr, absCoords } from "../lib/figma-index.mts";
+import { describeNode } from "../lib/describe-lib.mts";
+import { resolveScreen, type ResolvedNode } from "../lib/resolve-lib.mts";
+import {
+  letterSpacingStr,
+  reconcileTextSize,
+  classifyPlaceholderText,
+} from "../lib/reconcile-lib.mts";
+import { findComponentSets, parseVariantMatrix, proposePropApi } from "../lib/components-lib.mts";
+import { isDenylistedText, repeatedStrings, isMonoColorIconFill } from "../lib/intent-lib.mts";
+import {
+  resolveVariables,
+  loadTheme,
+  matchTokenByValue,
+  type ThemeKind,
+} from "../lib/tokens-lib.mts";
 
 // Each cmd takes a process.argv-shaped array where argv[2] is its first real arg
 // (so the ported bodies keep their original argv[2]/argv[3]/slice(4) indexing).

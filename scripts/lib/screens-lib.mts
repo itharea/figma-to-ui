@@ -14,7 +14,7 @@
 // (`color.{token,match}`, `font.{sizeToken,sizeMatch}`) stay null here; Phase 8's
 // --theme fills them.
 import * as crypto from "crypto";
-import { colorStr, key, mul, nodeMat, type Mat } from "./lib.mts";
+import { colorStr, key, mul, nodeMat, type Mat } from "./figma-index.mts";
 import {
   reconcileTextSize,
   deriveFontFromRender,

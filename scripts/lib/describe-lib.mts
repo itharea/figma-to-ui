@@ -2,7 +2,7 @@
 // resolve.mts share it. NO top-level side effects (CLI entry stays in the
 // scripts that import this). The `abs` callback is injected because absCoords
 // is raw-tree-only and meaningless for resolved-instance children (see lib.mts).
-import { key, colorStr } from "./lib.mts";
+import { key, colorStr } from "./figma-index.mts";
 import { letterSpacingStr, reconcileTextSize, classifyPlaceholderText } from "./reconcile-lib.mts";
 
 export function paintStr(p: any): string {

@@ -36,14 +36,14 @@
 //   <out>/<slug>/ is written and a written-files summary is printed to stderr.
 import * as fs from "fs";
 import * as path from "path";
-import type { IRNode } from "./screens-lib.mts";
-import { mapValue, deriveLogicals, type Logical } from "./components-lib.mts";
-import { disambiguateJustify } from "./reconcile-lib.mts";
-import { cssVarName, tsAccessor } from "./theme-lib.mts";
-import { overlap, hasSignificantNonAdjacentOverlap } from "./layout-lib.mts";
-import { load, colorStr } from "./lib.mts";
-import { extractGeometry, emitIconComponent } from "./svg-lib.mts";
-import { slugify, compIdent, kebab } from "./naming.mts";
+import type { IRNode } from "../lib/screens-lib.mts";
+import { mapValue, deriveLogicals, type Logical } from "../lib/components-lib.mts";
+import { disambiguateJustify } from "../lib/reconcile-lib.mts";
+import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
+import { overlap, hasSignificantNonAdjacentOverlap } from "../lib/layout-lib.mts";
+import { load, colorStr } from "../lib/figma-index.mts";
+import { extractGeometry, emitIconComponent } from "../lib/svg-lib.mts";
+import { slugify, compIdent, kebab } from "../lib/naming.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];

@@ -10,7 +10,7 @@
 // consuming component recolors via a `color` prop / `currentColor` (mono icons),
 // which carries the IR's override-aware colour. Geometry is identical regardless.
 import { createHash } from "crypto";
-import { colorStr, type Mat, I, mul, nodeMat, key } from "./lib.mts";
+import { colorStr, type Mat, I, mul, nodeMat, key } from "./figma-index.mts";
 
 export type SvgPath = {
   d: string; // decoded path data

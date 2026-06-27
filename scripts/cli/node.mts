@@ -5,7 +5,7 @@
 // Usage: node node.mts <message.json> <guidKey> [field …]
 //   node node.mts msg.json 1273:19842
 //   node node.mts msg.json 1273:19842 fontSize lineHeight textAutoResize size
-import { load } from "./lib.mts";
+import { load } from "../lib/figma-index.mts";
 
 const { byKey } = load(process.argv[2]);
 const target = process.argv[3];

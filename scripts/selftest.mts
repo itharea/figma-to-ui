@@ -7,7 +7,7 @@
 // is reachable (argv[2], else /tmp/figparse/message_new.json) and skip cleanly
 // otherwise. Exits non-zero on any failure. Not imported by anything.
 import * as fs from "fs";
-import { load, key } from "./lib.mts";
+import { load, key } from "./lib/figma-index.mts";
 import {
   letterSpacingToPx,
   letterSpacingStr,
@@ -15,10 +15,10 @@ import {
   reconcileTextSize,
   classifyPlaceholderText,
   disambiguateJustify,
-} from "./reconcile-lib.mts";
-import { resolveInstance } from "./resolve-lib.mts";
-import { cornerRadiusOf } from "./screens-lib.mts";
-import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./layout-lib.mts";
+} from "./lib/reconcile-lib.mts";
+import { resolveInstance } from "./lib/resolve-lib.mts";
+import { cornerRadiusOf } from "./lib/screens-lib.mts";
+import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
 import {
   cssVarName,
   treePath,
@@ -28,13 +28,13 @@ import {
   topoOrder,
   emitTheme,
   type ThemeVar,
-} from "./theme-lib.mts";
+} from "./lib/theme-lib.mts";
 import { spawnSync } from "child_process";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { extractGeometry, toSvgString, emitIconComponent } from "./svg-lib.mts";
-import { deriveLogicals } from "./components-lib.mts";
-import { slugify, uniqueSlug, kebab, camel, compIdent } from "./naming.mts";
+import { extractGeometry, toSvgString, emitIconComponent } from "./lib/svg-lib.mts";
+import { deriveLogicals } from "./lib/components-lib.mts";
+import { slugify, uniqueSlug, kebab, camel, compIdent } from "./lib/naming.mts";
 
 let pass = 0;
 let fail = 0;
@@ -741,7 +741,7 @@ const bind = (node: string, field: string) => [{ node, field }];
 
 // ── raw.mts: dispatch smoke (confirms all 8 folded lib imports resolve) ──────
 {
-  const rawPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "raw.mts");
+  const rawPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli", "raw.mts");
   const r = spawnSync(process.argv[0], [rawPath], { encoding: "utf8" });
   check("raw.mts no-arg → exit 1", r.status === 1, `status ${r.status}`);
   check(

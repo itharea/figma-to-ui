@@ -5,7 +5,7 @@
 // the IR build imports this at build time. CLI entry lives in match-tokens.mts /
 // variables.mts.
 import * as fs from "fs";
-import { load, key, colorStr } from "./lib.mts";
+import { load, key, colorStr } from "./figma-index.mts";
 
 export type Token = {
   name: string;

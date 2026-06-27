@@ -2,7 +2,7 @@
 // Usage: node find.mts <message.json> <name-regex> [type-filter] [--under <name>]
 // Example: node find.mts msg.json "product.?card" SYMBOL
 //          node find.mts msg.json "Version=" SYMBOL --under Header
-import { load, key } from "./lib.mts";
+import { load, key } from "../lib/figma-index.mts";
 
 const { nodes, byKey } = load(process.argv[2]);
 

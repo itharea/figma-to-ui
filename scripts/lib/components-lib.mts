@@ -5,7 +5,7 @@
 // are all SYMBOLs named `prop=value[, prop2=value2]` sharing one axis set) over
 // the #9747ff dashed-stroke editor hint, which is only a labeled fallback (the
 // purple stroke is a render hint, not a format guarantee — determinism contract).
-import { load, key, colorStr } from "./lib.mts";
+import { load, key, colorStr } from "./figma-index.mts";
 import { kebab, camel } from "./naming.mts";
 
 export type ComponentSet = {

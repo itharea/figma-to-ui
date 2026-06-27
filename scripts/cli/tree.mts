@@ -1,6 +1,6 @@
 // Print the document skeleton: DOCUMENT → CANVAS (pages) → top-level frames.
 // Usage: node tree.mts <message.json>
-import { load, key } from "./lib.mts";
+import { load, key } from "../lib/figma-index.mts";
 
 const { nodes, children } = load(process.argv[2]);
 

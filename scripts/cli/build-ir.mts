@@ -13,8 +13,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { load, absMat } from "./lib.mts";
-import { resolveVariables, loadTheme, type ThemeEntry } from "./tokens-lib.mts";
+import { load, absMat } from "../lib/figma-index.mts";
+import { resolveVariables, loadTheme, type ThemeEntry } from "../lib/tokens-lib.mts";
 import {
   findComponentSets,
   parseVariantMatrix,
@@ -22,15 +22,15 @@ import {
   extractComponentProps,
   sameNodeGroups,
   extractVariantBindings,
-} from "./components-lib.mts";
-import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
+} from "../lib/components-lib.mts";
+import { resolveScreen, type ResolvedNode } from "../lib/resolve-lib.mts";
 import {
   buildScreen,
   registerRawMap,
   provenanceViolations,
   type IRNode,
   type VarIndex,
-} from "./screens-lib.mts";
+} from "../lib/screens-lib.mts";
 import {
   mapNodeTokens,
   aggregateScreenIntent,
@@ -38,9 +38,9 @@ import {
   buildDefaultVariantMap,
   fontTokenCollisions,
   type IntentItem,
-} from "./mapping-lib.mts";
-import { unionModes, primaryMode } from "./theme-lib.mts";
-import { uniqueSlug } from "./naming.mts";
+} from "../lib/mapping-lib.mts";
+import { unionModes, primaryMode } from "../lib/theme-lib.mts";
+import { uniqueSlug } from "../lib/naming.mts";
 import {
   splitTokens,
   toIRTokens,
@@ -51,7 +51,7 @@ import {
   scopedScreenRoots,
   pageOf,
   type IRTypography,
-} from "./ir-lib.mts";
+} from "../lib/ir-lib.mts";
 
 const IR_SCHEMA_VERSION = 1;
 

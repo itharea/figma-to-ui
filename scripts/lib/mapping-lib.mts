@@ -5,7 +5,7 @@
 // notes, never a gate). Reuses the deterministic predicates verbatim (principle #2):
 // placeholder via reconcile-lib, denylist/repeated/mono-icon via intent-lib,
 // default-variant via components-lib — NO re-implementation.
-import { load, key } from "./lib.mts";
+import { load, key } from "./figma-index.mts";
 import { matchTokenByValue, type ThemeEntry, type ThemeKind, type Token } from "./tokens-lib.mts";
 import { classifyPlaceholderText } from "./reconcile-lib.mts";
 import { isDenylistedText, repeatedStrings, isMonoColorIconFill } from "./intent-lib.mts";

@@ -5,7 +5,7 @@
 // Composition is pure: it follows the explicit symbolData.symbolOverrides[].
 // guidPath.guids path with zero ambiguity (determinism contract). Placeholder
 // *classification* is judgment and lives in describe-lib/reconcile-lib, not here.
-import { load, key } from "./lib.mts";
+import { load, key } from "./figma-index.mts";
 
 export type ResolvedNode = {
   guid: string; // raw master key — NOT unique in a resolved tree (a master reused

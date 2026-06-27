@@ -5,9 +5,9 @@
 // being mapped.
 //
 // Usage: node icons.mts <message.json> <screen-guidKey>
-import { load, key } from "./lib.mts";
-import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
-import { isMonoColorIconFill } from "./intent-lib.mts";
+import { load, key } from "../lib/figma-index.mts";
+import { resolveScreen, type ResolvedNode } from "../lib/resolve-lib.mts";
+import { isMonoColorIconFill } from "../lib/intent-lib.mts";
 
 const msgPath = process.argv[2];
 const screen = process.argv[3];

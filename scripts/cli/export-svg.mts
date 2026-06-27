@@ -2,9 +2,9 @@
 // Geometry extraction lives in svg-lib.mts (shared with codegen's internal icon export).
 // Usage: node export-svg.mts <message.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]
 import * as fs from "fs";
-import { rasterizeFile } from "./raster-lib.mts";
-import { load } from "./lib.mts";
-import { extractGeometry, toSvgString } from "./svg-lib.mts";
+import { rasterizeFile } from "../lib/raster-lib.mts";
+import { load } from "../lib/figma-index.mts";
+import { extractGeometry, toSvgString } from "../lib/svg-lib.mts";
 
 const index = load(process.argv[2]);
 const png = process.argv.includes("--png");

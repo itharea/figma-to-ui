@@ -3,7 +3,7 @@
 // components-lib (default-variant): the placeholder denylist / repeated-string
 // scan, and the mono-color icon-fill scan. NO top-level side effects — shared
 // verbatim by intent.mts (Phase 5) and build-ir.mts's intent.json pass (Phase 8).
-import { colorStr } from "./lib.mts";
+import { colorStr } from "./figma-index.mts";
 
 // Strings that are almost always stand-ins, not real copy. Anchored, case-
 // insensitive. Kept distinct from reconcile-lib's classifyPlaceholderText pattern
