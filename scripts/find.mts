@@ -41,8 +41,7 @@ function pathOf(n: any): string {
 for (const n of nodes) {
   if (!n.name || !re.test(n.name)) continue;
   if (typeFilter && n.type !== typeFilter) continue;
-  if (underRe && !ancestors(n).some((a) => a.name && underRe!.test(a.name)))
-    continue;
+  if (underRe && !ancestors(n).some((a) => a.name && underRe!.test(a.name))) continue;
   const sz = n.size ? ` ${Math.round(n.size.x)}x${Math.round(n.size.y)}` : "";
   const hidden = n.visible === false ? " (HIDDEN)" : "";
   console.log(`${n.type} "${n.name}"${sz}${hidden} [${key(n.guid)}]  —  ${pathOf(n)}`);

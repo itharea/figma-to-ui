@@ -48,8 +48,13 @@ const argv = process.argv.slice(2);
 const dir = argv[0];
 const setName = argv[1];
 if (!dir || !setName || setName.startsWith("--"))
-  throw new Error("usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>]");
-const flag = (n: string) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+  throw new Error(
+    "usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>]",
+  );
+const flag = (n: string) => {
+  const i = argv.indexOf(n);
+  return i >= 0 ? argv[i + 1] : undefined;
+};
 const outDir = flag("--out");
 // Decoded .fig images dir (the unzipped fig's `images/`, raster fills by content hash).
 // When given (with --out), codegen EXTRACTS each referenced image fill into the component
@@ -81,13 +86,21 @@ const readJSON = (rel: string): any => {
 };
 
 // --- locate the component file: components/<slug>.json, slug-tolerant ---------
-const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+const slugify = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 // Component identifier (PascalCase) from a Figma name — the meta component name AND
 // the JSX/import name used for nested-component references (parity across both).
 const compIdent = (name: string) =>
-  (name ?? "").replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, ch: string) => ch.toUpperCase()).replace(/\s/g, "") || "Component";
+  (name ?? "")
+    .replace(/[^A-Za-z0-9]+/g, " ")
+    .replace(/(?:^|\s)(\w)/g, (_: string, ch: string) => ch.toUpperCase())
+    .replace(/\s/g, "") || "Component";
 const compDir = path.join(dir, "components");
-if (!fs.existsSync(compDir)) throw new Error(`${dir}: no components/ — not an IR (or no component sets)`);
+if (!fs.existsSync(compDir))
+  throw new Error(`${dir}: no components/ — not an IR (or no component sets)`);
 
 // Registry of ALL catalog components, keyed by the set `guid` AND every
 // `variants[].guidKey`. An instance's `component.guid` (= symbolData.symbolID) is a
@@ -107,11 +120,17 @@ for (const f of fs.readdirSync(compDir)) {
   const c = JSON.parse(fs.readFileSync(path.join(compDir, f), "utf8"));
   const Comp = compIdent(c.name ?? fslug);
   if (c.guid) registry.set(c.guid, { slug: fslug, Comp, comp: c, variant: null });
-  for (const v of c.variants ?? []) if (v.guidKey) registry.set(v.guidKey, { slug: fslug, Comp, comp: c, variant: v });
-  if (fslug === wantSlug || slugify(c.name ?? "") === wantSlug) { compFile = f; comp = c; }
+  for (const v of c.variants ?? [])
+    if (v.guidKey) registry.set(v.guidKey, { slug: fslug, Comp, comp: c, variant: v });
+  if (fslug === wantSlug || slugify(c.name ?? "") === wantSlug) {
+    compFile = f;
+    comp = c;
+  }
 }
 if (!comp) {
-  throw new Error(`no component set "${setName}" in ${dir}/components/. Available: ${availSlugs.slice(0, 40).join(", ")}${availSlugs.length > 40 ? " …" : ""}`);
+  throw new Error(
+    `no component set "${setName}" in ${dir}/components/. Available: ${availSlugs.slice(0, 40).join(", ")}${availSlugs.length > 40 ? " …" : ""}`,
+  );
 }
 
 // --- axes / default variant ---------------------------------------------------
@@ -121,12 +140,19 @@ const axisNames = Object.keys(axes);
 // `stroke-hint` detected a bordered frame, no variant axis) still IS a component: treat
 // the set frame itself as one default variant rendered from its own subtree, instead of
 // crashing on an empty `rendered[]` (its guid resolves in the screens IR like any variant).
-const variants: any[] =
-  comp.variants?.length
-    ? comp.variants
-    : comp.guid
-      ? [{ guidKey: comp.guid, props: {}, rawName: comp.name ?? "default", bindings: [], size: comp.size }]
-      : [];
+const variants: any[] = comp.variants?.length
+  ? comp.variants
+  : comp.guid
+    ? [
+        {
+          guidKey: comp.guid,
+          props: {},
+          rawName: comp.name ?? "default",
+          bindings: [],
+          size: comp.size,
+        },
+      ]
+    : [];
 const isDefaultVariant = (v: any) =>
   axisNames.every((a) => (axes[a]?.[0] !== undefined ? v.props[a] === axes[a][0] : true));
 const defaultVariant = variants.find(isDefaultVariant) ?? variants[0];
@@ -153,12 +179,15 @@ const svgIndex = msgPath && fs.existsSync(msgPath) ? load(msgPath) : null;
 // Mode coherence guard (the single style decision): build-ir + theme-gen must share --mode.
 const modeArg = flag("--mode");
 if (modeArg && manifest.activeMode && modeArg !== manifest.activeMode)
-  console.error(`⚠ codegen --mode "${modeArg}" ≠ manifest.activeMode "${manifest.activeMode}" — rebuild IR + theme with the same mode`);
+  console.error(
+    `⚠ codegen --mode "${modeArg}" ≠ manifest.activeMode "${manifest.activeMode}" — rebuild IR + theme with the same mode`,
+  );
 
 // variable guid → token name, to resolve icon colour overrides read straight from the raw
 // message (the IR drops deep-node colour overrides on icons — see iconOverrideColor).
 const varNameByGuid = new Map<string, string>();
-for (const v of (readJSON("tokens/variables.json") ?? [])) if (v?.guid && v?.name) varNameByGuid.set(v.guid, v.name);
+for (const v of readJSON("tokens/variables.json") ?? [])
+  if (v?.guid && v?.name) varNameByGuid.set(v.guid, v.name);
 
 function findNodeByGuid(guid: string): IRNode | null {
   for (const rel of manifest.artifacts?.screens ?? []) {
@@ -166,7 +195,10 @@ function findNodeByGuid(guid: string): IRNode | null {
     let hit: IRNode | null = null;
     (function w(n: any) {
       if (!n || hit) return;
-      if (n.guid === guid) { hit = n; return; }
+      if (n.guid === guid) {
+        hit = n;
+        return;
+      }
       for (const c of n.children ?? []) w(c);
     })(root);
     if (hit) return hit;
@@ -195,9 +227,15 @@ const slug =
 // basename (e.g. "<hash>.png") or null when no --images/--out or the asset is absent.
 // Extension is sniffed from magic bytes (the fig stores fills extension-less).
 const extFromMagic = (b: Buffer): string => {
-  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return ".png";
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47)
+    return ".png";
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return ".jpg";
-  if (b.length >= 12 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP") return ".webp";
+  if (
+    b.length >= 12 &&
+    b.toString("ascii", 0, 4) === "RIFF" &&
+    b.toString("ascii", 8, 12) === "WEBP"
+  )
+    return ".webp";
   if (b.length >= 6 && b.toString("ascii", 0, 4) === "GIF8") return ".gif";
   return "";
 };
@@ -212,7 +250,10 @@ function assetRef(hash: string | undefined): string | null {
     const f = fs.readdirSync(imagesDir).find((x) => x === hash || x.startsWith(hash + "."));
     if (f) src = path.join(imagesDir, f);
   }
-  if (!src) { assetCache.set(hash, null); return null; }
+  if (!src) {
+    assetCache.set(hash, null);
+    return null;
+  }
   const buf = fs.readFileSync(src);
   const file = hash + (path.extname(src) || extFromMagic(buf));
   const destDir = path.join(outDir, slug, "assets");
@@ -227,7 +268,10 @@ const imageHashOf = (n: IRNode): string | undefined => {
 };
 function variantComponentName(v: any): string {
   const k = variantPropKey(v);
-  const camel = k.replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase()).replace(/\s/g, "");
+  const camel = k
+    .replace(/[^A-Za-z0-9]+/g, " ")
+    .replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase())
+    .replace(/\s/g, "");
   return `${Comp}${camel || "Default"}`;
 }
 const variantFileSlug = (v: any) => slugify(variantPropKey(v)) || "default";
@@ -236,11 +280,17 @@ const variantFileSlug = (v: any) => slugify(variantPropKey(v)) || "default";
 // composed). Falls back to 'default' when no axes.
 const defaultKey = defaultVariant ? variantPropKey(defaultVariant) : "default";
 const propKeyExpr =
-  axisNames.length === 0 ? `'${defaultKey}'`
-  : axisNames.length === 1 ? "variant"
-  : axisNames.map((a) => kebabProp(a)).join(" + '/' + ");
+  axisNames.length === 0
+    ? `'${defaultKey}'`
+    : axisNames.length === 1
+      ? "variant"
+      : axisNames.map((a) => kebabProp(a)).join(" + '/' + ");
 function kebabProp(s: string): string {
-  return s.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[\s_]+/g, "-").replace(/[^\w-]/g, "").toLowerCase();
+  return s
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^\w-]/g, "")
+    .toLowerCase();
 }
 
 // Name of the per-instance ROOT style-override prop for a component (issue #23). Defaults
@@ -254,7 +304,8 @@ function styleOverridePropName(c: any): string {
   if (axNames.length === 1) taken.add("variant");
   else for (const a of axNames) taken.add(kebabProp(a));
   for (const l of deriveLogicals(c).logicals) taken.add(l.name);
-  for (const cand of ["style", "rootStyle", "styleOverride", "rootStyleOverride"]) if (!taken.has(cand)) return cand;
+  for (const cand of ["style", "rootStyle", "styleOverride", "rootStyleOverride"])
+    if (!taken.has(cand)) return cand;
   return "rootStyleOverride";
 }
 const STYLE_PROP = styleOverridePropName(comp); // the override-prop name for THIS component
@@ -278,7 +329,9 @@ function iconOverrideColor(guid: string): { hex: string; var: string | null } | 
   const raw = svgIndex.byKey.get(guid);
   for (const o of raw?.symbolData?.symbolOverrides ?? []) {
     for (const paints of [o.fillPaints, o.strokePaints]) {
-      const p = (paints ?? []).find((x: any) => x.type === "SOLID" && x.visible !== false && x.color);
+      const p = (paints ?? []).find(
+        (x: any) => x.type === "SOLID" && x.visible !== false && x.color,
+      );
       if (!p) continue;
       const ag = p.colorVar?.value?.alias?.guid;
       const vk = ag ? `${ag.sessionID}:${ag.localID}` : null;
@@ -291,16 +344,26 @@ function iconOverrideColor(guid: string): { hex: string; var: string | null } | 
 // PascalCase glyph name from a node/instance name ("icons/Tabbar/HouseSimple" → "HouseSimple").
 function iconExportName(n: { name?: string | null }): string {
   const raw = (n.name ?? "").split("/").pop() ?? "";
-  return raw.replace(/[^A-Za-z0-9]+/g, " ").replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase()).replace(/\s/g, "");
+  return raw
+    .replace(/[^A-Za-z0-9]+/g, " ")
+    .replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase())
+    .replace(/\s/g, "");
 }
 
 // Extract geometry for a node and generate (or reuse) an owned icon component. Returns its
 // identifier + import file + mono flag, or null (caller keeps the placeholder). monoHint:
 // true/false from the IR's resolved fills; undefined ⇒ decide from the extracted geometry.
-function ownIcon(n: { guid: string; name?: string | null }, monoHint?: boolean): { Name: string; file: string; mono: boolean } | null {
+function ownIcon(
+  n: { guid: string; name?: string | null },
+  monoHint?: boolean,
+): { Name: string; file: string; mono: boolean } | null {
   if (!svgIndex || !outDir) return null;
   let geo;
-  try { geo = extractGeometry(svgIndex, n.guid); } catch { return null; }
+  try {
+    geo = extractGeometry(svgIndex, n.guid);
+  } catch {
+    return null;
+  }
   if (!geo.paths.length) return null;
   const mono = monoHint != null ? monoHint : geo.fills.length === 1;
   // mono recolours via the caller's `color` prop ⇒ dedup on shape only; multi bakes its fills.
@@ -317,7 +380,8 @@ function ownIcon(n: { guid: string; name?: string | null }, monoHint?: boolean):
   // A glyph named e.g. "941" (the iOS 9:41 time) yields an invalid identifier start; prefix it.
   if (!/^[A-Za-z_]/.test(stem)) stem = "Glyph" + stem;
   const base = `${stem}_${geo.geomHash.slice(0, 8)}Icon`;
-  let Name = base, i = 2;
+  let Name = base,
+    i = 2;
   while (iconTakenNames.has(Name)) Name = `${base}${i++}`;
   iconTakenNames.add(Name);
   const rec = { Name, file: Name, mono };
@@ -328,22 +392,31 @@ function ownIcon(n: { guid: string; name?: string | null }, monoHint?: boolean):
 
 // === per-node JSX rendering (a variant's resolved subtree → a JSX tree) =========
 const allTodos: string[] = [];
-const ind = (s: string, n: number) => s.split("\n").map((l) => (l ? " ".repeat(n) + l : l)).join("\n");
+const ind = (s: string, n: number) =>
+  s
+    .split("\n")
+    .map((l) => (l ? " ".repeat(n) + l : l))
+    .join("\n");
 
 // safe style-key (one StyleSheet entry / style object per node, by IR id).
 const styleKey = (n: IRNode) => `n_${(n.id || n.guid || "x").replace(/[^A-Za-z0-9]+/g, "_")}`;
 
 // color expression with token provenance; pushes a TODO on match:none/nearest.
 function colorRef(
-  c: { hex: string | null; var?: string | null; token?: string | null; match?: string | null } | undefined,
-  label: string, push: (m: string) => void
+  c:
+    | { hex: string | null; var?: string | null; token?: string | null; match?: string | null }
+    | undefined,
+  label: string,
+  push: (m: string) => void,
 ): string {
   if (!c || !c.hex) return "'transparent'";
   // Bound to a Figma variable → reference the generated theme, not the literal (issue #17).
   if (c.var) return themeRef(c.var, false);
   if (c.token) return c.token;
   if (c.match === "none" || (typeof c.match === "string" && c.match.startsWith("nearest"))) {
-    push(`${label} color ${c.hex} is "${c.match}" against the theme — review the literal during elevation (kept faithfully)`);
+    push(
+      `${label} color ${c.hex} is "${c.match}" against the theme — review the literal during elevation (kept faithfully)`,
+    );
     return `'${c.hex}' /* REVIEW: ${c.match} token */`;
   }
   return `'${c.hex}'`;
@@ -361,7 +434,10 @@ function collectVectorFills(n: IRNode): { hex: string; var: string | null }[] {
       if (f.type === "solid" && f.hex) {
         const v = (f as any).var ?? null;
         const k = `${f.hex}|${v ?? ""}`;
-        if (!seen.has(k)) { seen.add(k); out.push({ hex: f.hex, var: v }); }
+        if (!seen.has(k)) {
+          seen.add(k);
+          out.push({ hex: f.hex, var: v });
+        }
       }
     }
     for (const c of m.children ?? []) walk(c);
@@ -379,12 +455,23 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   const s = n.style;
   const want = (f: string) => !only || only.has(f);
   // size: emit when fixed (a hug/grow child sizes itself; still record for faithful sizing).
-  if (want("size") && n.box) { if (n.box.w) lines.push(`width: ${n.box.w},`); if (n.box.h) lines.push(`height: ${n.box.h},`); }
+  if (want("size") && n.box) {
+    if (n.box.w) lines.push(`width: ${n.box.w},`);
+    if (n.box.h) lines.push(`height: ${n.box.h},`);
+  }
   // background = first solid fill (bound var wins as a token comment).
   if (want("fillPaints")) {
     const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
     if (fill) {
-      const ref = colorRef({ hex: fill.hex ?? null, var: (fill as any).var ?? null, match: (fill as any).var ? "bound" : null }, `${n.name} background`, push);
+      const ref = colorRef(
+        {
+          hex: fill.hex ?? null,
+          var: (fill as any).var ?? null,
+          match: (fill as any).var ? "bound" : null,
+        },
+        `${n.name} background`,
+        push,
+      );
       lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
     }
     // image fill (improvement 5-image-fills): with --images, EXTRACT the raster fill into
@@ -393,7 +480,8 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
     // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
     // (handled there). Skipped in override mode (`only`): an image override is flagged by
     // the caller's instance-override TODO, not inlined into a `style={{…}}` prop.
-    const imgFill = !only && web && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
+    const imgFill =
+      !only && web && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
     if (imgFill) {
       const hash = (imgFill as any).imageHash as string;
       const file = assetRef(hash);
@@ -403,10 +491,14 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
         lines.push(`backgroundPosition: 'center',`);
         lines.push(`backgroundRepeat: 'no-repeat',`);
       } else {
-        push(`image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — pass --images <dir> to extract + wire the src`);
+        push(
+          `image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — pass --images <dir> to extract + wire the src`,
+        );
         // No opaque placeholder bg: image-only fills are often transparent PNGs meant to
         // composite over the parent surface (an opaque #eee would show through their alpha).
-        lines.push(`// TODO: image — backgroundImage: "url('./assets/${hash.slice(0, 16)}…')" (re-run codegen with --images)`);
+        lines.push(
+          `// TODO: image — backgroundImage: "url('./assets/${hash.slice(0, 16)}…')" (re-run codegen with --images)`,
+        );
         lines.push(`backgroundSize: 'cover',`);
       }
     }
@@ -424,7 +516,15 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   if ((want("strokePaints") || want("strokeWeight")) && s?.strokes?.length) {
     const st = s.strokes[0];
     // route through colorRef so a bound stroke references the theme (issue #17), same as fills.
-    const cref = colorRef({ hex: st.hex ?? null, var: (st as any).var ?? null, match: (st as any).var ? "bound" : null }, `${n.name} border`, push);
+    const cref = colorRef(
+      {
+        hex: st.hex ?? null,
+        var: (st as any).var ?? null,
+        match: (st as any).var ? "bound" : null,
+      },
+      `${n.name} border`,
+      push,
+    );
     const lineStyle = st.dash?.length ? "dashed" : "solid";
     if (s.borderWidths) {
       const bw = s.borderWidths;
@@ -445,12 +545,16 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   if (want("opacity") && s?.opacity !== undefined) lines.push(`opacity: ${s.opacity},`);
   if (want("effects") && s?.effects?.length) {
     const e = s.effects[0];
-    if (web) lines.push(`boxShadow: '${e.offsetX}px ${e.offsetY}px ${e.radius}px ${e.spread ?? 0}px ${e.hex ?? "#000"}', // ${e.type}${s.effects.length > 1 ? ` (+${s.effects.length - 1} more — see master)` : ""}`);
+    if (web)
+      lines.push(
+        `boxShadow: '${e.offsetX}px ${e.offsetY}px ${e.radius}px ${e.spread ?? 0}px ${e.hex ?? "#000"}', // ${e.type}${s.effects.length > 1 ? ` (+${s.effects.length - 1} more — see master)` : ""}`,
+      );
     else {
       lines.push(`shadowColor: '${e.hex ?? "#000"}', // ${e.type}`);
       lines.push(`shadowOffset: { width: ${e.offsetX}, height: ${e.offsetY} },`);
       lines.push(`shadowRadius: ${e.radius},`);
-      if (s.effects.length > 1) lines.push(`// +${s.effects.length - 1} more effect(s) — see master`);
+      if (s.effects.length > 1)
+        lines.push(`// +${s.effects.length - 1} more effect(s) — see master`);
     }
   }
   // auto-layout container + flex-child sizing: structural, never a per-instance style
@@ -482,7 +586,15 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
 // reference: only the box fields the instance actually overrode on its root (a subset
 // of STYLE_OVERRIDE_FIELDS), flattened to a single inline-object body. Returns "" when
 // nothing maps. Shares nodeStyleBody's field→CSS mapping so parent and child agree.
-const STYLE_OVERRIDE_FIELDS = new Set(["fillPaints", "strokePaints", "strokeWeight", "cornerRadius", "opacity", "size", "effects"]);
+const STYLE_OVERRIDE_FIELDS = new Set([
+  "fillPaints",
+  "strokePaints",
+  "strokeWeight",
+  "cornerRadius",
+  "opacity",
+  "size",
+  "effects",
+]);
 function rootOverrideStyle(n: IRNode, fields: string[], push: (m: string) => void): string {
   const sel = fields.filter((f) => STYLE_OVERRIDE_FIELDS.has(f));
   if (!sel.length) return "";
@@ -515,17 +627,28 @@ function flexChildLines(n: IRNode): string[] {
 // Returns null for an unrecognized name (caller leaves a TODO instead of guessing).
 function fontWeightValue(style: string | null): string | null {
   if (!style) return null;
-  const w = style.toLowerCase().replace(/[\s_-]+/g, "").replace(/(italic|oblique)$/, "");
+  const w = style
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "")
+    .replace(/(italic|oblique)$/, "");
   const map: Record<string, string> = {
-    thin: "100", hairline: "100",
-    extralight: "200", ultralight: "200",
+    thin: "100",
+    hairline: "100",
+    extralight: "200",
+    ultralight: "200",
     light: "300",
-    "": "400", regular: "400", normal: "400", book: "400",
+    "": "400",
+    regular: "400",
+    normal: "400",
+    book: "400",
     medium: "500",
-    semibold: "600", demibold: "600",
+    semibold: "600",
+    demibold: "600",
     bold: "700",
-    extrabold: "800", ultrabold: "800",
-    black: "900", heavy: "900",
+    extrabold: "800",
+    ultrabold: "800",
+    black: "900",
+    heavy: "900",
   };
   return map[w] ?? null;
 }
@@ -546,11 +669,23 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
     // unbound keeps the reconciled literal. lineHeight (improvement 2): web wants a
     // string '36px' (React treats a unitless number as a multiplier), RN a bare number.
     if (f.size != null)
-      lines.push(v?.size ? `fontSize: ${themeRef(v.size, true)},` : `fontSize: ${f.size},${f.sizeToken ? ` // token ${f.sizeToken}` : ""}`);
+      lines.push(
+        v?.size
+          ? `fontSize: ${themeRef(v.size, true)},`
+          : `fontSize: ${f.size},${f.sizeToken ? ` // token ${f.sizeToken}` : ""}`,
+      );
     if (f.lineHeightPx != null)
-      lines.push(v?.lineHeight ? `lineHeight: ${themeRef(v.lineHeight, true)},` : `lineHeight: ${web ? `'${f.lineHeightPx}px'` : f.lineHeightPx},`);
+      lines.push(
+        v?.lineHeight
+          ? `lineHeight: ${themeRef(v.lineHeight, true)},`
+          : `lineHeight: ${web ? `'${f.lineHeightPx}px'` : f.lineHeightPx},`,
+      );
     if (f.letterSpacingPx || v?.letterSpacing)
-      lines.push(v?.letterSpacing ? `letterSpacing: ${themeRef(v.letterSpacing, true)},` : `letterSpacing: ${f.letterSpacingPx},`);
+      lines.push(
+        v?.letterSpacing
+          ? `letterSpacing: ${themeRef(v.letterSpacing, true)},`
+          : `letterSpacing: ${f.letterSpacingPx},`,
+      );
     // Emit the font family straight from Figma. decisions.fontMap (appFamily) is an
     // OPTIONAL override for when the app registers the face under a different name — it
     // must never block generation, so the raw Figma family is the default. A bound
@@ -559,9 +694,20 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
     if (v?.family) lines.push(`fontFamily: ${themeRef(v.family, false)},`);
     else if (famName) lines.push(`fontFamily: '${famName}',`);
     const fw = fontWeightValue(f.weight);
-    if (fw) lines.push(`fontWeight: '${fw}',${v?.weight ? ` // var ${v.weight}` : f.weight ? ` // ${f.weight}` : ""}`);
-    else if (f.weight) { lines.push(`// TODO: fontWeight — unmapped Figma weight "${f.weight}"${v?.weight ? ` (var ${v.weight})` : ""}`); push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`); }
-    for (const cf of f.conflicts ?? []) push(`font ${cf.field} ${cf.declared}→~${cf.chosen} reconciliation conflict (box.y=${cf.boxY} vs lh=${cf.lhPx}) — confirm size`);
+    if (fw)
+      lines.push(
+        `fontWeight: '${fw}',${v?.weight ? ` // var ${v.weight}` : f.weight ? ` // ${f.weight}` : ""}`,
+      );
+    else if (f.weight) {
+      lines.push(
+        `// TODO: fontWeight — unmapped Figma weight "${f.weight}"${v?.weight ? ` (var ${v.weight})` : ""}`,
+      );
+      push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`);
+    }
+    for (const cf of f.conflicts ?? [])
+      push(
+        `font ${cf.field} ${cf.declared}→~${cf.chosen} reconciliation conflict (box.y=${cf.boxY} vs lh=${cf.lhPx}) — confirm size`,
+      );
   }
   const cref = colorRef(n.color as any, `${n.name} text`, push);
   lines.push(`color: ${cref},`);
@@ -619,7 +765,9 @@ function containerPositionsChildren(n: IRNode, kids: IRNode[]): boolean {
   if (isSingleIconWrapper(n)) return false;
   if (!n.layout) return true; // #7
   if (kids.some((c) => c.positioning === "absolute")) return true; // #6
-  return hasSignificantNonAdjacentOverlap(kids.map((c) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 }))); // #11
+  return hasSignificantNonAdjacentOverlap(
+    kids.map((c) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 })),
+  ); // #11
 }
 
 // Interactive-archetype MARKER (improvement 10): a string TODO (no prop synthesis).
@@ -627,12 +775,10 @@ function interactiveArchetype(n: IRNode): string | null {
   const kids = (n.children ?? []).filter((c) => (c as any).visible !== false);
   const named = (re: RegExp) => kids.some((c) => re.test(c.name ?? ""));
   const slider =
-    /slider|track/i.test(n.name ?? "") ||
-    (named(/bar|track/i) && named(/thumb|fill|blue/i));
+    /slider|track/i.test(n.name ?? "") || (named(/bar|track/i) && named(/thumb|fill|blue/i));
   if (slider) return "slider — fill width is static; wire value/onChange";
   const stepper =
-    /stepper|quantity/i.test(n.name ?? "") ||
-    (named(/minus|^-$/) && named(/plus|^\+$/));
+    /stepper|quantity/i.test(n.name ?? "") || (named(/minus|^-$/) && named(/plus|^\+$/));
   if (stepper) return "stepper — count is static; wire value/onChange";
   return null;
 }
@@ -650,7 +796,7 @@ function componentReference(
   pad: string,
   push: (m: string) => void,
   refImports: Map<string, string>,
-  posLines: string[]
+  posLines: string[],
 ): string {
   refImports.set(entry.Comp, entry.slug);
 
@@ -706,7 +852,9 @@ function componentReference(
         emitted.add(lg.name);
       }
     } else if (lg.role === "slot" && b.field === "symbolId") {
-      push(`reference <${entry.Comp}/>: instance-swap prop "${lg.name}" not auto-wired — pass the swapped content (${n.guid})`);
+      push(
+        `reference <${entry.Comp}/>: instance-swap prop "${lg.name}" not auto-wired — pass the swapped content (${n.guid})`,
+      );
     }
   }
 
@@ -736,7 +884,7 @@ function componentReference(
     const passed = [...emitted, ...(overrideBody ? [`style[${styleFields.join(",")}]`] : [])];
     push(
       `referenced <${entry.Comp}${attrs}/> for "${n.name}" (${n.guid}) — ${overrides} instance override(s)` +
-        `${passed.length ? `, passed [${passed.join(", ")}]` : ""}; confirm remaining overrides (image/icon/deep-node) are handled`
+        `${passed.length ? `, passed [${passed.join(", ")}]` : ""}; confirm remaining overrides (image/icon/deep-node) are handled`,
     );
   }
   return `${pad}<${entry.Comp}${attrs} />`;
@@ -771,13 +919,21 @@ function renderVariant(v: any): VariantRender {
 
   // node guid → logical prop, via THIS variant's bindings (defKey-joined). A node may
   // carry a text binding, a visibility binding, an instance-swap binding, or several.
-  const bindingsOf = new Map<string, { text?: Extract<Logical, { role: "text" }>; bool?: Logical; slot?: Extract<Logical, { role: "slot" }> }>();
+  const bindingsOf = new Map<
+    string,
+    {
+      text?: Extract<Logical, { role: "text" }>;
+      bool?: Logical;
+      slot?: Extract<Logical, { role: "slot" }>;
+    }
+  >();
   for (const b of (v.bindings ?? []) as any[]) {
     const lg = logicalByDefKey.get(b.defKey);
     if (!lg) continue;
     const slot = bindingsOf.get(b.node) ?? {};
     if (b.field === "characters" && lg.role === "text") slot.text = lg;
-    else if (b.field === "visible") slot.bool = lg; // may be a collapsed text logical
+    else if (b.field === "visible")
+      slot.bool = lg; // may be a collapsed text logical
     else if (b.field === "symbolId" && lg.role === "slot") slot.slot = lg;
     bindingsOf.set(b.node, slot);
   }
@@ -785,7 +941,20 @@ function renderVariant(v: any): VariantRender {
   const subtree = findNodeByGuid(v.guidKey);
   if (!subtree) {
     push(`variant subtree not found by guid ${v.guidKey} — emitting an empty shell`);
-    return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx: web ? "<div />" : "<View />", styles, usedProps, refImports, iconImports, usesStyleProp, rnImageUsed, todos };
+    return {
+      v,
+      propKey,
+      compName: variantComponentName(v),
+      fileSlug: variantFileSlug(v),
+      jsx: web ? "<div />" : "<View />",
+      styles,
+      usedProps,
+      refImports,
+      iconImports,
+      usesStyleProp,
+      rnImageUsed,
+      todos,
+    };
   }
 
   const Box = web ? "div" : "View";
@@ -800,7 +969,7 @@ function renderVariant(v: any): VariantRender {
     parentPositionsChildren: boolean,
     absOverride: boolean,
     zIndex: number | undefined,
-    kids: IRNode[]
+    kids: IRNode[],
   ): string[] {
     const placedAbs = n.positioning === "absolute" || parentPositionsChildren || absOverride;
     const lines: string[] = [];
@@ -808,7 +977,10 @@ function renderVariant(v: any): VariantRender {
       lines.push(`position: 'absolute',`);
       lines.push(`left: ${n.box?.x ?? 0},`);
       lines.push(`top: ${n.box?.y ?? 0},`);
-    } else if (containerPositionsChildren(n, kids) || kids.some((c) => c.positioning === "absolute")) {
+    } else if (
+      containerPositionsChildren(n, kids) ||
+      kids.some((c) => c.positioning === "absolute")
+    ) {
       // a container that positions descendants establishes a containing block — but
       // 'absolute' already does that, so suppress 'relative' when itself abs-placed.
       lines.push(`position: 'relative',`);
@@ -834,10 +1006,18 @@ function renderVariant(v: any): VariantRender {
     // also gets a `position:relative` parent for free.
     const overlapping = new Set<IRNode>();
     if (positionsKids) {
-      const boxOf = (c: IRNode) => ({ x: c.box?.x ?? 0, y: c.box?.y ?? 0, w: c.box?.w ?? 0, h: c.box?.h ?? 0 });
+      const boxOf = (c: IRNode) => ({
+        x: c.box?.x ?? 0,
+        y: c.box?.y ?? 0,
+        w: c.box?.w ?? 0,
+        h: c.box?.h ?? 0,
+      });
       for (let i = 0; i < kids.length; i++)
         for (let j = i + 1; j < kids.length; j++)
-          if (overlap(boxOf(kids[i]), boxOf(kids[j]))) { overlapping.add(kids[i]); overlapping.add(kids[j]); }
+          if (overlap(boxOf(kids[i]), boxOf(kids[j]))) {
+            overlapping.add(kids[i]);
+            overlapping.add(kids[j]);
+          }
     }
     const childIndex = new Map<IRNode, number>();
     (n.children ?? []).forEach((c, i) => childIndex.set(c, i));
@@ -856,7 +1036,7 @@ function renderVariant(v: any): VariantRender {
     depth: number,
     parentPositionsChildren: boolean,
     absOverride = false,
-    zIndex: number | undefined = undefined
+    zIndex: number | undefined = undefined,
   ): string {
     const pad = "  ".repeat(depth);
     const sk = styleKey(n);
@@ -873,13 +1053,17 @@ function renderVariant(v: any): VariantRender {
       : `style={styles.${sk}}`;
     const kidsAll = (n.children ?? []).filter((c) => (c as any).visible !== false);
     const posLines = positionPrefix(n, parentPositionsChildren, absOverride, zIndex, kidsAll);
-    const prefixBody = (body: string) => (posLines.length ? posLines.join("\n") + (body ? "\n" + body : "") : body);
+    const prefixBody = (body: string) =>
+      posLines.length ? posLines.join("\n") + (body ? "\n" + body : "") : body;
 
     // TEXT node → <Text>/<span>. Bound text → prop (fallback to default), else literal.
     if (n.type === "text") {
       styles.push({ key: sk, body: prefixBody(textStyleBody(n, push)) });
       const raw = n.text?.value ?? "";
-      if (n.text?.placeholder) push(`text ${JSON.stringify(raw)} on "${n.name}" is a placeholder (${n.text.reason}) — confirm real copy`);
+      if (n.text?.placeholder)
+        push(
+          `text ${JSON.stringify(raw)} on "${n.name}" is a placeholder (${n.text.reason}) — confirm real copy`,
+        );
       let content: string;
       const textLg = binds?.text;
       if (textLg) {
@@ -906,7 +1090,9 @@ function renderVariant(v: any): VariantRender {
       const slotBody = nodeStyleBody(n, push);
       const body = n.layout
         ? slotBody
-        : [slotBody, `display: 'flex',`, `alignItems: 'center',`, `justifyContent: 'center',`].filter(Boolean).join("\n");
+        : [slotBody, `display: 'flex',`, `alignItems: 'center',`, `justifyContent: 'center',`]
+            .filter(Boolean)
+            .join("\n");
       styles.push({ key: sk, body: prefixBody(body) });
       // NEVER leave a slot with no default AND no marker (finding #2): the master swaps a
       // default symbol in here, so always flag it (best-effort named via the screens
@@ -919,7 +1105,10 @@ function renderVariant(v: any): VariantRender {
       if (defSym) {
         const defNode = findNodeByGuid(defSym);
         const defFills = defNode ? collectVectorFills(defNode) : [];
-        const icon = ownIcon({ guid: defSym, name: defNode?.name }, defFills.length ? defFills.length === 1 : undefined);
+        const icon = ownIcon(
+          { guid: defSym, name: defNode?.name },
+          defFills.length ? defFills.length === 1 : undefined,
+        );
         if (icon) {
           iconImports.set(icon.Name, icon.file);
           const sizeAttr = defNode?.box?.w ? ` size={${defNode.box.w}}` : "";
@@ -927,19 +1116,24 @@ function renderVariant(v: any): VariantRender {
           // colour this slot is recoloured to (read from the slot instance's override — e.g. a
           // filled button paints its icon praline-50). Without this a mono icon falls back to
           // currentColor and renders the wrong colour (dark icon on a dark button).
-          const slotColor = defFills.length === 1
-            ? { hex: defFills[0].hex, var: defFills[0].var as string | null }
-            : iconOverrideColor(n.guid);
+          const slotColor =
+            defFills.length === 1
+              ? { hex: defFills[0].hex, var: defFills[0].var as string | null }
+              : iconOverrideColor(n.guid);
           const colorAttr =
             icon.mono && slotColor && slotColor.hex
               ? ` color={${colorRef({ hex: slotColor.hex, var: slotColor.var, match: slotColor.var ? "bound" : null }, `${n.name} default icon`, push)}}`
               : "";
           defaultEl = `<${icon.Name}${sizeAttr}${colorAttr} />`;
         } else {
-          push(`instance-swap "${slotLg.name}": default ${defNode?.name ? `"${defNode.name}" ` : ""}(${defSym}) — no geometry extracted; pass ${slotLg.name} or it renders empty`);
+          push(
+            `instance-swap "${slotLg.name}": default ${defNode?.name ? `"${defNode.name}" ` : ""}(${defSym}) — no geometry extracted; pass ${slotLg.name} or it renders empty`,
+          );
         }
       } else {
-        push(`instance-swap "${slotLg.name}": no IR default — pass ${slotLg.name} or it renders empty`);
+        push(
+          `instance-swap "${slotLg.name}": no IR default — pass ${slotLg.name} or it renders empty`,
+        );
       }
       const el = `${pad}<${Box} ${styleAttr}>{${slotLg.name} ?? ${defaultEl}}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
@@ -948,7 +1142,8 @@ function renderVariant(v: any): VariantRender {
     // NESTED COMPONENT → reference it as a child component instead of inlining the
     // resolved subtree (the design uses it AS a component). Gated on !isVectorOnly so
     // vector icons keep the export-svg path; self-references fall through to inline.
-    const refEntry = n.type === "instance" && n.component?.guid ? registry.get(n.component.guid) : undefined;
+    const refEntry =
+      n.type === "instance" && n.component?.guid ? registry.get(n.component.guid) : undefined;
     if (refEntry && refEntry.slug !== slug && !isVectorOnly(n)) {
       const el = componentReference(n, refEntry, pad, push, refImports, posLines);
       return wrapConditional(el, binds, depth, n);
@@ -973,7 +1168,8 @@ function renderVariant(v: any): VariantRender {
       // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
       // fill/stroke colour override (the common case — icons are recoloured via an override
       // the IR drops). null ⇒ the icon keeps its currentColor default and inherits context.
-      const iconColor = fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
+      const iconColor =
+        fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
       const monoHint = fills.length ? fills.length === 1 : iconColor ? true : undefined;
       const icon = ownIcon(n, monoHint);
       const box = [
@@ -982,7 +1178,9 @@ function renderVariant(v: any): VariantRender {
         `display: 'flex',`,
         `alignItems: 'center',`,
         `justifyContent: 'center',`,
-      ].filter(Boolean).join("\n");
+      ]
+        .filter(Boolean)
+        .join("\n");
       styles.push({ key: sk, body: prefixBody(box) });
       if (icon) {
         iconImports.set(icon.Name, icon.file);
@@ -1005,9 +1203,13 @@ function renderVariant(v: any): VariantRender {
       }
       // (b) no geometry source (no --svg/--out) → keep the export-svg placeholder so the user
       //     knows to pass it.
-      const fillNote = fills.length ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]` : "";
+      const fillNote = fills.length
+        ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
+        : "";
       const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
-      push(`icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — pass --svg <message.json> to export + wire it (or run export-svg.mts and inline)`);
+      push(
+        `icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — pass --svg <message.json> to export + wire it (or run export-svg.mts and inline)`,
+      );
       const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid})${fillNote} */}</${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }
@@ -1035,11 +1237,16 @@ function renderVariant(v: any): VariantRender {
         if (file) {
           rnImageUsed = true;
           const ik = `${sk}__img`;
-          styles.push({ key: ik, body: "position: 'absolute',\ntop: 0,\nleft: 0,\nright: 0,\nbottom: 0," });
+          styles.push({
+            key: ik,
+            body: "position: 'absolute',\ntop: 0,\nleft: 0,\nright: 0,\nbottom: 0,",
+          });
           const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="cover" />`;
           inner = inner ? `${imgEl}\n${inner}` : imgEl;
         } else {
-          push(`image fill "${n.name}" (${n.guid}) hash ${ih.slice(0, 8)}… — pass --images <dir> to extract + render <Image>`);
+          push(
+            `image fill "${n.name}" (${n.guid}) hash ${ih.slice(0, 8)}… — pass --images <dir> to extract + render <Image>`,
+          );
         }
       }
     }
@@ -1050,24 +1257,45 @@ function renderVariant(v: any): VariantRender {
   }
 
   // a BOOL-visible binding (incl. a collapsed text logical) makes the node conditional.
-  function wrapConditional(el: string, binds: { text?: Logical; bool?: Logical; slot?: Logical } | undefined, depth: number, n: IRNode): string {
+  function wrapConditional(
+    el: string,
+    binds: { text?: Logical; bool?: Logical; slot?: Logical } | undefined,
+    depth: number,
+    n: IRNode,
+  ): string {
     const cond = binds?.bool;
     if (!cond) return el;
     usedProps.add(cond.name);
     const pad = "  ".repeat(depth);
     // collapsed text logical → render when the string is provided (present → show).
-    const test = cond.role === "text" ? `${cond.name} != null` : cond.name === undefined ? "true" : cond.name;
+    const test =
+      cond.role === "text" ? `${cond.name} != null` : cond.name === undefined ? "true" : cond.name;
     const body = el.replace(new RegExp(`^${pad}`), "");
     return `${pad}{${test} && (\n${ind(body, 2).replace(/^/, pad)}\n${pad})}`;
   }
 
   const jsx = emit(subtree, 0, false);
-  return { v, propKey, compName: variantComponentName(v), fileSlug: variantFileSlug(v), jsx, styles, usedProps, refImports, iconImports, usesStyleProp, rnImageUsed, todos };
+  return {
+    v,
+    propKey,
+    compName: variantComponentName(v),
+    fileSlug: variantFileSlug(v),
+    jsx,
+    styles,
+    usedProps,
+    refImports,
+    iconImports,
+    usesStyleProp,
+    rnImageUsed,
+    todos,
+  };
 }
 
 const rendered = variants.map(renderVariant);
 if (!rendered.length)
-  throw new Error(`component set "${comp.name ?? setName}" has no variants and no set guid to render — nothing to generate (check the component detection in build-ir)`);
+  throw new Error(
+    `component set "${comp.name ?? setName}" has no variants and no set guid to render — nothing to generate (check the component detection in build-ir)`,
+  );
 for (const r of rendered) allTodos.push(...r.todos);
 
 // === FILE EMISSION ============================================================
@@ -1146,7 +1374,9 @@ function variantFile(r: VariantRender): string {
     (refImportLines ? `\n${refImportLines}` : "") +
     (iconImportLines ? `\n${iconImportLines}` : "");
   const todoBlock = r.todos.length
-    ? "\n// === TODO (this variant — unconfirmed values) ===\n" + r.todos.map((t) => `// TODO: ${t}`).join("\n") + "\n"
+    ? "\n// === TODO (this variant — unconfirmed values) ===\n" +
+      r.todos.map((t) => `// TODO: ${t}`).join("\n") +
+      "\n"
     : "\n// (no open TODOs for this variant)\n";
   return `// AUTO-GENERATED SCAFFOLD — "${comp.name}" variant "${r.propKey}" (${r.v.rawName}). NOT finished code.
 // Renders this variant's OWN resolved subtree (guid ${r.v.guidKey}) with reconciled
@@ -1166,13 +1396,24 @@ ${todoBlock}`;
 
 function indexFile(): string {
   const reactImport = web ? `import * as React from 'react';` : `import * as React from 'react';`;
-  const variantImports = rendered.map((r) => `import { ${r.compName} } from './${r.fileSlug}';`).join("\n");
+  const variantImports = rendered
+    .map((r) => `import { ${r.compName} } from './${r.fileSlug}';`)
+    .join("\n");
   // dispatcher: map variant prop key → variant component. Default is the fallback.
-  const cases = rendered.map((r) => `    case '${r.propKey}': return <${r.compName} {...props} />;`).join("\n");
+  const cases = rendered
+    .map((r) => `    case '${r.propKey}': return <${r.compName} {...props} />;`)
+    .join("\n");
   const defaultR = rendered.find((r) => r.v.guidKey === defaultVariant?.guidKey) ?? rendered[0];
-  const destructured = axisNames.length === 0 ? "" : axisNames.length === 1 ? "variant" : axisNames.map(kebabProp).join(", ");
+  const destructured =
+    axisNames.length === 0
+      ? ""
+      : axisNames.length === 1
+        ? "variant"
+        : axisNames.map(kebabProp).join(", ");
   const reviewBlock = allTodos.length
-    ? "\n// === REVIEW (all open TODOs, attributed to the variant) ===\n" + allTodos.map((t) => `// TODO: ${t}`).join("\n") + "\n"
+    ? "\n// === REVIEW (all open TODOs, attributed to the variant) ===\n" +
+      allTodos.map((t) => `// TODO: ${t}`).join("\n") +
+      "\n"
     : "\n// (no open TODOs — all variant values were confirmed)\n";
   return `// AUTO-GENERATED SCAFFOLD from IR ${path.basename(dir)}/components/${compFile} — NOT finished code.
 // The "${comp.name}" component: a meta dispatcher over ${rendered.length} variant(s)
@@ -1196,7 +1437,9 @@ ${reviewBlock}`;
 }
 
 // --- write the folder ---------------------------------------------------------
-console.error(`codegen: ${comp.name} (${rendered.length} variant(s)) → ${framework}, ${allTodos.length} TODO(s), ${logicals.length} prop(s)`);
+console.error(
+  `codegen: ${comp.name} (${rendered.length} variant(s)) → ${framework}, ${allTodos.length} TODO(s), ${logicals.length} prop(s)`,
+);
 const files: { rel: string; content: string }[] = [
   { rel: "types.ts", content: typesFile() },
   { rel: "index.tsx", content: indexFile() },

@@ -43,7 +43,7 @@ export function rasterizeFile(
   w: number,
   h: number,
   scale = 2,
-  bg = "00000000"
+  bg = "00000000",
 ): { ok: boolean; reason?: string } {
   const chrome = findChrome();
   if (!chrome) return { ok: false, reason: "no Chrome binary found (set CHROME_PATH)" };
@@ -60,6 +60,10 @@ export function rasterizeFile(
   ];
   const r = spawnSync(chrome, args, { encoding: "utf8", timeout: 60000 });
   if (r.error) return { ok: false, reason: String(r.error.message ?? r.error) };
-  if (!fs.existsSync(pngOut)) return { ok: false, reason: `chrome exit ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}` };
+  if (!fs.existsSync(pngOut))
+    return {
+      ok: false,
+      reason: `chrome exit ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}`,
+    };
   return { ok: true };
 }

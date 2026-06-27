@@ -33,7 +33,10 @@ export function cssVarName(name: string): string {
 // ("1,5" is the value 1.5, not two levels). Lowercase ONLY the first segment (the
 // category: Color→color, Numbers→numbers) so deeper segments round-trip (Display, 2xl, 950).
 export function treePath(name: string): string[] {
-  const parts = name.split("/").map((s) => s.trim()).filter(Boolean);
+  const parts = name
+    .split("/")
+    .map((s) => s.trim())
+    .filter(Boolean);
   if (parts.length) parts[0] = parts[0].toLowerCase();
   return parts;
 }
@@ -47,7 +50,9 @@ const tsKey = (k: string): string =>
 export function tsAccessor(name: string): string {
   const segs = treePath(name);
   return segs
-    .map((s, i) => (/^[A-Za-z_$][\w$]*$/.test(s) ? (i === 0 ? s : `.${s}`) : `['${s.replace(/'/g, "\\'")}']`))
+    .map((s, i) =>
+      /^[A-Za-z_$][\w$]*$/.test(s) ? (i === 0 ? s : `.${s}`) : `['${s.replace(/'/g, "\\'")}']`,
+    )
     .join("");
 }
 
@@ -117,7 +122,8 @@ function modeKeyOf(v: ThemeVar, mode: string): string | null {
 export function unionModes(vars: ThemeVar[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const v of vars) for (const m of Object.keys(v.modes)) if (!seen.has(m)) (seen.add(m), out.push(m));
+  for (const v of vars)
+    for (const m of Object.keys(v.modes)) if (!seen.has(m)) (seen.add(m), out.push(m));
   return out;
 }
 
@@ -125,7 +131,8 @@ export function unionModes(vars: ThemeVar[]): string[] {
 // so codegen can index `theme[defaultMode]` without hard-coding a Figma mode name.
 export function primaryMode(vars: ThemeVar[]): string {
   const freq = new Map<string, number>();
-  for (const v of vars) if (v.defaultMode) freq.set(v.defaultMode, (freq.get(v.defaultMode) ?? 0) + 1);
+  for (const v of vars)
+    if (v.defaultMode) freq.set(v.defaultMode, (freq.get(v.defaultMode) ?? 0) + 1);
   const top = [...freq.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
   return top ?? unionModes(vars)[0] ?? "default";
 }
@@ -137,7 +144,7 @@ export function primaryMode(vars: ThemeVar[]): string {
 function assignNames(
   vars: ThemeVar[],
   baseOf: (v: ThemeVar) => string,
-  sep: string
+  sep: string,
 ): { nameByGuid: Map<string, string>; warnings: string[] } {
   const nameByGuid = new Map<string, string>();
   const taken = new Set<string>();
@@ -148,7 +155,8 @@ function assignNames(
     let name = base;
     let i = 2;
     while (taken.has(name)) name = `${base}${sep}${i++}`;
-    if (name !== base) warnings.push(`name collision: "${v.name}" → "${name}" (base "${base}" already taken)`);
+    if (name !== base)
+      warnings.push(`name collision: "${v.name}" → "${name}" (base "${base}" already taken)`);
     taken.add(name);
     nameByGuid.set(v.guid, name);
   }
@@ -162,7 +170,7 @@ function assignNames(
 // source order + hadCycle, never hangs.
 export function topoOrder(
   vars: ThemeVar[],
-  mode: string
+  mode: string,
 ): { ordered: ThemeVar[]; hadCycle: boolean } {
   const present = new Set(vars.map((v) => v.guid));
   const depOf = (v: ThemeVar): string | null => {
@@ -208,7 +216,9 @@ function buildTree(leaves: Leaf[]): { root: TreeNode; warnings: string[] } {
         cur.children.set(seg, next);
       }
       if (next.leaf !== undefined) {
-        warnings.push(`tree conflict: "${name}" nests under "${seg}" which also holds a value — value dropped`);
+        warnings.push(
+          `tree conflict: "${name}" nests under "${seg}" which also holds a value — value dropped`,
+        );
         delete next.leaf;
       }
       cur = next;
@@ -216,7 +226,9 @@ function buildTree(leaves: Leaf[]): { root: TreeNode; warnings: string[] } {
     const last = p[p.length - 1];
     const existing = cur.children.get(last);
     if (existing && existing.children.size > 0) {
-      warnings.push(`tree conflict: "${name}" is a value but "${last}" already has children — value dropped`);
+      warnings.push(
+        `tree conflict: "${name}" is a value but "${last}" already has children — value dropped`,
+      );
     } else {
       cur.children.set(last, { children: new Map(), leaf: expr });
     }
@@ -231,7 +243,8 @@ function emitTreeTS(node: TreeNode, indent: number): string {
   const lines: string[] = [];
   for (const [k, child] of node.children) {
     const key = tsKey(k);
-    if (child.leaf !== undefined && child.children.size === 0) lines.push(`${padIn}${key}: ${child.leaf},`);
+    if (child.leaf !== undefined && child.children.size === 0)
+      lines.push(`${padIn}${key}: ${child.leaf},`);
     else lines.push(`${padIn}${key}: ${emitTreeTS(child, indent + 1)},`);
   }
   return `{\n${lines.join("\n")}\n${pad}}`;
@@ -261,7 +274,10 @@ function emitWeb(vars: ThemeVar[], modes: string[], primary: string): ThemeResul
         const tname = vars.find((x) => x.guid === target)?.name;
         comment = tname ? `  /* alias → ${tname} */` : "";
       } else {
-        if (target) warnings.push(`dangling alias: "${v.name}" → ${target} (target not in catalog) — used value`);
+        if (target)
+          warnings.push(
+            `dangling alias: "${v.name}" → ${target} (target not in catalog) — used value`,
+          );
         const lit = cssLiteral(v.type, k ? v.modes[k] : null);
         if (lit.warning) warnings.push(`${v.name}: ${lit.warning}`);
         expr = lit.code;
@@ -285,27 +301,41 @@ function emitRn(vars: ThemeVar[], modes: string[], primary: string): ThemeResult
   const modeEntries: string[] = [];
   for (const mode of modes) {
     const { ordered, hadCycle } = topoOrder(vars, mode);
-    if (hadCycle) warnings.push(`alias cycle detected in mode "${mode}" — emitted remaining in source order`);
+    if (hadCycle)
+      warnings.push(`alias cycle detected in mode "${mode}" — emitted remaining in source order`);
     const decls: string[] = [];
     for (const v of ordered) {
       const k = modeKeyOf(v, mode);
       const target = k ? v.aliasTargets?.[k] : undefined;
       const ident = nameByGuid.get(v.guid)!;
       if (target && nameByGuid.has(target)) {
-        decls.push(`    const ${ident} = ${nameByGuid.get(target)}; // alias → ${guidToName.get(target)}`);
+        decls.push(
+          `    const ${ident} = ${nameByGuid.get(target)}; // alias → ${guidToName.get(target)}`,
+        );
       } else {
-        if (target) warnings.push(`dangling alias: "${v.name}" → ${target} (target not in catalog) — used value`);
+        if (target)
+          warnings.push(
+            `dangling alias: "${v.name}" → ${target} (target not in catalog) — used value`,
+          );
         const lit = literalFor(v.type, k ? v.modes[k] : null);
         if (lit.warning) warnings.push(`${v.name}: ${lit.warning}`);
-        decls.push(`    const ${ident} = ${lit.code};${target ? ` // TODO: alias target ${target} missing` : ""}`);
+        decls.push(
+          `    const ${ident} = ${lit.code};${target ? ` // TODO: alias target ${target} missing` : ""}`,
+        );
       }
     }
     // tree leaves in SOURCE order (stable shape); each leaf references its own const.
-    const leaves: Leaf[] = vars.map((v) => ({ path: treePath(v.name), expr: nameByGuid.get(v.guid)!, name: v.name }));
+    const leaves: Leaf[] = vars.map((v) => ({
+      path: treePath(v.name),
+      expr: nameByGuid.get(v.guid)!,
+      name: v.name,
+    }));
     const { root, warnings: treeWarn } = buildTree(leaves);
     warnings.push(...treeWarn);
     const tree = emitTreeTS(root, 2);
-    modeEntries.push(`  ${tsKey(mode)}: (() => {\n${decls.join("\n")}\n    return ${tree};\n  })(),`);
+    modeEntries.push(
+      `  ${tsKey(mode)}: (() => {\n${decls.join("\n")}\n    return ${tree};\n  })(),`,
+    );
   }
   const code =
     "// AUTO-GENERATED by theme-gen.mts — Figma variables → typed theme.\n" +
@@ -318,11 +348,19 @@ function emitRn(vars: ThemeVar[], modes: string[], primary: string): ThemeResult
 }
 
 // Emit a theme for ONE framework. theme-gen calls this once per requested framework.
-export function emitTheme(vars: ThemeVar[], opts: { framework: Framework; activeMode?: string }): ThemeResult {
+export function emitTheme(
+  vars: ThemeVar[],
+  opts: { framework: Framework; activeMode?: string },
+): ThemeResult {
   const modes = unionModes(vars);
   // The active mode (the single style decision) becomes :root / defaultMode; if it isn't a
   // real mode, fall back to the catalog's primary. All modes are still emitted (switchable).
-  const primary = opts.activeMode && modes.includes(opts.activeMode) ? opts.activeMode : primaryMode(vars);
-  if (modes.length === 0) return { code: opts.framework === "web" ? ":root {}\n" : "export const theme = {} as const;\n", warnings: ["no variables — emitted an empty theme"] };
+  const primary =
+    opts.activeMode && modes.includes(opts.activeMode) ? opts.activeMode : primaryMode(vars);
+  if (modes.length === 0)
+    return {
+      code: opts.framework === "web" ? ":root {}\n" : "export const theme = {} as const;\n",
+      warnings: ["no variables — emitted an empty theme"],
+    };
   return opts.framework === "web" ? emitWeb(vars, modes, primary) : emitRn(vars, modes, primary);
 }

@@ -17,8 +17,13 @@ import { emitTheme, unionModes, primaryMode, type Framework, type ThemeVar } fro
 const argv = process.argv.slice(2);
 const dir = argv[0];
 if (!dir || dir.startsWith("--"))
-  throw new Error("usage: theme-gen.mts <ir-dir> [--framework web|rn] [--mode <name>] [--out <dir>] | --list-modes");
-const flag = (n: string) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+  throw new Error(
+    "usage: theme-gen.mts <ir-dir> [--framework web|rn] [--mode <name>] [--out <dir>] | --list-modes",
+  );
+const flag = (n: string) => {
+  const i = argv.indexOf(n);
+  return i >= 0 ? argv[i + 1] : undefined;
+};
 const hasFlag = (n: string) => argv.includes(n);
 
 const fwArg = flag("--framework")?.toLowerCase();
@@ -29,7 +34,9 @@ const outDir = flag("--out");
 
 const varsPath = path.join(dir, "tokens", "variables.json");
 if (!fs.existsSync(varsPath)) {
-  console.error(`theme-gen: ${varsPath} not found — is "${dir}" a compiled IR (build-ir.mts) with the variable catalog?`);
+  console.error(
+    `theme-gen: ${varsPath} not found — is "${dir}" a compiled IR (build-ir.mts) with the variable catalog?`,
+  );
   process.exit(2);
 }
 const vars: ThemeVar[] = JSON.parse(fs.readFileSync(varsPath, "utf8"));
@@ -37,12 +44,16 @@ if (!Array.isArray(vars)) {
   console.error(`theme-gen: ${varsPath} is not an array`);
   process.exit(2);
 }
-if (vars.length === 0) console.error("theme-gen: variable catalog is empty — emitting an empty theme");
+if (vars.length === 0)
+  console.error("theme-gen: variable catalog is empty — emitting an empty theme");
 
 // Modes: --list-modes prints them (the harness asks the user which to use when >1); the
 // chosen --mode (default: manifest.activeMode) becomes :root / defaultMode in the output.
 const modes = unionModes(vars);
-const manifest = (() => { const p = path.join(dir, "manifest.json"); return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : {}; })();
+const manifest = (() => {
+  const p = path.join(dir, "manifest.json");
+  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : {};
+})();
 if (hasFlag("--list-modes")) {
   const primary = manifest.activeMode ?? primaryMode(vars);
   for (const m of modes) console.log(m === primary ? `${m} (active)` : m);
@@ -69,7 +80,9 @@ for (const framework of frameworks) {
 }
 
 if (outDir) {
-  console.error(`wrote ${outDir}/ (${written.length} file(s)): ${written.join(", ")}  [${vars.length} variables]`);
+  console.error(
+    `wrote ${outDir}/ (${written.length} file(s)): ${written.join(", ")}  [${vars.length} variables]`,
+  );
 } else {
   console.log(stdoutParts.join("\n\n"));
 }

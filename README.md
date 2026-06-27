@@ -87,13 +87,13 @@ IR node schema, the pitfalls checklist, and every script's flags).
 
 ## What's in the toolkit
 
-| Stage              | Scripts                                                                 |
-| ------------------ | ----------------------------------------------------------------------- |
-| Decode & locate    | `parse`, `tree`, `find`, `node`                                         |
-| IR spine           | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir`                     |
-| Assets             | `export-svg`, `icons`, `svg-lib`                                         |
+| Stage              | Scripts                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| Decode & locate    | `parse`, `tree`, `find`, `node`                                                                |
+| IR spine           | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir`                                            |
+| Assets             | `export-svg`, `icons`, `svg-lib`                                                               |
 | Raw query / verify | `raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames>` |
-| Test               | `selftest.mts` (`npm test`)                                             |
+| Test               | `selftest.mts` (`npm test`)                                                                    |
 
 `build-ir.mts` is the centerpiece — it compiles the decoded message into the IR every
 other step reads. `theme-gen.mts` turns the file's variables into a typed theme, and

@@ -110,7 +110,7 @@ export type VarIndex = Map<string, VarIndexEntry>;
 //   paint.colorVar = { value:{ alias:{ guid:{sessionID,localID} } }, dataType:"ALIAS", resolvedDataType:"COLOR" }
 export function colorVarToken(
   paint: any,
-  varIndex: VarIndex
+  varIndex: VarIndex,
 ): { var: string; varGuid: string; value: string | null } | null {
   const alias = paint?.colorVar?.value?.alias;
   const g = alias?.guid;
@@ -133,7 +133,7 @@ export function colorVarToken(
 // Pure: no side effects, no mutation of `paint`.
 export function resolvePaintColor(
   paint: any,
-  varIndex: VarIndex
+  varIndex: VarIndex,
 ): { hex: string | null; var: string | null; varGuid: string | null } {
   const literal = paint?.color ? colorStr(paint.color) : null;
   const bound = colorVarToken(paint, varIndex);
@@ -361,7 +361,11 @@ function fillToIR(p: any, varIndex: VarIndex): IRFill | null {
   }
   if (t === "IMAGE") {
     const h = p.image?.hash;
-    const imageHash = Array.isArray(h) ? Buffer.from(h).toString("hex") : typeof h === "string" ? h : undefined;
+    const imageHash = Array.isArray(h)
+      ? Buffer.from(h).toString("hex")
+      : typeof h === "string"
+        ? h
+        : undefined;
     return { type: "image", ...(imageHash ? { imageHash } : {}), ...op };
   }
   return null;
@@ -429,7 +433,9 @@ function strokeDetailOf(n: any): { cap?: string; join?: string; dash?: number[] 
 function buildStyle(n: any, varIndex: VarIndex): IRStyle | null {
   const s: IRStyle = {};
 
-  const fills = (n.fillPaints ?? []).map((p: any) => fillToIR(p, varIndex)).filter(Boolean) as IRFill[];
+  const fills = (n.fillPaints ?? [])
+    .map((p: any) => fillToIR(p, varIndex))
+    .filter(Boolean) as IRFill[];
   if (fills.length) s.fills = fills;
 
   const cr = cornerRadiusOf(n);
@@ -447,7 +453,11 @@ function buildStyle(n: any, varIndex: VarIndex): IRStyle | null {
       const c =
         p.type === "SOLID"
           ? resolvePaintColor(p, varIndex)
-          : { hex: p.color ? colorStr(p.color) : null, var: null as string | null, varGuid: null as string | null };
+          : {
+              hex: p.color ? colorStr(p.color) : null,
+              var: null as string | null,
+              varGuid: null as string | null,
+            };
       return {
         weight,
         align,
@@ -508,8 +518,10 @@ function buildLayout(n: any): IRLayout | null {
   if (n.stackPaddingRight) l.paddingRight = n.stackPaddingRight;
   if (n.stackPaddingBottom) l.paddingBottom = n.stackPaddingBottom;
   if (n.stackHorizontalPadding) l.paddingLeft = n.stackHorizontalPadding;
-  if (n.stackPrimaryAlignItems) l.justify = STACK_ALIGN[n.stackPrimaryAlignItems] ?? n.stackPrimaryAlignItems;
-  if (n.stackCounterAlignItems) l.align = STACK_ALIGN[n.stackCounterAlignItems] ?? n.stackCounterAlignItems;
+  if (n.stackPrimaryAlignItems)
+    l.justify = STACK_ALIGN[n.stackPrimaryAlignItems] ?? n.stackPrimaryAlignItems;
+  if (n.stackCounterAlignItems)
+    l.align = STACK_ALIGN[n.stackCounterAlignItems] ?? n.stackCounterAlignItems;
   // sizing & wrap (improvement 1-sizing): fixed vs hug self-sizing per axis, wrap.
   const ps = sizingOf(n.stackPrimarySizing);
   if (ps) l.primarySizing = ps;
@@ -626,7 +638,7 @@ function reconcileText(
   n: ResolvedNode,
   appFamilyOf: (family: string | null) => string | null,
   varIndex: VarIndex,
-  typeStyles: Map<string, IRTypography>
+  typeStyles: Map<string, IRTypography>,
 ): { text: IRTextField; font: IRFont; color: IRColor; styleRuns: number } {
   const rec = reconcileTextSize(n as any); // geometry HEURISTIC — the true last resort
   const conflicts: Conflict[] = [];
@@ -648,7 +660,7 @@ function reconcileText(
   const fontOverridden =
     !!(n as any).overrideApplied?.fontName || !!(n as any).overrideApplied?.fontSize;
   const styleKey = styleRefKey(n);
-  const style = !fontOverridden && styleKey ? typeStyles.get(styleKey) ?? null : null;
+  const style = !fontOverridden && styleKey ? (typeStyles.get(styleKey) ?? null) : null;
   const derived = fontOverridden ? null : deriveFontFromRender(n as any);
 
   // family / weight / size: RENDER (effective) → STYLE (intent) → cache → geometry.
@@ -657,9 +669,16 @@ function reconcileText(
   const weight = derived?.weight ?? style?.weight ?? nodeWeight;
   let size: number;
   let sizeSource: IRFont["sizeSource"];
-  if (derived?.size != null) { size = derived.size; sizeSource = "derived"; }
-  else if (style?.size != null) { size = style.size; sizeSource = "style"; }
-  else { size = rec.size; sizeSource = rec.source; }
+  if (derived?.size != null) {
+    size = derived.size;
+    sizeSource = "derived";
+  } else if (style?.size != null) {
+    size = style.size;
+    sizeSource = "style";
+  } else {
+    size = rec.size;
+    sizeSource = rec.source;
+  }
 
   // Is the node's cached text snapshot STALE? (font re-styled, cache not refreshed) —
   // then its cached lineHeight/textCase are unreliable too and must come from the style.
@@ -675,9 +694,16 @@ function reconcileText(
   const cacheLh = lineHeightPx((n as any).lineHeight, size);
   let lhPx: number | null;
   let lineHeightSource: IRFont["lineHeightSource"];
-  if (!stale && cacheLh != null) { lhPx = cacheLh; lineHeightSource = "fontSize"; }
-  else if (style?.lineHeightPx != null) { lhPx = style.lineHeightPx; lineHeightSource = "style"; }
-  else { lhPx = cacheLh ?? derived?.lineHeightPx ?? null; lineHeightSource = cacheLh != null ? "fontSize" : "derived"; }
+  if (!stale && cacheLh != null) {
+    lhPx = cacheLh;
+    lineHeightSource = "fontSize";
+  } else if (style?.lineHeightPx != null) {
+    lhPx = style.lineHeightPx;
+    lineHeightSource = "style";
+  } else {
+    lhPx = cacheLh ?? derived?.lineHeightPx ?? null;
+    lineHeightSource = cacheLh != null ? "fontSize" : "derived";
+  }
 
   // geometry was a GUESS — surface its conflict ONLY when geometry actually won the size.
   if (sizeSource === "geometry") conflicts.push(...rec.conflicts);
@@ -758,7 +784,7 @@ function toIR(
   acc: Mat,
   appFamilyOf: (family: string | null) => string | null,
   varIndex: VarIndex,
-  typeStyles: Map<string, IRTypography>
+  typeStyles: Map<string, IRTypography>,
 ): IRNode {
   const size = (n as any).size ?? { x: 0, y: 0 };
   const t = (n as any).transform;
@@ -854,7 +880,7 @@ export function buildScreen(
   rootAbsMat: Mat,
   appFamily: Record<string, string> = {},
   varIndex: VarIndex = new Map(),
-  typeStyles: Map<string, IRTypography> = new Map()
+  typeStyles: Map<string, IRTypography> = new Map(),
 ): IRNode {
   const appFamilyOf = (family: string | null): string | null =>
     family != null && appFamily[family] ? appFamily[family] : null;

@@ -25,7 +25,10 @@ const readJSON = (dir: string, rel: string): any => {
 
 const manifest = (dir: string): any => {
   const m = readJSON(dir, "manifest.json");
-  if (!m) { console.error(`diff-ir: ${dir}: no manifest.json — not an IR directory`); process.exit(2); }
+  if (!m) {
+    console.error(`diff-ir: ${dir}: no manifest.json — not an IR directory`);
+    process.exit(2);
+  }
   return m;
 };
 
@@ -34,12 +37,14 @@ const mNew = manifest(newDir);
 
 // --- identity guard: refuse to diff an IR against itself --------------------
 if (path.resolve(oldDir) === path.resolve(newDir)) {
-  console.error("diff-ir: refusing to diff an IR against itself (same directory given twice) — nothing to diff");
+  console.error(
+    "diff-ir: refusing to diff an IR against itself (same directory given twice) — nothing to diff",
+  );
   process.exit(2);
 }
 if (mOld.sourceHash && mOld.sourceHash === mNew.sourceHash) {
   console.error(
-    `diff-ir: refusing to diff: both IRs share sourceHash ${String(mOld.sourceHash).slice(0, 12)}… — they were built from identical bytes, nothing to diff`
+    `diff-ir: refusing to diff: both IRs share sourceHash ${String(mOld.sourceHash).slice(0, 12)}… — they were built from identical bytes, nothing to diff`,
   );
   process.exit(2);
 }
@@ -57,7 +62,7 @@ function checkStale(label: string, m: any) {
   if (cur !== stored)
     console.error(
       `⚠ ${label}: IR is STALE — its source ${srcPath} has changed since build ` +
-        `(stored ${String(stored).slice(0, 12)}… ≠ current ${cur.slice(0, 12)}…). Re-run build-ir.`
+        `(stored ${String(stored).slice(0, 12)}… ≠ current ${cur.slice(0, 12)}…). Re-run build-ir.`,
     );
 }
 checkStale("ir-old", mOld);
@@ -73,7 +78,7 @@ function setDiff<T>(
   oldItems: T[],
   newItems: T[],
   keyOf: (t: T) => string,
-  labelOf: (t: T) => string
+  labelOf: (t: T) => string,
 ): { added: string[]; removed: string[]; common: [T, T][] } {
   const oldMap = new Map(oldItems.map((i) => [keyOf(i), i]));
   const newMap = new Map(newItems.map((i) => [keyOf(i), i]));
@@ -91,7 +96,12 @@ section("Screens");
 {
   const so: string[] = mOld.artifacts?.screens ?? [];
   const sn: string[] = mNew.artifacts?.screens ?? [];
-  const d = setDiff(so, sn, (s) => s, (s) => s);
+  const d = setDiff(
+    so,
+    sn,
+    (s) => s,
+    (s) => s,
+  );
   if (!d.added.length && !d.removed.length) line("(no screens added or removed)");
   for (const a of d.added) line(`+ screen ${a}`);
   for (const r of d.removed) line(`- screen ${r}`);
@@ -102,7 +112,12 @@ section("Components");
 {
   const co: string[] = mOld.artifacts?.components ?? [];
   const cn: string[] = mNew.artifacts?.components ?? [];
-  const d = setDiff(co, cn, (s) => s, (s) => s);
+  const d = setDiff(
+    co,
+    cn,
+    (s) => s,
+    (s) => s,
+  );
   if (!d.added.length && !d.removed.length) line("(no components added or removed)");
   for (const a of d.added) line(`+ component ${a}`);
   for (const r of d.removed) line(`- component ${r}`);
@@ -127,15 +142,29 @@ section("Tokens");
   for (const file of ["tokens/colors.json", "tokens/spacing.json", "tokens/radius.json"]) {
     const o = readJSON(oldDir, file) ?? [];
     const n = readJSON(newDir, file) ?? [];
-    const d = setDiff<any>(o, n, (t) => t.id ?? t.guid, (t) => `${t.name} ${JSON.stringify(t.modes)}`);
-    for (const a of d.added) { line(`+ token ${file} ${a}`); anyTok = true; }
-    for (const r of d.removed) { line(`- token ${file} ${r}`); anyTok = true; }
+    const d = setDiff<any>(
+      o,
+      n,
+      (t) => t.id ?? t.guid,
+      (t) => `${t.name} ${JSON.stringify(t.modes)}`,
+    );
+    for (const a of d.added) {
+      line(`+ token ${file} ${a}`);
+      anyTok = true;
+    }
+    for (const r of d.removed) {
+      line(`- token ${file} ${r}`);
+      anyTok = true;
+    }
     for (const [ot, nt] of d.common) {
       const modes = new Set([...Object.keys(ot.modes ?? {}), ...Object.keys(nt.modes ?? {})]);
       for (const m of modes) {
         const ov = ot.modes?.[m];
         const nv = nt.modes?.[m];
-        if (ov !== nv) { line(`~ token ${nt.name} [${m}]: ${ov} → ${nv}`); anyTok = true; }
+        if (ov !== nv) {
+          line(`~ token ${nt.name} [${m}]: ${ov} → ${nv}`);
+          anyTok = true;
+        }
       }
     }
   }
@@ -148,10 +177,21 @@ section("Type specs");
 {
   const o = readJSON(oldDir, "tokens/typography.json") ?? [];
   const n = readJSON(newDir, "tokens/typography.json") ?? [];
-  const d = setDiff<any>(o, n, (t) => t.id ?? t.guid ?? t.name, (t) => t.name);
+  const d = setDiff<any>(
+    o,
+    n,
+    (t) => t.id ?? t.guid ?? t.name,
+    (t) => t.name,
+  );
   let anyT = false;
-  for (const a of d.added) { line(`+ type ${a}`); anyT = true; }
-  for (const r of d.removed) { line(`- type ${r}`); anyT = true; }
+  for (const a of d.added) {
+    line(`+ type ${a}`);
+    anyT = true;
+  }
+  for (const r of d.removed) {
+    line(`- type ${r}`);
+    anyT = true;
+  }
   const fields: [string, (t: any) => any][] = [
     ["family", (t) => t.family],
     ["size", (t) => t.size],
@@ -166,7 +206,10 @@ section("Type specs");
       const nv = get(nt);
       if (ov !== nv) drifts.push(`${name} ${ov}→${nv}`);
     }
-    if (drifts.length) { line(`~ type ${nt.name}: ${drifts.join(", ")}`); anyT = true; }
+    if (drifts.length) {
+      line(`~ type ${nt.name}: ${drifts.join(", ")}`);
+      anyT = true;
+    }
   }
   if (!anyT) line("(no type-spec drift)");
 }
@@ -180,7 +223,14 @@ section("Per-screen nodes & colors");
   const so: string[] = mOld.artifacts?.screens ?? [];
   const sn: string[] = mNew.artifacts?.screens ?? [];
   const shared = so.filter((s) => sn.includes(s));
-  type Flat = { path: string; name: string; type: string; hex: string | null; token: string | null; match: string | null };
+  type Flat = {
+    path: string;
+    name: string;
+    type: string;
+    hex: string | null;
+    token: string | null;
+    match: string | null;
+  };
   const flatten = (root: any): Map<string, Flat> => {
     const m = new Map<string, Flat>();
     (function walk(n: any) {
@@ -205,20 +255,32 @@ section("Per-screen nodes & colors");
     const om = flatten(o);
     const nm = flatten(n);
     const local: string[] = [];
-    for (const [p, node] of nm) if (!om.has(p)) local.push(`  + node ${node.type} "${node.name}" @ ${p}`);
-    for (const [p, node] of om) if (!nm.has(p)) local.push(`  - node ${node.type} "${node.name}" @ ${p}`);
+    for (const [p, node] of nm)
+      if (!om.has(p)) local.push(`  + node ${node.type} "${node.name}" @ ${p}`);
+    for (const [p, node] of om)
+      if (!nm.has(p)) local.push(`  - node ${node.type} "${node.name}" @ ${p}`);
     for (const [p, on] of om) {
       const nn = nm.get(p);
       if (!nn) continue;
       if (on.hex !== nn.hex)
-        local.push(`  ~ color @ ${p} (${nn.name}): ${on.hex}${tokSuffix(on)} → ${nn.hex}${tokSuffix(nn)}`);
+        local.push(
+          `  ~ color @ ${p} (${nn.name}): ${on.hex}${tokSuffix(on)} → ${nn.hex}${tokSuffix(nn)}`,
+        );
       else if (on.token !== nn.token)
         local.push(`  ~ token @ ${p} (${nn.name}): ${on.token ?? "—"} → ${nn.token ?? "—"}`);
     }
-    if (local.length) { line(`screen ${rel}:`); local.forEach(line); any = true; }
+    if (local.length) {
+      line(`screen ${rel}:`);
+      local.forEach(line);
+      any = true;
+    }
   }
   function tokSuffix(f: { token: string | null; match: string | null }): string {
-    return f.token ? ` [${f.token}${f.match ? " " + f.match : ""}]` : f.match ? ` [${f.match}]` : "";
+    return f.token
+      ? ` [${f.token}${f.match ? " " + f.match : ""}]`
+      : f.match
+        ? ` [${f.match}]`
+        : "";
   }
   if (!any) line("(no per-screen node or color drift on shared screens)");
 }

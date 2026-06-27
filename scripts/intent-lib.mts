@@ -50,7 +50,7 @@ export function repeatedStrings(texts: string[]): Map<string, number> {
 // a node with no SOLID fill is not a mono-color icon.
 export function isMonoColorIconFill(node: any): boolean {
   const solids = (node?.fillPaints ?? []).filter(
-    (p: any) => p.visible !== false && p.type === "SOLID"
+    (p: any) => p.visible !== false && p.type === "SOLID",
   );
   if (!solids.length) return false;
   return solids.every((p: any) => {

@@ -28,7 +28,11 @@ function exportName(n: ResolvedNode): string | null {
   // `name=Foobar` variant tag → take the value; strip a leading "Tabbar / " etc.
   const tag = raw.match(NAME_TAG);
   if (tag) {
-    const v = tag[1].split("/").pop()!.replace(/-filled$/i, "").trim();
+    const v = tag[1]
+      .split("/")
+      .pop()!
+      .replace(/-filled$/i, "")
+      .trim();
     if (PASCAL.test(v)) return v;
   }
   if (PASCAL.test(raw.replace(/-filled$/i, ""))) return raw.replace(/-filled$/i, "");
@@ -73,13 +77,17 @@ for (const h of hits) {
   } else byExport.set(h.export, { count: 1, mono: h.mono, sample: h });
 }
 
-console.log(`# icons under ${root.name} [${screen}] — ${hits.length} instance(s), ${byExport.size} distinct`);
+console.log(
+  `# icons under ${root.name} [${screen}] — ${hits.length} instance(s), ${byExport.size} distinct`,
+);
 if (!byExport.size) {
   console.log("# (no library-named icon instances found)");
 } else {
   console.log(`\n## inventory`);
   for (const [ex, info] of [...byExport].sort((x, y) => x[0].localeCompare(y[0])))
-    console.log(`${ex}  ×${info.count}  ${info.sample.size}${info.mono ? "  (mono — recolor in consumer)" : ""}  e.g. [${info.sample.guid}]`);
+    console.log(
+      `${ex}  ×${info.count}  ${info.sample.size}${info.mono ? "  (mono — recolor in consumer)" : ""}  e.g. [${info.sample.guid}]`,
+    );
 
   // exact union additions for the wrapper (e.g. AppIconName) — never import an
   // unmapped name.
@@ -87,5 +95,7 @@ if (!byExport.size) {
   const names = [...byExport.keys()].sort();
   console.log(`export type AppIconName =`);
   console.log(names.map((n) => `  | '${n}'`).join("\n") + ";");
-  console.log(`\n# import { ${names.join(", ")} } from 'phosphor-react-native'; // or your icon lib`);
+  console.log(
+    `\n# import { ${names.join(", ")} } from 'phosphor-react-native'; // or your icon lib`,
+  );
 }

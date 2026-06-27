@@ -24,7 +24,10 @@ export function load(messagePath: string) {
 
 export function colorStr(c: any): string {
   if (!c) return "";
-  const h = (v: number) => Math.round((v ?? 0) * 255).toString(16).padStart(2, "0");
+  const h = (v: number) =>
+    Math.round((v ?? 0) * 255)
+      .toString(16)
+      .padStart(2, "0");
   return `#${h(c.r)}${h(c.g)}${h(c.b)}${c.a !== undefined && c.a < 1 ? h(c.a) : ""}`;
 }
 
@@ -64,7 +67,7 @@ export function nodeMat(n: any): Mat {
 // intermediate frames must not be collapsed; this composes the whole chain.
 export function absMat(
   index: { byKey: Map<string, any> } | Map<string, any>,
-  guidKey: string
+  guidKey: string,
 ): Mat {
   const byKey: Map<string, any> = index instanceof Map ? index : index.byKey;
   const start = byKey.get(guidKey);
@@ -83,7 +86,7 @@ export function absMat(
 
 export function absCoords(
   index: { byKey: Map<string, any> } | Map<string, any>,
-  guidKey: string
+  guidKey: string,
 ): { absX: number; absY: number } {
   const m = absMat(index, guidKey);
   return { absX: Math.round(m[2]), absY: Math.round(m[5]) };

@@ -22,7 +22,11 @@ export function canonValue(value: string): string {
   const hx = /^#?([0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?)$/.exec(s);
   if (hx) {
     let h = hx[1].toLowerCase();
-    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    if (h.length === 3)
+      h = h
+        .split("")
+        .map((c) => c + c)
+        .join("");
     if (h.length === 8) h = h.slice(0, 6); // drop alpha for the key
     return "#" + h;
   }
@@ -43,7 +47,7 @@ export function mapNodeTokens(
   node: IRNode,
   theme: ThemeEntry[],
   confirms: Record<string, string>,
-  rejects: Set<string>
+  rejects: Set<string>,
 ): void {
   // A color BOUND to a Figma variable (match:"bound", var!=null) is GROUND TRUTH
   // from the bytes — value-matching applies to UNBOUND literals only, so never
@@ -52,7 +56,16 @@ export function mapNodeTokens(
     apply(node.color, theme, "color", node.color.hex, confirms, rejects, "token", "match");
   }
   if (node.font && typeof node.font.size === "number") {
-    apply(node.font, theme, "fontSize", String(node.font.size), confirms, rejects, "sizeToken", "sizeMatch");
+    apply(
+      node.font,
+      theme,
+      "fontSize",
+      String(node.font.size),
+      confirms,
+      rejects,
+      "sizeToken",
+      "sizeMatch",
+    );
   }
   for (const c of node.children) mapNodeTokens(c, theme, confirms, rejects);
 }
@@ -66,7 +79,7 @@ function apply(
   confirms: Record<string, string>,
   rejects: Set<string>,
   tokenField: string,
-  matchField: string
+  matchField: string,
 ): void {
   const dk = decisionKey(kind, value);
   if (dk in confirms) {
@@ -108,7 +121,7 @@ export function buildDefaultVariantMap(index: ReturnType<typeof load>): Map<stri
     const axisNames = Object.keys(axes);
     if (!axisNames.length) continue;
     const def = set.variants.find((v) =>
-      axisNames.every((a) => (axes[a][0] !== undefined ? v.props[a] === axes[a][0] : true))
+      axisNames.every((a) => (axes[a][0] !== undefined ? v.props[a] === axes[a][0] : true)),
     );
     if (def) dv.set(def.guid, `${set.name} / ${def.rawName}`);
   }
@@ -118,7 +131,7 @@ export function buildDefaultVariantMap(index: ReturnType<typeof load>): Map<stri
 export function aggregateScreenIntent(
   root: ResolvedNode,
   screenLabel: string,
-  defaultVariant: Map<string, string>
+  defaultVariant: Map<string, string>,
 ): IntentItem[] {
   const items: IntentItem[] = [];
   // repeated-string scan over THIS screen's resolved text (intent-lib)
@@ -135,13 +148,38 @@ export function aggregateScreenIntent(
     const guid = n.guid;
     if (n.type === "TEXT") {
       const chars: string = (n as any).textData?.characters ?? "";
-      const cls = classifyPlaceholderText(chars, (n as any).hasTextOverride ?? false, (n as any).masterDefaultText);
+      const cls = classifyPlaceholderText(
+        chars,
+        (n as any).hasTextOverride ?? false,
+        (n as any).masterDefaultText,
+      );
       if (cls.placeholder)
-        items.push({ kind: "placeholder", screen: screenLabel, guid, path, name: n.name, detail: `${JSON.stringify(chars)} — un-overridden master default (${cls.reason})` });
+        items.push({
+          kind: "placeholder",
+          screen: screenLabel,
+          guid,
+          path,
+          name: n.name,
+          detail: `${JSON.stringify(chars)} — un-overridden master default (${cls.reason})`,
+        });
       if (isDenylistedText(chars))
-        items.push({ kind: "denylist", screen: screenLabel, guid, path, name: n.name, detail: `${JSON.stringify(chars)} — looks like a stand-in string` });
+        items.push({
+          kind: "denylist",
+          screen: screenLabel,
+          guid,
+          path,
+          name: n.name,
+          detail: `${JSON.stringify(chars)} — looks like a stand-in string`,
+        });
       else if ((repeats.get((chars ?? "").trim()) ?? 0) > 1 && (chars ?? "").trim())
-        items.push({ kind: "repeated", screen: screenLabel, guid, path, name: n.name, detail: `${JSON.stringify(chars)} appears ${repeats.get(chars.trim())}× on this screen` });
+        items.push({
+          kind: "repeated",
+          screen: screenLabel,
+          guid,
+          path,
+          name: n.name,
+          detail: `${JSON.stringify(chars)} appears ${repeats.get(chars.trim())}× on this screen`,
+        });
       // reconciliation conflicts come from the EMITTED IR node's font.conflicts
       // (collectConflictItems) — not recomputed here.
     }
@@ -149,10 +187,24 @@ export function aggregateScreenIntent(
     if (sid) {
       const label = defaultVariant.get(key(sid));
       if (label)
-        items.push({ kind: "default-variant", screen: screenLabel, guid, path, name: n.name, detail: `→ ${label} — instance targets the default variant` });
+        items.push({
+          kind: "default-variant",
+          screen: screenLabel,
+          guid,
+          path,
+          name: n.name,
+          detail: `→ ${label} — instance targets the default variant`,
+        });
     }
     if (isMonoColorIconFill(n))
-      items.push({ kind: "mono-icon", screen: screenLabel, guid, path, name: n.name, detail: `pure white/black fill — likely recolor-in-consumer` });
+      items.push({
+        kind: "mono-icon",
+        screen: screenLabel,
+        guid,
+        path,
+        name: n.name,
+        detail: `pure white/black fill — likely recolor-in-consumer`,
+      });
     for (const c of n.children ?? []) walk(c);
   })(root);
   return items;
@@ -182,7 +234,13 @@ export function collectConflictItems(node: IRNode, screenLabel: string): IntentI
 // A fig variable whose LEAF name matches a theme entry's leaf name but whose
 // VALUE differs. By-value matching must NOT silently bind them; surface it.
 const leafName = (p: string): string => p.split(/[./]/).pop()?.toLowerCase() ?? p.toLowerCase();
-export type NameCollision = { figToken: string; figValue: string; themeToken: string; themeValue: string; leaf: string };
+export type NameCollision = {
+  figToken: string;
+  figValue: string;
+  themeToken: string;
+  themeValue: string;
+  leaf: string;
+};
 export function fontTokenCollisions(figTokens: Token[], theme: ThemeEntry[]): NameCollision[] {
   const out: NameCollision[] = [];
   const byLeaf = new Map<string, ThemeEntry[]>();

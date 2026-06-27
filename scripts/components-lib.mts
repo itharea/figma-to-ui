@@ -35,12 +35,11 @@ function parseProps(rawName: string): Record<string, string> {
   return props;
 }
 
-const axisSetOf = (props: Record<string, string>) =>
-  Object.keys(props).sort().join("|");
+const axisSetOf = (props: Record<string, string>) => Object.keys(props).sort().join("|");
 
 function variantsOf(
   set: { guid: string },
-  children: Map<string, any[]>
+  children: Map<string, any[]>,
 ): ComponentSet["variants"] | null {
   const kids = (children.get(set.guid) ?? []).filter((c) => c.visible !== false);
   const syms = kids.filter((c) => c.type === "SYMBOL");
@@ -61,7 +60,7 @@ function variantsOf(
 const PURPLE = "#9747ff";
 function hasStrokeHint(n: any): boolean {
   const purple = (n.strokePaints ?? []).some(
-    (p: any) => p.visible !== false && colorStr(p.color) === PURPLE
+    (p: any) => p.visible !== false && colorStr(p.color) === PURPLE,
   );
   return purple && Array.isArray(n.dashPattern) && n.dashPattern.length > 0;
 }
@@ -70,7 +69,7 @@ function hasStrokeHint(n: any): boolean {
 // pass false to prove the structural signal stands alone (Phase 3 acceptance).
 export function findComponentSets(
   index: ReturnType<typeof load>,
-  useStrokeHint = true
+  useStrokeHint = true,
 ): ComponentSet[] {
   const { nodes, children } = index;
   const sets: ComponentSet[] = [];
@@ -96,9 +95,7 @@ export function findComponentSets(
       if (seen.has(guid) || !hasStrokeHint(n)) continue;
       // Fallback: list whatever variant-looking SYMBOL children exist (may be lone).
       const kids = (children.get(guid) ?? []).filter((c) => c.visible !== false);
-      const syms = kids.filter(
-        (c) => c.type === "SYMBOL" && c.name && VARIANT_NAME.test(c.name)
-      );
+      const syms = kids.filter((c) => c.type === "SYMBOL" && c.name && VARIANT_NAME.test(c.name));
       sets.push({
         guid,
         name: n.name ?? n.type,
@@ -125,7 +122,7 @@ export function parseVariantMatrix(set: ComponentSet): {
   const axes: Record<string, string[]> = {};
   for (const v of set.variants) {
     for (const [axis, value] of Object.entries(v.props)) {
-      (axes[axis] ??= []);
+      axes[axis] ??= [];
       if (!axes[axis].includes(value)) axes[axis].push(value);
     }
   }
@@ -152,22 +149,17 @@ function kebab(s: string): string {
 // Map one axis VALUE to its prop-union literal (synonym, else kebab-case). Exported
 // so codegen can compute the SAME per-variant prop value the union type uses.
 export const mapValue = (v: string) => VALUE_SYNONYMS[v] ?? kebab(v);
-const union = (values: string[]) =>
-  values.map((v) => `'${mapValue(v)}'`).join(" | ");
+const union = (values: string[]) => values.map((v) => `'${mapValue(v)}'`).join(" | ");
 
 // Derive a TS prop type. Single-axis → the prop is ALWAYS named `variant`
 // (regardless of the axis's own name). Multi-axis → one prop per axis.
-export function proposePropApi(
-  matrix: ReturnType<typeof parseVariantMatrix>
-): string {
+export function proposePropApi(matrix: ReturnType<typeof parseVariantMatrix>): string {
   const axisNames = Object.keys(matrix.axes);
   if (axisNames.length === 0) return "";
   if (axisNames.length === 1) {
     return `variant: ${union(matrix.axes[axisNames[0]])}`;
   }
-  return axisNames
-    .map((axis) => `${kebab(axis)}: ${union(matrix.axes[axis])}`)
-    .join("; ");
+  return axisNames.map((axis) => `${kebab(axis)}: ${union(matrix.axes[axis])}`).join("; ");
 }
 
 // --- non-variant component property API (improvement A-props) ----------------
@@ -214,7 +206,20 @@ const NODE_FIELD: Record<string, ComponentProp["bindings"][number]["field"] | un
 // camelCase from an arbitrary prop name (transliterates Latin letters with
 // diacritics + Turkish specials to ASCII, then splits on non-word / case
 // boundaries). "Başlık" → "baslik"; "actionText" → "actionText"; "Icon" → "icon".
-const TR_MAP: Record<string, string> = { ı: "i", İ: "i", ş: "s", Ş: "s", ç: "c", Ç: "c", ğ: "g", Ğ: "g", ü: "u", Ü: "u", ö: "o", Ö: "o" };
+const TR_MAP: Record<string, string> = {
+  ı: "i",
+  İ: "i",
+  ş: "s",
+  Ş: "s",
+  ç: "c",
+  Ç: "c",
+  ğ: "g",
+  Ğ: "g",
+  ü: "u",
+  Ü: "u",
+  ö: "o",
+  Ö: "o",
+};
 function camel(s: string): string {
   const ascii = [...s]
     .map((ch) => TR_MAP[ch] ?? ch)
@@ -230,7 +235,7 @@ function camel(s: string): string {
     .map((w, i) =>
       i === 0
         ? w.charAt(0).toLowerCase() + w.slice(1)
-        : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+        : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(),
     )
     .join("");
 }
@@ -259,7 +264,7 @@ function defaultOf(def: any, kind: ComponentProp["kind"]): string | boolean | nu
 // non-variant componentPropDefs. NO side effects.
 export function extractComponentProps(
   index: ReturnType<typeof load>,
-  setGuid: string
+  setGuid: string,
 ): ComponentProp[] {
   const { byKey, children } = index;
   const setNode = byKey.get(setGuid);
@@ -321,17 +326,14 @@ export function extractComponentProps(
 // collapse e.g. a bool-visible + text pair into one optional prop in Phase B).
 // Returns groups of >1 prop name sharing a node, keyed by that node guidKey.
 // Pure/derived from extractComponentProps output — no decode access.
-export function sameNodeGroups(
-  props: ComponentProp[]
-): { node: string; props: string[] }[] {
+export function sameNodeGroups(props: ComponentProp[]): { node: string; props: string[] }[] {
   const byNode = new Map<string, Set<string>>();
   for (const p of props)
     for (const b of p.bindings) {
       (byNode.get(b.node) ?? byNode.set(b.node, new Set()).get(b.node)!).add(p.name);
     }
   const groups: { node: string; props: string[] }[] = [];
-  for (const [node, names] of byNode)
-    if (names.size > 1) groups.push({ node, props: [...names] });
+  for (const [node, names] of byNode) if (names.size > 1) groups.push({ node, props: [...names] });
   return groups;
 }
 
@@ -357,7 +359,7 @@ export type VariantBinding = {
 export function extractVariantBindings(
   index: ReturnType<typeof load>,
   setGuid: string,
-  variantGuidKeys: string[]
+  variantGuidKeys: string[],
 ): Record<string, VariantBinding[]> {
   const { byKey, children } = index;
   const setNode = byKey.get(setGuid);
@@ -406,9 +408,30 @@ export function extractVariantBindings(
 // Lives here (not in codegen.mts) so it's unit-testable in isolation with synthetic
 // ComponentProp fixtures — no decode, no IR artifact dependency.
 export type Logical =
-  | { name: string; tsType: "string"; role: "text"; figNames: string[]; defText: string | null; defKey: string }
-  | { name: string; tsType: "boolean"; role: "bool"; figNames: string[]; defKey: string; defBool: boolean | null }
-  | { name: string; tsType: "React.ReactNode"; role: "slot"; figNames: string[]; defKey: string; defSym: string | null };
+  | {
+      name: string;
+      tsType: "string";
+      role: "text";
+      figNames: string[];
+      defText: string | null;
+      defKey: string;
+    }
+  | {
+      name: string;
+      tsType: "boolean";
+      role: "bool";
+      figNames: string[];
+      defKey: string;
+      defBool: boolean | null;
+    }
+  | {
+      name: string;
+      tsType: "React.ReactNode";
+      role: "slot";
+      figNames: string[];
+      defKey: string;
+      defSym: string | null;
+    };
 
 // Derive the logical prop model for ANY component catalog record (anything with a `props`
 // array of ComponentProp). The COLLAPSE happens here: on a node carrying a BOOL-visible prop
@@ -427,7 +450,8 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
   const propsByNode = new Map<string, any[]>(); // node guid → props binding it
   for (const p of cprops) {
     if (!p.bindings?.length) continue;
-    for (const b of p.bindings) (propsByNode.get(b.node) ?? propsByNode.set(b.node, []).get(b.node)!).push(p);
+    for (const b of p.bindings)
+      (propsByNode.get(b.node) ?? propsByNode.set(b.node, []).get(b.node)!).push(p);
   }
   const logicals: Logical[] = [];
   const logicalByDefKey = new Map<string, Logical>();
@@ -446,7 +470,9 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
   for (const p of cprops) {
     if (seenDefKeys.has(p.defKey)) continue;
     // find a collapse partner on the same node (bool-visible ⊕ text-characters).
-    const node = p.bindings?.find((b: any) => b.field === "visible" || b.field === "characters")?.node;
+    const node = p.bindings?.find(
+      (b: any) => b.field === "visible" || b.field === "characters",
+    )?.node;
     const onNode = node ? (propsByNode.get(node) ?? []) : [];
     const textP = onNode.find((q) => q.kind === "text");
     const boolP = onNode.find((q) => q.kind === "boolean");
@@ -461,8 +487,12 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
       // COLLAPSE → one optional string. Name from the TEXT prop. Both defKeys map here.
       const name = uniqueName(textP.name);
       const lg: Logical = {
-        name, tsType: "string", role: "text", defKey: textP.defKey,
-        figNames: [textP.rawName, boolP.rawName], defText: typeof textP.default === "string" ? textP.default : null,
+        name,
+        tsType: "string",
+        role: "text",
+        defKey: textP.defKey,
+        figNames: [textP.rawName, boolP.rawName],
+        defText: typeof textP.default === "string" ? textP.default : null,
       };
       logicals.push(lg);
       logicalByDefKey.set(textP.defKey, lg);
@@ -473,8 +503,16 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
     }
     seenDefKeys.add(p.defKey);
     if (p.kind === "text") {
-      const lg: Logical = { name: uniqueName(p.name), tsType: "string", role: "text", defKey: p.defKey, figNames: [p.rawName], defText: typeof p.default === "string" ? p.default : null };
-      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+      const lg: Logical = {
+        name: uniqueName(p.name),
+        tsType: "string",
+        role: "text",
+        defKey: p.defKey,
+        figNames: [p.rawName],
+        defText: typeof p.default === "string" ? p.default : null,
+      };
+      logicals.push(lg);
+      logicalByDefKey.set(p.defKey, lg);
     } else if (p.kind === "boolean") {
       // a standalone BOOL binds a node's `visible` → name it show<Name> (idiomatic for a
       // visibility toggle, and it frees the bare name for a content/text prop so a
@@ -485,13 +523,29 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
         : "show" + p.name.charAt(0).toUpperCase() + p.name.slice(1);
       // carry the IR visibility default so codegen can default the prop in the destructure
       // (`show<X> = true`) → a master-visible node renders at zero props (finding #3).
-      const lg: Logical = { name: uniqueName(showName), tsType: "boolean", role: "bool", defKey: p.defKey, figNames: [p.rawName], defBool: typeof p.default === "boolean" ? p.default : null };
-      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+      const lg: Logical = {
+        name: uniqueName(showName),
+        tsType: "boolean",
+        role: "bool",
+        defKey: p.defKey,
+        figNames: [p.rawName],
+        defBool: typeof p.default === "boolean" ? p.default : null,
+      };
+      logicals.push(lg);
+      logicalByDefKey.set(p.defKey, lg);
     } else {
       // carry the instance-swap default SYMBOL guid so the slot is never emitted with no
       // default AND no TODO (finding #2) — the render flags it (best-effort named).
-      const lg: Logical = { name: uniqueName(p.name), tsType: "React.ReactNode", role: "slot", defKey: p.defKey, figNames: [p.rawName], defSym: typeof p.default === "string" ? p.default : null };
-      logicals.push(lg); logicalByDefKey.set(p.defKey, lg);
+      const lg: Logical = {
+        name: uniqueName(p.name),
+        tsType: "React.ReactNode",
+        role: "slot",
+        defKey: p.defKey,
+        figNames: [p.rawName],
+        defSym: typeof p.default === "string" ? p.default : null,
+      };
+      logicals.push(lg);
+      logicalByDefKey.set(p.defKey, lg);
     }
   }
   return { logicals, logicalByDefKey };

@@ -15,12 +15,16 @@ const positional = process.argv.slice(3).filter((a) => !a.startsWith("--"));
 const target = positional[0];
 const outFile = positional[1];
 if (!target || !outFile)
-  throw new Error("usage: export-svg.mts <message.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]");
+  throw new Error(
+    "usage: export-svg.mts <message.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]",
+  );
 
 const geo = extractGeometry(index, target);
 const svg = toSvgString(geo, { recolor });
 fs.writeFileSync(outFile, svg);
-console.log(`wrote ${outFile}: ${geo.width}x${geo.height}, ${geo.paths.length} paths, ${(svg.length / 1024).toFixed(1)}KB`);
+console.log(
+  `wrote ${outFile}: ${geo.width}x${geo.height}, ${geo.paths.length} paths, ${(svg.length / 1024).toFixed(1)}KB`,
+);
 
 // --png: rasterize the just-written SVG via headless Chrome @3x. Degrades gracefully.
 if (png) {
