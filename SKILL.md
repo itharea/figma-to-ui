@@ -10,8 +10,9 @@ drive a fixed sequence to a pixel-faithful app/website:
 
 ```
 parse → build IR → theme (pick mode) → codegen (faithful scaffold + owned icons)
-                                              └─▶ ELEVATE  (one subagent per component — REQUIRED)
-                                                      └─▶ assemble screens (one subagent per screen)
+                                              └─▶ GROUP (propose batches → confirm → groups-<kind>.json)
+                                                      └─▶ ELEVATE (one subagent per GROUP — REQUIRED)
+                                                              └─▶ assemble screens (one subagent per screen GROUP)
 ```
 
 The foundation, in order: **(1)** real theming from the file's variables, **(2)** 1:1
@@ -49,6 +50,7 @@ harness; reach for it for a specific field.
 |---|---|
 | Step 1/4 | **Scope** — which pages are canonical, and which component sets to build. **Read the set inventory and identify platform/device chrome yourself** (judgment, not a script — set names are often non-English), then propose a keep/exclude split for the user to confirm. |
 | Step 3 | **Mode** — when the catalog has >1 variable mode, which one to style at. Skip the question when there's only one. |
+| Step 5 | **Grouping** — how to batch the in-scope components into subagent calls (and screens, Step 6). Score each unit's complexity, propose batches that keep related units together and isolate high-complexity ones, each packed as large as one subagent's context allows (fewest calls wins; a homogeneous low-complexity family collapses to a single subagent regardless of count). Confirm membership and granularity with the user, then write `groups-<kind>.json`. |
 
 ---
 
@@ -140,24 +142,78 @@ The scaffold is **faithful but verbose — raw material, not the finished compon
 variant on purpose: Figma variants often have different frame structures; collapsing them to CSS
 conditionals would break structure.
 
-## Step 5 — Elevate the scaffold (REQUIRED — the deliverable)
+## Step 5 — Group, then elevate the scaffold (REQUIRED — the deliverable)
 
-The scaffold is never shipped. **Spawn the elevate subagent once per in-scope component** —
-`figma-to-ui/agents/elevate.md` — passing the component's paths (slug, scaffold dir, IR component
-JSON, out file, theme note). The codegen scaffold is its FIXED source of truth: it refactors form
-(opaque keys → semantic names, N near-identical variant files → one prop-driven component, repeated
-subtrees → shared sub-components, variant axes → props) **without changing a single resolved value**
-(geometry, padding, gap, radius, colour token, typography, borders, effects, absolute position, the
-variant→structure map). It resolves every `// TODO` and ships zero. Icons already arrive wired as
-`<NameIcon size color/>` — it preserves them.
+The scaffold is never shipped. Every in-scope component is still elevated — grouping changes only
+**how many subagent calls** do it (fewer, larger calls amortize the fixed per-call overhead and
+flatten the rate-limit spike), never the coverage.
+
+### Group into subagent batches
+
+A harness judgment call (like Scope and Mode), confirmed with the user before any subagent runs.
+It operates **only on the in-scope set** — grouping never re-opens the Scope decision.
+
+1. **Inventory** the in-scope units: variant count per set (`raw.mts components`) and node count
+   (the IR component JSON).
+2. **Score complexity** with a simple signal — e.g. `variants × nodes × structural-group count`.
+   This separates the high-complexity units from the rest.
+3. **Propose batches.** Keep related/similar units together so shared sub-structure is extracted
+   once; isolate a high-complexity unit in its own batch; collapse a homogeneous low-complexity
+   family into a single batch regardless of member count; pack each batch as large as one
+   subagent's context reliably handles (read-footprint of the grouped scaffolds + headroom for the
+   output it writes + reasoning). **No count caps — the ceiling is context capacity, and the fewest
+   batches wins.**
+4. **Confirm with the user.** Present the proposed batches; let them adjust **membership** and
+   **granularity** (coarser = fewer/larger batches, bigger blast radius; finer = more/smaller
+   batches, smaller blast radius). Granularity is the user's lever in place of any hardcoded cap.
+5. **Record** the confirmed plan to `$WORK/groups-elevate.json`, then spawn one subagent per group
+   from it.
+
+```jsonc
+{
+  "kind": "elevate",            // or "assemble" (Step 6)
+  "irDir": "ir-<name>",
+  "themeNote": "<the theme import + how bound values reference it>",
+  "componentsDir": "<assemble only: where the elevated components live>",
+  "groups": [
+    {
+      "id": "<stable id>",
+      "rationale": "<why these are together / why solo>",
+      "members": [
+        // elevate:  { slug, scaffoldDir, irComponentJson, outFile }
+        // assemble: { slug, screenJson, outFile }
+      ]
+    }
+  ]
+}
+```
+
+### Elevate
+
+**Spawn the elevate subagent once per group in `groups-elevate.json`** —
+`figma-to-ui/agents/elevate.md` — passing the group's member list (each member's slug, scaffold
+dir, IR component JSON, out file) and the shared theme note. The codegen scaffold is its FIXED
+source of truth: it refactors form (opaque keys → semantic names, N near-identical variant files →
+one prop-driven component, repeated subtrees → shared sub-components, variant axes → props)
+**without changing a single resolved value** (geometry, padding, gap, radius, colour token,
+typography, borders, effects, absolute position, the variant→structure map). It resolves every
+`// TODO` and ships zero. Icons already arrive wired as `<NameIcon size color/>` — it preserves
+them. When the same subtree recurs across members of a group, it is extracted once and shared —
+this changes only where the code lives, never a resolved value.
 
 This is unconditional: codegen makes the scaffold data-complete (icons + images wired), so there is
 no precondition to wait on and no reason to skip. A raw scaffold presented as finished is a defect.
 
 ## Step 6 — Assemble the screens
 
-**Spawn the assemble-screen subagent once per screen** — `figma-to-ui/agents/assemble-screen.md` —
-passing the screen IR path, the elevated components dir, the theme note, and the out file. It walks
+**Group the in-scope screens with the same mechanism as Step 5** (`raw.mts`/screen IR inventory →
+score `nodes × instances` → propose batches that keep related screens together, isolate
+high-complexity screens, and pack each to context capacity → confirm membership & granularity →
+write `$WORK/groups-assemble.json` with `kind: "assemble"`).
+
+**Spawn the assemble-screen subagent once per screen group in `groups-assemble.json`** —
+`figma-to-ui/agents/assemble-screen.md` — passing the group's member list (each member's slug,
+screen IR path, and out file), the shared elevated components dir, and the theme note. It walks
 `ir-<name>/screens/<page>/<screen>.json`, renders every component **instance through the elevated
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
 rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `absX/absY` for absolute children). It
