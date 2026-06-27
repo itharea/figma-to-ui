@@ -117,7 +117,7 @@ function resolveInstanceInto(
   for (const f of ["stackMode", "stackSpacing", "stackVerticalPadding", "stackHorizontalPadding", "stackPaddingBottom", "stackPaddingRight", "stackPrimaryAlignItems", "stackCounterAlignItems", "stackPrimarySizing", "stackCounterSizing", "stackWrap", "cornerRadius"]) {
     if (r[f] === undefined && master[f] !== undefined) r[f] = master[f];
   }
-  if (!r.fillPaints?.length && master.fillPaints?.length) r.fillPaints = master.fillPaints;
+  if (!(r.fillPaints as any[] | undefined)?.length && master.fillPaints?.length) r.fillPaints = master.fillPaints;
 
   // Compose master CHILDREN (drop master's own root transform — the instance's
   // transform is the on-screen placement). Each child keeps its master-relative

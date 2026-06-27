@@ -336,14 +336,14 @@ const styleKey = (n: IRNode) => `n_${(n.id || n.guid || "x").replace(/[^A-Za-z0-
 // color expression with token provenance; pushes a TODO on match:none/nearest.
 function colorRef(
   c: { hex: string | null; var?: string | null; token?: string | null; match?: string | null } | undefined,
-  label: string, todos: string[]
+  label: string, push: (m: string) => void
 ): string {
   if (!c || !c.hex) return "'transparent'";
   // Bound to a Figma variable → reference the generated theme, not the literal (issue #17).
   if (c.var) return themeRef(c.var, false);
   if (c.token) return c.token;
   if (c.match === "none" || (typeof c.match === "string" && c.match.startsWith("nearest"))) {
-    todos.push(`${label} color ${c.hex} is "${c.match}" against the theme — review the literal during elevation (kept faithfully)`);
+    push(`${label} color ${c.hex} is "${c.match}" against the theme — review the literal during elevation (kept faithfully)`);
     return `'${c.hex}' /* REVIEW: ${c.match} token */`;
   }
   return `'${c.hex}'`;
@@ -771,7 +771,7 @@ function renderVariant(v: any): VariantRender {
 
   // node guid → logical prop, via THIS variant's bindings (defKey-joined). A node may
   // carry a text binding, a visibility binding, an instance-swap binding, or several.
-  const bindingsOf = new Map<string, { text?: Logical; bool?: Logical; slot?: Logical }>();
+  const bindingsOf = new Map<string, { text?: Extract<Logical, { role: "text" }>; bool?: Logical; slot?: Extract<Logical, { role: "slot" }> }>();
   for (const b of (v.bindings ?? []) as any[]) {
     const lg = logicalByDefKey.get(b.defKey);
     if (!lg) continue;
