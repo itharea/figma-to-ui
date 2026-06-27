@@ -888,6 +888,26 @@ type VariantRender = {
   todos: string[];
 };
 
+// Per-node context threaded from emit() into the per-case render helpers below — the
+// values emit() computes once at the top of each node (everything else they need is
+// closed over from renderVariant's scope).
+type NodeCtx = {
+  n: IRNode;
+  depth: number;
+  binds:
+    | {
+        text?: Extract<Logical, { role: "text" }>;
+        bool?: Logical;
+        slot?: Extract<Logical, { role: "slot" }>;
+      }
+    | undefined;
+  pad: string;
+  sk: string;
+  styleAttr: string;
+  prefixBody: (body: string) => string;
+  kidsAll: IRNode[];
+};
+
 function renderVariant(v: any): VariantRender {
   const propKey = variantPropKey(v);
   const todos: string[] = [];
@@ -1063,63 +1083,8 @@ function renderVariant(v: any): VariantRender {
     }
 
     // INSTANCE_SWAP slot node → render the ReactNode prop where the instance sits.
-    if (binds?.slot) {
-      usedProps.add(binds.slot.name);
-      // #4 (round 2): an instance-swap slot is an icon/content placeholder — center the
-      // injected {prop} like a single-icon wrapper, else an inlined <svg>/{icon} aligns
-      // to the text baseline (the "Hepsi ›" caret floats). Skip when the slot defines its
-      // OWN auto-layout (that flow already positions the content).
-      const slotBody = nodeStyleBody(n, push);
-      const body = n.layout
-        ? slotBody
-        : [slotBody, `display: 'flex',`, `alignItems: 'center',`, `justifyContent: 'center',`]
-            .filter(Boolean)
-            .join("\n");
-      styles.push({ key: sk, body: prefixBody(body) });
-      // NEVER leave a slot with no default AND no marker (finding #2): the master swaps a
-      // default symbol in here, so always flag it (best-effort named via the screens
-      // artifacts) — otherwise the zero-prop render is silently empty with nothing to catch.
-      const slotLg = binds.slot;
-      const defSym = slotLg.role === "slot" ? slotLg.defSym : null;
-      // Render the default glyph BEHIND the prop ({slot ?? <Default/>}) so a zero-prop render
-      // shows the master's default icon instead of nothing (findings #2 / defects D2,D3).
-      let defaultEl = "null";
-      if (defSym) {
-        const defNode = findNodeByGuid(defSym);
-        const defFills = defNode ? collectVectorFills(defNode) : [];
-        const icon = ownIcon(
-          { guid: defSym, name: defNode?.name },
-          defFills.length ? defFills.length === 1 : undefined,
-        );
-        if (icon) {
-          iconImports.set(icon.Name, icon.file);
-          const sizeAttr = defNode?.box?.w ? ` size={${defNode.box.w}}` : "";
-          // Icon colour: the default symbol's own fill if it has one, ELSE the CONTEXTUAL
-          // colour this slot is recoloured to (read from the slot instance's override — e.g. a
-          // filled button paints its icon praline-50). Without this a mono icon falls back to
-          // currentColor and renders the wrong colour (dark icon on a dark button).
-          const slotColor =
-            defFills.length === 1
-              ? { hex: defFills[0].hex, var: defFills[0].var as string | null }
-              : iconOverrideColor(n.guid);
-          const colorAttr =
-            icon.mono && slotColor && slotColor.hex
-              ? ` color={${colorRef({ hex: slotColor.hex, var: slotColor.var, match: slotColor.var ? "bound" : null }, `${n.name} default icon`, push)}}`
-              : "";
-          defaultEl = `<${icon.Name}${sizeAttr}${colorAttr} />`;
-        } else {
-          push(
-            `instance-swap "${slotLg.name}": default ${defNode?.name ? `"${defNode.name}" ` : ""}(${defSym}) — no geometry extracted; pass ${slotLg.name} or it renders empty`,
-          );
-        }
-      } else {
-        push(
-          `instance-swap "${slotLg.name}": no IR default — pass ${slotLg.name} or it renders empty`,
-        );
-      }
-      const el = `${pad}<${Box} ${styleAttr}>{${slotLg.name} ?? ${defaultEl}}</${Box}>`;
-      return wrapConditional(el, binds, depth, n);
-    }
+    if (binds?.slot)
+      return emitSlotNode({ n, depth, binds, pad, sk, styleAttr, prefixBody, kidsAll });
 
     // NESTED COMPONENT → reference it as a child component instead of inlining the
     // resolved subtree (the design uses it AS a component). Gated on !isVectorOnly so
@@ -1140,61 +1105,8 @@ function renderVariant(v: any): VariantRender {
     // logo) OR a vector-only icon INSTANCE. NOT one sub-icon per child: the previous per-vector
     // split left the pieces mis-positioned by their wrappers. A frame with an instance/slot
     // child is a container (keeps its bg + slot), so it is deliberately excluded here.
-    if (isCompositeVectorGlyph(n) || (n.type === "instance" && isVectorOnly(n))) {
-      // Icons are an INTERNAL codegen step: export the geometry (svg-lib, from the decoded
-      // message.json) into an owned recolorable component and drive its colour from the IR's
-      // (override-aware) resolved fills — a mono icon gets currentColor + the resolved token
-      // (fixes the baked-master-fill defect). The sized wrapper still flex-centres the glyph;
-      // absolute placement / root-style merge ride on it exactly as before.
-      const fills = collectVectorFills(n);
-      // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
-      // fill/stroke colour override (the common case — icons are recoloured via an override
-      // the IR drops). null ⇒ the icon keeps its currentColor default and inherits context.
-      const iconColor =
-        fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
-      const monoHint = fills.length ? fills.length === 1 : iconColor ? true : undefined;
-      const icon = ownIcon(n, monoHint);
-      const box = [
-        n.box?.w ? `width: ${n.box.w},` : "",
-        n.box?.h ? `height: ${n.box.h},` : "",
-        `display: 'flex',`,
-        `alignItems: 'center',`,
-        `justifyContent: 'center',`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-      styles.push({ key: sk, body: prefixBody(box) });
-      if (icon) {
-        iconImports.set(icon.Name, icon.file);
-        const sizeAttr = n.box?.w ? ` size={${n.box.w}}` : "";
-        const colorAttr =
-          icon.mono && iconColor
-            ? ` color={${colorRef({ hex: iconColor.hex, var: iconColor.var, match: iconColor.var ? "bound" : null }, `${n.name} icon`, push)}}`
-            : "";
-        const el = `${pad}<${Box} ${styleAttr}><${icon.Name}${sizeAttr}${colorAttr} /></${Box}>`;
-        return wrapConditional(el, binds, depth, n);
-      }
-      // fallback — ownIcon produced nothing. Two cases:
-      // (a) the geometry source WAS available (--svg + --out) but the vector yields no drawable
-      //     paths → it's an INVISIBLE structural layer (e.g. a paintless vector-network base in a
-      //     stroke glyph). Emit an empty box, NOT a scary export-svg TODO for something that
-      //     draws nothing.
-      if (svgIndex && outDir) {
-        const el = `${pad}<${Box} ${styleAttr} />`;
-        return wrapConditional(el, binds, depth, n);
-      }
-      // (b) no geometry source (no --svg/--out) → keep the export-svg placeholder so the user
-      //     knows to pass it.
-      const fillNote = fills.length
-        ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
-        : "";
-      const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
-      push(
-        `icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — pass --svg <message.json> to export + wire it (or run export-svg.mts and inline)`,
-      );
-      const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid})${fillNote} */}</${Box}>`;
-      return wrapConditional(el, binds, depth, n);
-    }
+    if (isCompositeVectorGlyph(n) || (n.type === "instance" && isVectorOnly(n)))
+      return emitVectorGlyph({ n, depth, binds, pad, sk, styleAttr, prefixBody, kidsAll });
 
     // container / leaf box. Recurse into children.
     styles.push({ key: sk, body: prefixBody(nodeStyleBody(n, push)) });
@@ -1254,6 +1166,124 @@ function renderVariant(v: any): VariantRender {
       cond.role === "text" ? `${cond.name} != null` : cond.name === undefined ? "true" : cond.name;
     const body = el.replace(new RegExp(`^${pad}`), "");
     return `${pad}{${test} && (\n${ind(body, 2).replace(/^/, pad)}\n${pad})}`;
+  }
+
+  // INSTANCE_SWAP slot → render the ReactNode prop where the instance sits, with the
+  // master's default glyph behind it ({slot ?? <Default/>}). Dispatched from emit().
+  function emitSlotNode(ctx: NodeCtx): string {
+    const { n, depth, binds, pad, sk, styleAttr, prefixBody } = ctx;
+    const slotLg = binds!.slot!; // emit() only dispatches here when binds.slot is present
+    usedProps.add(slotLg.name);
+    // #4 (round 2): an instance-swap slot is an icon/content placeholder — center the
+    // injected {prop} like a single-icon wrapper, else an inlined <svg>/{icon} aligns
+    // to the text baseline (the "Hepsi ›" caret floats). Skip when the slot defines its
+    // OWN auto-layout (that flow already positions the content).
+    const slotBody = nodeStyleBody(n, push);
+    const body = n.layout
+      ? slotBody
+      : [slotBody, `display: 'flex',`, `alignItems: 'center',`, `justifyContent: 'center',`]
+          .filter(Boolean)
+          .join("\n");
+    styles.push({ key: sk, body: prefixBody(body) });
+    // NEVER leave a slot with no default AND no marker (finding #2): the master swaps a
+    // default symbol in here, so always flag it (best-effort named via the screens
+    // artifacts) — otherwise the zero-prop render is silently empty with nothing to catch.
+    const defSym = slotLg.role === "slot" ? slotLg.defSym : null;
+    let defaultEl = "null";
+    if (defSym) {
+      const defNode = findNodeByGuid(defSym);
+      const defFills = defNode ? collectVectorFills(defNode) : [];
+      const icon = ownIcon(
+        { guid: defSym, name: defNode?.name },
+        defFills.length ? defFills.length === 1 : undefined,
+      );
+      if (icon) {
+        iconImports.set(icon.Name, icon.file);
+        const sizeAttr = defNode?.box?.w ? ` size={${defNode.box.w}}` : "";
+        // Icon colour: the default symbol's own fill if it has one, ELSE the CONTEXTUAL
+        // colour this slot is recoloured to (read from the slot instance's override — e.g. a
+        // filled button paints its icon praline-50). Without this a mono icon falls back to
+        // currentColor and renders the wrong colour (dark icon on a dark button).
+        const slotColor =
+          defFills.length === 1
+            ? { hex: defFills[0].hex, var: defFills[0].var as string | null }
+            : iconOverrideColor(n.guid);
+        const colorAttr =
+          icon.mono && slotColor && slotColor.hex
+            ? ` color={${colorRef({ hex: slotColor.hex, var: slotColor.var, match: slotColor.var ? "bound" : null }, `${n.name} default icon`, push)}}`
+            : "";
+        defaultEl = `<${icon.Name}${sizeAttr}${colorAttr} />`;
+      } else {
+        push(
+          `instance-swap "${slotLg.name}": default ${defNode?.name ? `"${defNode.name}" ` : ""}(${defSym}) — no geometry extracted; pass ${slotLg.name} or it renders empty`,
+        );
+      }
+    } else {
+      push(
+        `instance-swap "${slotLg.name}": no IR default — pass ${slotLg.name} or it renders empty`,
+      );
+    }
+    const el = `${pad}<${Box} ${styleAttr}>{${slotLg.name} ?? ${defaultEl}}</${Box}>`;
+    return wrapConditional(el, binds, depth, n);
+  }
+
+  // Composite vector glyph / vector-only icon instance → export the geometry into an owned,
+  // recolorable icon component (svg-lib) and render it centered. Dispatched from emit().
+  function emitVectorGlyph(ctx: NodeCtx): string {
+    const { n, depth, binds, pad, sk, styleAttr, prefixBody } = ctx;
+    // Icons are an INTERNAL codegen step: export the geometry (svg-lib, from the decoded
+    // message.json) into an owned recolorable component and drive its colour from the IR's
+    // (override-aware) resolved fills — a mono icon gets currentColor + the resolved token
+    // (fixes the baked-master-fill defect). The sized wrapper still flex-centres the glyph;
+    // absolute placement / root-style merge ride on it exactly as before.
+    const fills = collectVectorFills(n);
+    // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
+    // fill/stroke colour override (the common case — icons are recoloured via an override
+    // the IR drops). null ⇒ the icon keeps its currentColor default and inherits context.
+    const iconColor =
+      fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
+    const monoHint = fills.length ? fills.length === 1 : iconColor ? true : undefined;
+    const icon = ownIcon(n, monoHint);
+    const box = [
+      n.box?.w ? `width: ${n.box.w},` : "",
+      n.box?.h ? `height: ${n.box.h},` : "",
+      `display: 'flex',`,
+      `alignItems: 'center',`,
+      `justifyContent: 'center',`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    styles.push({ key: sk, body: prefixBody(box) });
+    if (icon) {
+      iconImports.set(icon.Name, icon.file);
+      const sizeAttr = n.box?.w ? ` size={${n.box.w}}` : "";
+      const colorAttr =
+        icon.mono && iconColor
+          ? ` color={${colorRef({ hex: iconColor.hex, var: iconColor.var, match: iconColor.var ? "bound" : null }, `${n.name} icon`, push)}}`
+          : "";
+      const el = `${pad}<${Box} ${styleAttr}><${icon.Name}${sizeAttr}${colorAttr} /></${Box}>`;
+      return wrapConditional(el, binds, depth, n);
+    }
+    // fallback — ownIcon produced nothing. Two cases:
+    // (a) the geometry source WAS available (--svg + --out) but the vector yields no drawable
+    //     paths → it's an INVISIBLE structural layer (e.g. a paintless vector-network base in a
+    //     stroke glyph). Emit an empty box, NOT a scary export-svg TODO for something that
+    //     draws nothing.
+    if (svgIndex && outDir) {
+      const el = `${pad}<${Box} ${styleAttr} />`;
+      return wrapConditional(el, binds, depth, n);
+    }
+    // (b) no geometry source (no --svg/--out) → keep the export-svg placeholder so the user
+    //     knows to pass it.
+    const fillNote = fills.length
+      ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
+      : "";
+    const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
+    push(
+      `icon/vector "${n.name}" (${n.guid}) ${size}${fillNote} — pass --svg <message.json> to export + wire it (or run export-svg.mts and inline)`,
+    );
+    const el = `${pad}<${Box} ${styleAttr}>{/* TODO: export "${n.name}" via export-svg (${n.guid})${fillNote} */}</${Box}>`;
+    return wrapConditional(el, binds, depth, n);
   }
 
   const jsx = emit(subtree, 0, false);
