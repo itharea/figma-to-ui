@@ -1,4 +1,4 @@
-// build-ir.mts — the deterministic IR compiler (IR-PLAN Phases 0–1 / spec phase-06).
+// build-ir.mts — the deterministic IR compiler.
 // Stands up a scoped, provenance-stamped IR: manifest + raw-map + fonts + tokens/*
 // + components/*. NO screen resolution yet (Phase 7). Everything emitted here is a
 // PURE FUNCTION OF THE BYTES — no heuristic picks, no decisions overlay. The only
@@ -13,8 +13,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { load, absMat } from "./lib.mts";
-import { resolveVariables, loadTheme, type ThemeEntry } from "./tokens-lib.mts";
+import { load, absMat } from "../lib/figma-index.mts";
+import { resolveVariables, loadTheme, type ThemeEntry } from "../lib/tokens-lib.mts";
 import {
   findComponentSets,
   parseVariantMatrix,
@@ -22,9 +22,15 @@ import {
   extractComponentProps,
   sameNodeGroups,
   extractVariantBindings,
-} from "./components-lib.mts";
-import { resolveScreen, type ResolvedNode } from "./resolve-lib.mts";
-import { buildScreen, registerRawMap, provenanceViolations, type IRNode, type VarIndex } from "./screens-lib.mts";
+} from "../lib/components-lib.mts";
+import { resolveScreen, type ResolvedNode } from "../lib/resolve-lib.mts";
+import {
+  buildScreen,
+  registerRawMap,
+  provenanceViolations,
+  type IRNode,
+  type VarIndex,
+} from "../lib/screens-lib.mts";
 import {
   mapNodeTokens,
   aggregateScreenIntent,
@@ -32,10 +38,10 @@ import {
   buildDefaultVariantMap,
   fontTokenCollisions,
   type IntentItem,
-} from "./mapping-lib.mts";
-import { unionModes, primaryMode } from "./theme-lib.mts";
+} from "../lib/mapping-lib.mts";
+import { unionModes, primaryMode } from "../lib/theme-lib.mts";
+import { uniqueSlug } from "../lib/naming.mts";
 import {
-  uniqueSlug,
   splitTokens,
   toIRTokens,
   assembleTypography,
@@ -45,7 +51,7 @@ import {
   scopedScreenRoots,
   pageOf,
   type IRTypography,
-} from "./ir-lib.mts";
+} from "../lib/ir-lib.mts";
 
 const IR_SCHEMA_VERSION = 1;
 
@@ -53,7 +59,7 @@ const argv = process.argv.slice(2);
 const msgPath = argv[0];
 if (!msgPath || msgPath.startsWith("--"))
   throw new Error(
-    "usage: build-ir.mts <message.json> --scope <pages|guids> [--theme <path>] [--mode <name>] [--out ir-<name>] [--force]"
+    "usage: build-ir.mts <message.json> --scope <pages|guids> [--theme <path>] [--mode <name>] [--out ir-<name>] [--force]",
   );
 
 // positionally-tolerant flag scan
@@ -64,14 +70,19 @@ function flag(name: string): string | undefined {
 const hasFlag = (name: string) => argv.includes(name);
 
 const scopeArg = flag("--scope");
-if (!scopeArg) throw new Error("--scope is mandatory: --scope <comma-separated page names | guidKeys | 'all'>");
+if (!scopeArg)
+  throw new Error("--scope is mandatory: --scope <comma-separated page names | guidKeys | 'all'>");
 const themePath = flag("--theme"); // brownfield: map IR color/font.size → code tokens by value
 const force = hasFlag("--force");
 // The single style decision: which variable MODE to resolve styles at (Light/Dark/brand).
 // Empty ⇒ each variable's own collection default. The harness asks only when >1 mode exists.
 const modeArg = flag("--mode") ?? "";
 
-const name = path.basename(msgPath).replace(/^(msg-|message[-_]?)/, "").replace(/\.json$/, "") || "new";
+const name =
+  path
+    .basename(msgPath)
+    .replace(/^(msg-|message[-_]?)/, "")
+    .replace(/\.json$/, "") || "new";
 const outDir = flag("--out") ?? `ir-${name}`;
 
 // --- source hash (staleness contract) ---------------------------------------
@@ -83,13 +94,15 @@ const manifestPath = path.join(outDir, "manifest.json");
 if (fs.existsSync(manifestPath)) {
   const prev = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   if (prev.sourceHash === sourceHash && (prev.requestedMode ?? "") === modeArg && !force) {
-    console.error(`no-op: ${outDir} already built from this source + mode (use --force to rebuild)`);
+    console.error(
+      `no-op: ${outDir} already built from this source + mode (use --force to rebuild)`,
+    );
     console.log(JSON.stringify({ noop: true, out: outDir, sourceHash }, null, 2));
     process.exit(0);
   }
   if (prev.sourceHash !== sourceHash && !force)
     throw new Error(
-      `refusing to overwrite ${outDir}: it was built from a DIFFERENT source (hash ${String(prev.sourceHash).slice(0, 12)}… ≠ ${sourceHash.slice(0, 12)}…). Pass --force or pick another --out.`
+      `refusing to overwrite ${outDir}: it was built from a DIFFERENT source (hash ${String(prev.sourceHash).slice(0, 12)}… ≠ ${sourceHash.slice(0, 12)}…). Pass --force or pick another --out.`,
     );
 }
 
@@ -100,11 +113,16 @@ const index = load(msgPath);
 // --- scope resolution -------------------------------------------------------
 // --scope is a comma list of page NAMES (default) or 'all'. (guidKey scoping is a
 // superset hook for Phase 7's screen pass; pages cover this phase's contracts.)
-const scopeRaw = scopeArg.split(",").map((s) => s.trim()).filter(Boolean);
+const scopeRaw = scopeArg
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const allPages = scopeRaw.length === 1 && scopeRaw[0].toLowerCase() === "all";
 const scopePages = allPages ? null : new Set(scopeRaw.map((s) => s.toLowerCase()));
 const scoped = scopedRawNodes(index, scopePages);
-console.error(`scope: ${allPages ? "all pages" : scopeRaw.join(", ")} → ${scoped.length} raw nodes`);
+console.error(
+  `scope: ${allPages ? "all pages" : scopeRaw.join(", ")} → ${scoped.length} raw nodes`,
+);
 
 // --- pass 2a: primitive variable tokens -------------------------------------
 console.error("pass 2a: variable tokens (alias chains collapsed)");
@@ -119,7 +137,7 @@ const { colors, spacing, radius } = splitTokens(resolvedVars);
 // the lossless source theme-gen reads. splitTokens' colors/spacing/radius are a subset.
 const variables = toIRTokens(resolvedVars);
 
-// Variable-binding index (improvement A-variables / spec #3): variable guidKey →
+// Variable-binding index: variable guidKey →
 // { name, value, mode }, built ONCE from the resolved COLOR variables. `value` is the
 // variable's RESOLVED concrete hex at the variable's collection DEFAULT mode (the set's
 // first variableSetModes entry, by Figma's own ordering) — NOT a blind first-of-object
@@ -137,7 +155,9 @@ const variables = toIRTokens(resolvedVars);
 const modes = unionModes(variables);
 const activeMode = modeArg && modes.includes(modeArg) ? modeArg : primaryMode(variables);
 if (modeArg && !modes.includes(modeArg))
-  console.error(`  ⚠ --mode "${modeArg}" not in [${modes.join(", ")}] — using primary "${activeMode}"`);
+  console.error(
+    `  ⚠ --mode "${modeArg}" not in [${modes.join(", ")}] — using primary "${activeMode}"`,
+  );
 
 const varIndex: VarIndex = new Map();
 for (const t of resolvedVars)
@@ -147,7 +167,9 @@ for (const t of resolvedVars)
       value: t.modes[activeMode] ?? t.modes[t.defaultMode] ?? Object.values(t.modes)[0] ?? null,
       mode: t.modes[activeMode] != null ? activeMode : t.defaultMode,
     });
-console.error(`  variable-binding index: ${varIndex.size} color variable(s); ${variables.length} variable(s) total; mode "${activeMode}" of [${modes.join(", ")}]`);
+console.error(
+  `  variable-binding index: ${varIndex.size} color variable(s); ${variables.length} variable(s) total; mode "${activeMode}" of [${modes.join(", ")}]`,
+);
 
 // --- pass 2b: composite styles ---------------------------------------------
 console.error("pass 2b: composite typography + effects");
@@ -213,18 +235,18 @@ const taken = new Set<string>();
 for (const set of sets) {
   const slug = uniqueSlug(set.name, taken);
   const matrix = parseVariantMatrix(set);
-  // Non-variant prop API (improvement A-props): text/boolean/instanceSwap defs on
+  // Non-variant prop API: text/boolean/instanceSwap defs on
   // the set frame, with their bindings into a representative master subtree, plus
   // same-node groupings so Phase-B codegen can collapse bool-visible+text pairs.
   const props = extractComponentProps(index, set.guid);
-  // Per-variant bindings (improvement B-codegen): the multi-file codegen renders
+  // Per-variant bindings: the multi-file codegen renders
   // EACH variant's own subtree, so each variant master must resolve the set props
   // onto ITS OWN node guids (props[].bindings only address the default master).
   // Keyed by variant guidKey; joined to props[] by defKey.
   const variantBindings = extractVariantBindings(
     index,
     set.guid,
-    set.variants.map((v) => v.guid)
+    set.variants.map((v) => v.guid),
   );
   const rec = {
     id: `component:${set.guid}`,
@@ -243,7 +265,7 @@ for (const set of sets) {
       rawName: v.rawName,
       guidKey: v.guid,
       size: v.size ?? null,
-      // bindings resolved against THIS variant's own subtree (improvement B-codegen);
+      // bindings resolved against THIS variant's own subtree;
       // [] when the variant exposes none of the set props. Joined to props[] by defKey.
       bindings: variantBindings[v.guid] ?? [],
       subtree: null as null, // TODO(phase-7): resolved variant subtree
@@ -318,10 +340,11 @@ for (const { page, root } of screenRoots) {
 }
 console.error(
   `  ${screenFiles.length} screens, ${totalScreenNodes} nodes, ${unresolvedCount} unresolved leaves` +
-    (allViolations.length ? `, ⚠ ${allViolations.length} provenance violations` : ", provenance clean")
+    (allViolations.length
+      ? `, ⚠ ${allViolations.length} provenance violations`
+      : ", provenance clean"),
 );
-if (allViolations.length)
-  for (const v of allViolations.slice(0, 10)) console.error(`    ⚠ ${v}`);
+if (allViolations.length) for (const v of allViolations.slice(0, 10)) console.error(`    ⚠ ${v}`);
 
 // --- pass 6: aggregate intent.json + issues.json (Phase 8 §6b) --------------
 // intent.json = the per-build designer-intent gap list (P2-5), aggregated across every
@@ -364,18 +387,38 @@ const seenSizeNone = new Set<string>();
 const walkIssues = (n: IRNode) => {
   // box-vs-font reconciliation conflicts
   for (const cf of n.font?.conflicts ?? [])
-    issues.push({ kind: "reconcile-conflict", detail: `${n.name}: ${cf.field} ${cf.declared}→~${cf.chosen} (${cf.reason})`, guid: n.guid, path: n.path });
+    issues.push({
+      kind: "reconcile-conflict",
+      detail: `${n.name}: ${cf.field} ${cf.declared}→~${cf.chosen} (${cf.reason})`,
+      guid: n.guid,
+      path: n.path,
+    });
   if (n.styleRuns)
-    issues.push({ kind: "style-runs", detail: `${n.name}: ${n.styleRuns} styleOverrideTable run(s) — node-level font may not match all runs`, guid: n.guid, path: n.path });
+    issues.push({
+      kind: "style-runs",
+      detail: `${n.name}: ${n.styleRuns} styleOverrideTable run(s) — node-level font may not match all runs`,
+      guid: n.guid,
+      path: n.path,
+    });
   // match:none / unconfirmed nearest colors (theme present only). "exact" is fine;
   // "nearest"/"none" are surfaced as informational review items (never a gate).
   if (theme.length && n.color?.hex) {
     const m = n.color.match;
     if (m === "none" && !seenColorNone.has(n.color.hex)) {
       seenColorNone.add(n.color.hex);
-      issues.push({ kind: "color-unmatched", detail: `color ${n.color.hex} matched no theme token (match:none)`, token: n.color.hex });
+      issues.push({
+        kind: "color-unmatched",
+        detail: `color ${n.color.hex} matched no theme token (match:none)`,
+        token: n.color.hex,
+      });
     } else if (typeof m === "string" && m.startsWith("nearest")) {
-      issues.push({ kind: "color-nearest", detail: `color ${n.color.hex} only a ${m} theme match — review (kept as the literal)`, guid: n.guid, path: n.path, token: n.color.hex });
+      issues.push({
+        kind: "color-nearest",
+        detail: `color ${n.color.hex} only a ${m} theme match — review (kept as the literal)`,
+        guid: n.guid,
+        path: n.path,
+        token: n.color.hex,
+      });
     }
   }
   if (theme.length && n.font && typeof n.font.size === "number") {
@@ -383,13 +426,18 @@ const walkIssues = (n: IRNode) => {
     const k = String(n.font.size);
     if (m === "none" && !seenSizeNone.has(k)) {
       seenSizeNone.add(k);
-      issues.push({ kind: "fontsize-unmatched", detail: `font size ${k}px matched no fontSize token (match:none)`, token: k });
+      issues.push({
+        kind: "fontsize-unmatched",
+        detail: `font size ${k}px matched no fontSize token (match:none)`,
+        token: k,
+      });
     }
   }
   // missing provenance — must be EMPTY (a non-empty list is a build bug).
   for (const c of n.children) walkIssues(c);
 };
-for (const rel of screenFiles) walkIssues(JSON.parse(fs.readFileSync(path.join(outDir, rel), "utf8")));
+for (const rel of screenFiles)
+  walkIssues(JSON.parse(fs.readFileSync(path.join(outDir, rel), "utf8")));
 // provenance violations from pass 5 are build bugs — record them so issues.json
 // surfaces them; the structural check (§9) asserts this list stays empty.
 for (const v of allViolations) issues.push({ kind: "missing-provenance", detail: v });
@@ -399,7 +447,7 @@ for (const is of issues) issuesByKind[is.kind] = (issuesByKind[is.kind] ?? 0) + 
 writeJSON("issues.json", { total: issues.length, counts: issuesByKind, items: issues });
 console.error(
   `  intent: ${intentItems.length} item(s); issues: ${issues.length} item(s)` +
-    (allViolations.length ? ` (⚠ ${allViolations.length} missing-provenance — BUILD BUG)` : "")
+    (allViolations.length ? ` (⚠ ${allViolations.length} missing-provenance — BUILD BUG)` : ""),
 );
 
 writeJSON("raw-map.json", rawMap);
@@ -433,7 +481,14 @@ const manifest = {
   },
   theme: themePath ? { path: path.resolve(themePath), entries: theme.length } : null,
   artifacts: {
-    tokens: ["variables.json", "colors.json", "spacing.json", "radius.json", "typography.json", "effects.json"],
+    tokens: [
+      "variables.json",
+      "colors.json",
+      "spacing.json",
+      "radius.json",
+      "typography.json",
+      "effects.json",
+    ],
     fonts: "fonts.json",
     components: componentFiles,
     rawMap: "raw-map.json",
@@ -444,5 +499,7 @@ const manifest = {
 };
 writeJSON("manifest.json", manifest);
 
-console.error(`wrote ${outDir}/  (${manifest.counts.components} components, ${fonts.length} fonts, ${variables.length} variables, ${colors.length}+${spacing.length}+${radius.length} primitive tokens)`);
+console.error(
+  `wrote ${outDir}/  (${manifest.counts.components} components, ${fonts.length} fonts, ${variables.length} variables, ${colors.length}+${spacing.length}+${radius.length} primitive tokens)`,
+);
 console.log(JSON.stringify({ out: outDir, ...manifest.counts }, null, 2));

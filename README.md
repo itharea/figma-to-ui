@@ -35,8 +35,8 @@ project already uses:
 
 - A runtime, any one of:
   - Node >= 22.18, which runs the `.mts` files directly with no transpiler (recommended).
-  - [Bun](https://bun.sh): `bun <script>.mts`.
-  - Older Node plus [tsx](https://www.npmjs.com/package/tsx): `npx tsx <script>.mts`.
+  - [Bun](https://bun.sh): `bun cli/<script>.mts`.
+  - Older Node plus [tsx](https://www.npmjs.com/package/tsx): `npx tsx cli/<script>.mts`.
   - The hard floor is Node >= 22.15 or Bun, for `zlib.zstdDecompressSync`.
 
 - One dependency, [kiwi-schema](https://www.npmjs.com/package/kiwi-schema). Install it
@@ -87,26 +87,27 @@ IR node schema, the pitfalls checklist, and every script's flags).
 
 ## What's in the toolkit
 
-| Stage              | Scripts                                                                 |
-| ------------------ | ----------------------------------------------------------------------- |
-| Decode & locate    | `parse`, `tree`, `find`, `node`                                         |
-| IR spine           | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir`                     |
-| Assets             | `export-svg`, `icons`, `svg-lib`                                         |
-| Raw query / verify | `raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames>` |
-| Test               | `selftest.mts` (`npm test`)                                             |
+| Stage              | Scripts                                                                                            |
+| ------------------ | -------------------------------------------------------------------------------------------------- |
+| Decode & locate    | `parse`, `tree`, `find`, `node`                                                                    |
+| IR spine           | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir`                                                |
+| Assets             | `export-svg`, `icons`, `svg-lib`                                                                   |
+| Raw query / verify | `cli/raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames>` |
+| Test               | `selftest.mts` (`npm test`)                                                                        |
 
-`build-ir.mts` is the centerpiece — it compiles the decoded message into the IR every
-other step reads. `theme-gen.mts` turns the file's variables into a typed theme, and
-`codegen.mts` scaffolds each component set — wiring its icons (geometry via `svg-lib.mts`,
-recoloured from the IR) and image fills in deterministically, so the scaffold is
-data-complete before an elevate subagent refactors it into the shipped component. All
-scripts share `scripts/lib.mts` (the node-tree index and color helpers) and the pure
-`*-lib.mts` modules, so keep the `scripts/` directory together. Exact invocation for each
-lives in `SKILL.md` / `REFERENCE.md`.
+`cli/build-ir.mts` is the centerpiece — it compiles the decoded message into the IR every
+other step reads. `cli/theme-gen.mts` turns the file's variables into a typed theme, and
+`cli/codegen.mts` scaffolds each component set — wiring its icons (geometry via
+`lib/svg-lib.mts`, recoloured from the IR) and image fills in deterministically, so the
+scaffold is data-complete before an elevate subagent refactors it into the shipped
+component. Entry points live in `scripts/cli/` and the pure modules they share in
+`scripts/lib/` (the node-tree index `figma-index.mts` + the `*-lib.mts` modules), so keep
+the `scripts/` directory together. Exact invocation for each lives in `SKILL.md` /
+`REFERENCE.md`.
 
 ## How it works
 
-`parse.mts` reads the `fig-kiwi` binary container: bytes 0-7 are the magic, then a uint32
+`cli/parse.mts` reads the `fig-kiwi` binary container: bytes 0-7 are the magic, then a uint32
 version, then length-prefixed chunks. The embedded [kiwi](https://github.com/evanw/kiwi)
 schema (chunk 0) decodes the document message (chunk 1), which is decompressed (zstd in
 modern files, raw deflate in older ones) into a flat array of nodes. The other scripts

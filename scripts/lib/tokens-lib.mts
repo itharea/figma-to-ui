@@ -5,7 +5,7 @@
 // the IR build imports this at build time. CLI entry lives in match-tokens.mts /
 // variables.mts.
 import * as fs from "fs";
-import { load, key, colorStr } from "./lib.mts";
+import { load, key, colorStr } from "./figma-index.mts";
 
 export type Token = {
   name: string;
@@ -53,7 +53,7 @@ export function resolveVariables(index: ReturnType<typeof load>): Token[] {
   const modeName = (setId: any, modeID: any): string => {
     const s = setId ? byKey.get(key(setId.guid ?? setId)) : null;
     const m = (s?.variableSetModes ?? []).find(
-      (mm: any) => mm.id?.sessionID === modeID?.sessionID && mm.id?.localID === modeID?.localID
+      (mm: any) => mm.id?.sessionID === modeID?.sessionID && mm.id?.localID === modeID?.localID,
     );
     return m?.name ?? (modeID ? key(modeID) : "default");
   };
@@ -64,7 +64,7 @@ export function resolveVariables(index: ReturnType<typeof load>): Token[] {
   const followAlias = (
     aliasGuid: any,
     modeID: any,
-    seen: Set<string>
+    seen: Set<string>,
   ): { value: string | null; chain: string[] } => {
     const tk = key(aliasGuid);
     if (seen.has(tk)) return { value: null, chain: ["<cycle>"] };
@@ -75,7 +75,8 @@ export function resolveVariables(index: ReturnType<typeof load>): Token[] {
     // prefer an entry whose modeID matches; else the first entry
     const match =
       entries.find(
-        (e: any) => e.modeID?.sessionID === modeID?.sessionID && e.modeID?.localID === modeID?.localID
+        (e: any) =>
+          e.modeID?.sessionID === modeID?.sessionID && e.modeID?.localID === modeID?.localID,
       ) ?? entries[0];
     const vd = match?.variableData?.value;
     if (vd?.alias) {
@@ -140,7 +141,11 @@ export type ThemeEntry = { path: string; value: string; kind: ThemeKind };
 const HEX_RE = /^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3}([0-9a-fA-F]{2})?)?$/;
 const normHex = (s: string): string => {
   let h = s.trim().replace(/^#/, "").toLowerCase();
-  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  if (h.length === 3)
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
   return "#" + h;
 };
 
@@ -235,7 +240,10 @@ function extractBraceDepth(text: string): ThemeEntry[] {
       continue;
     }
     if (ch === "}") {
-      if (depth === 0) throw new Error(`loadTheme: unbalanced '}' at offset ${i} (unparseable region — fix or remove it)`);
+      if (depth === 0)
+        throw new Error(
+          `loadTheme: unbalanced '}' at offset ${i} (unparseable region — fix or remove it)`,
+        );
       stack.pop();
       depth--;
       i++;
@@ -276,7 +284,8 @@ function extractBraceDepth(text: string): ThemeEntry[] {
       continue;
     }
     if (ch === "]") {
-      if (depth === 0) throw new Error(`loadTheme: unbalanced ']' at offset ${i} (unparseable region)`);
+      if (depth === 0)
+        throw new Error(`loadTheme: unbalanced ']' at offset ${i} (unparseable region)`);
       stack.pop();
       depth--;
       i++;
@@ -285,7 +294,9 @@ function extractBraceDepth(text: string): ThemeEntry[] {
     i++;
   }
   if (depth !== 0)
-    throw new Error(`loadTheme: unbalanced braces (depth=${depth}) — flag this region for a human rather than guessing`);
+    throw new Error(
+      `loadTheme: unbalanced braces (depth=${depth}) — flag this region for a human rather than guessing`,
+    );
   return out;
 }
 
@@ -343,7 +354,7 @@ function colorDelta(a: string, b: string): number | null {
 export function matchTokenByValue(
   value: string,
   theme: ThemeEntry[],
-  kind: ThemeKind
+  kind: ThemeKind,
 ): { token?: string; match: "exact" | "nearest" | "none"; delta?: number } {
   if (kind === "other") return { match: "none" };
   const candidates = theme.filter((e) => e.kind === kind);

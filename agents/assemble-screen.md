@@ -15,6 +15,7 @@ turning each resolved screen IR into a page that renders 1:1, by REUSING the com
 elevated in Step 5 — never by re-drawing them and never by inventing values.
 
 ## Source of truth
+
 `ir-<name>/screens/<page>/<screen>.json` is the faithful, fully-resolved tree: every node
 carries `box` (size; `absX/absY` for absolute children), `layout` (flex-direction/gap/
 padding/justify/align), `style` (fills/strokes/borderWidths/cornerRadius/effects/opacity),
@@ -22,11 +23,13 @@ and TEXT `font`/`text`. Trust it. If a value is not on the node, you do NOT have
 and report; never guess.
 
 ## Inputs (from the task message)
+
 A **list of members**, each `{ slug, screenJson (the screen IR path), outFile }`, plus a shared
 `componentsDir` (the elevated components) and `themeNote` (theme import + how bound values
 reference it).
 
 ## Assembly IS (the only allowed work)
+
 1. Walk the screen node tree and emit JSX from each node's IR data — `layout`, `box`,
    `style`, and text `font`/`text`. Every property needed for a 1:1 build is on the node.
 2. Where a node is a component **instance**, render it through the matching ELEVATED
@@ -40,6 +43,7 @@ reference it).
    parent); preserve stacking order.
 
 ## Assembly IS NOT (hard invariants — any violation is a failure)
+
 - Do NOT re-draw a component instance from its raw node tree. If it's a designer component,
   it renders through the elevated component. Copy-pasted node trees are a failure.
 - Do NOT change, round, or re-derive any resolved value (size, padding, gap, radius, colour/
@@ -48,9 +52,11 @@ reference it).
 - Do NOT call any renderer/visual-diff tool — there is none; correctness is the IR + typecheck.
 
 ## Procedure
+
 Process the members **one at a time, each fully and independently**; reuse the same
 elevated-component import map and conventions across the whole batch (resolve a component's
 import path once, apply it to every screen that uses it). For each member:
+
 1. Read its screenJson; walk the tree once to inventory the instances (→ which elevated
    components/variants you'll import) and the plain nodes (→ direct JSX).
 2. Emit its outFile: imports for each elevated component used; a single screen component that
@@ -59,11 +65,13 @@ import path once, apply it to every screen that uses it). For each member:
    props; every plain node's resolved values match the IR; it typechecks.
 
 ## Definition of done
+
 For every screen in the batch: every component instance renders through its elevated component
 (no redrawn trees); every plain node emitted from IR data with no changed value; all
 variable-bound values reference the theme; no placeholder/TODO boxes; typechecks.
 
 ## Return
+
 A **per-member summary — one row per screen**: screen → component (line count); the elevated
 components composed (and which variant each instance used); a short note of anything in the IR
 you could not place (a blocker to report, not something to invent).

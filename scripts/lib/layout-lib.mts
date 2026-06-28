@@ -4,7 +4,7 @@
 
 export type Box = { x: number; y: number; w: number; h: number };
 
-// Strict bbox intersection (improvement 9): touching edges (==) do NOT count.
+// Strict bbox intersection: touching edges (==) do NOT count.
 export function overlap(a: Box, b: Box): boolean {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
@@ -16,7 +16,7 @@ export function overlapArea(a: Box, b: Box): number {
   return ix * iy;
 }
 
-// A peek-carousel / authored stack (improvement 11): some NON-ADJACENT child pair
+// A peek-carousel / authored stack: some NON-ADJACENT child pair
 // overlaps by more than `frac` of the smaller box's area. Sequential flex flow — even
 // with negative gap — can only make CONSECUTIVE (source-order-adjacent) children touch;
 // it can NEVER make non-adjacent children overlap. So a significant non-adjacent overlap

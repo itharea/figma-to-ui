@@ -5,11 +5,11 @@
 // Composition is pure: it follows the explicit symbolData.symbolOverrides[].
 // guidPath.guids path with zero ambiguity (determinism contract). Placeholder
 // *classification* is judgment and lives in describe-lib/reconcile-lib, not here.
-import { load, key } from "./lib.mts";
+import { load, key } from "./figma-index.mts";
 
 export type ResolvedNode = {
   guid: string; // raw master key — NOT unique in a resolved tree (a master reused
-                // N× yields N copies sharing guids). Use `path` for identity.
+  // N× yields N copies sharing guids). Use `path` for identity.
   path: string; // unique composite address = chain of instance guidKeys walked.
   type: string;
   name: string;
@@ -22,17 +22,31 @@ export type ResolvedNode = {
   overrideApplied?: Record<string, { from: unknown; to: unknown }>;
   unresolved?: string; // "remote master <componentKey>" | "cycle".
   unresolvedOverrides?: string[]; // override guidPaths that addressed no node in
-                                  // this instance's subtree (surfaced, not dropped).
+  // this instance's subtree (surfaced, not dropped).
   [k: string]: unknown;
 };
 
 type Index = ReturnType<typeof load>;
 
 const FIELD_KEYS = [
-  "textData", "fillPaints", "strokePaints", "fontName", "fontSize",
-  "size", "visible", "lineHeight", "letterSpacing", "textCase",
-  "cornerRadius", "opacity", "strokeWeight", "effects", "textAlignHorizontal",
-  "textAlignVertical", "textAutoResize", "leadingTrim",
+  "textData",
+  "fillPaints",
+  "strokePaints",
+  "fontName",
+  "fontSize",
+  "size",
+  "visible",
+  "lineHeight",
+  "letterSpacing",
+  "textCase",
+  "cornerRadius",
+  "opacity",
+  "strokeWeight",
+  "effects",
+  "textAlignHorizontal",
+  "textAlignVertical",
+  "textAutoResize",
+  "leadingTrim",
 ] as const;
 
 const DEPTH_CAP = 24;
@@ -47,7 +61,7 @@ function buildNode(
   path: string,
   fromInstance: string | undefined,
   visited: Set<string>,
-  depth: number
+  depth: number,
 ): ResolvedNode {
   const r: ResolvedNode = {
     ...n,
@@ -87,7 +101,7 @@ function resolveInstanceInto(
   r: ResolvedNode,
   path: string,
   visited: Set<string>,
-  depth: number
+  depth: number,
 ) {
   const masterKey = key(inst.symbolData.symbolID);
   const master = index.byKey.get(masterKey);
@@ -114,10 +128,24 @@ function resolveInstanceInto(
   // If the master root frame carries layout/visual props the instance lacks,
   // adopt them (instances usually mirror these). Confirmed harmless: only fill
   // gaps, never clobber the instance's own values.
-  for (const f of ["stackMode", "stackSpacing", "stackVerticalPadding", "stackHorizontalPadding", "stackPaddingBottom", "stackPaddingRight", "stackPrimaryAlignItems", "stackCounterAlignItems", "stackPrimarySizing", "stackCounterSizing", "stackWrap", "cornerRadius"]) {
+  for (const f of [
+    "stackMode",
+    "stackSpacing",
+    "stackVerticalPadding",
+    "stackHorizontalPadding",
+    "stackPaddingBottom",
+    "stackPaddingRight",
+    "stackPrimaryAlignItems",
+    "stackCounterAlignItems",
+    "stackPrimarySizing",
+    "stackCounterSizing",
+    "stackWrap",
+    "cornerRadius",
+  ]) {
     if (r[f] === undefined && master[f] !== undefined) r[f] = master[f];
   }
-  if (!r.fillPaints?.length && master.fillPaints?.length) r.fillPaints = master.fillPaints;
+  if (!(r.fillPaints as any[] | undefined)?.length && master.fillPaints?.length)
+    r.fillPaints = master.fillPaints;
 
   // Compose master CHILDREN (drop master's own root transform — the instance's
   // transform is the on-screen placement). Each child keeps its master-relative
@@ -165,7 +193,8 @@ function applyOverride(r: ResolvedNode, o: any) {
   // The head segment may address r itself (the master root, dropped into r); if
   // so, consume it and continue resolving the rest as descendants of r.
   let start = 0;
-  if (guids[0] === r._masterRootKey || guids[0] === r._overrideKey || guids[0] === r.guid) start = 1;
+  if (guids[0] === r._masterRootKey || guids[0] === r._overrideKey || guids[0] === r.guid)
+    start = 1;
   for (let i = start; i < guids.length; i++) {
     const next = findDescendant(cur, guids[i]);
     if (!next) {
@@ -193,7 +222,8 @@ function applyOverride(r: ResolvedNode, o: any) {
 export function resolveInstance(index: Index, instanceGuidKey: string): ResolvedNode {
   const inst = index.byKey.get(instanceGuidKey);
   if (!inst) throw new Error("resolveInstance: node not found: " + instanceGuidKey);
-  if (!inst.symbolData?.symbolID) throw new Error("resolveInstance: not an INSTANCE: " + instanceGuidKey);
+  if (!inst.symbolData?.symbolID)
+    throw new Error("resolveInstance: not an INSTANCE: " + instanceGuidKey);
   return buildNode(index, inst, instanceGuidKey, undefined, new Set(), 0);
 }
 

@@ -2,9 +2,9 @@
 // Geometry extraction lives in svg-lib.mts (shared with codegen's internal icon export).
 // Usage: node export-svg.mts <message.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]
 import * as fs from "fs";
-import { rasterizeFile } from "./raster-lib.mts";
-import { load } from "./lib.mts";
-import { extractGeometry, toSvgString } from "./svg-lib.mts";
+import { rasterizeFile } from "../lib/raster-lib.mts";
+import { load } from "../lib/figma-index.mts";
+import { extractGeometry, toSvgString } from "../lib/svg-lib.mts";
 
 const index = load(process.argv[2]);
 const png = process.argv.includes("--png");
@@ -15,12 +15,16 @@ const positional = process.argv.slice(3).filter((a) => !a.startsWith("--"));
 const target = positional[0];
 const outFile = positional[1];
 if (!target || !outFile)
-  throw new Error("usage: export-svg.mts <message.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]");
+  throw new Error(
+    "usage: export-svg.mts <message.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]",
+  );
 
 const geo = extractGeometry(index, target);
 const svg = toSvgString(geo, { recolor });
 fs.writeFileSync(outFile, svg);
-console.log(`wrote ${outFile}: ${geo.width}x${geo.height}, ${geo.paths.length} paths, ${(svg.length / 1024).toFixed(1)}KB`);
+console.log(
+  `wrote ${outFile}: ${geo.width}x${geo.height}, ${geo.paths.length} paths, ${(svg.length / 1024).toFixed(1)}KB`,
+);
 
 // --png: rasterize the just-written SVG via headless Chrome @3x. Degrades gracefully.
 if (png) {

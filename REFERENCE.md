@@ -45,7 +45,7 @@ then chunks: [uint32 LE byteLength][data] repeated
   `28 B5 2F FD`), raw deflate in older ones.
 
 ```sh
-node parse.mts $WORK/ex/canvas.fig $WORK/msg-<name>.json
+node cli/parse.mts $WORK/ex/canvas.fig $WORK/msg-<name>.json
 ```
 
 `parse.mts` handles both compressions, serializes BigInts as strings, and
@@ -54,7 +54,7 @@ Uint8Arrays as byte arrays (hashes get hex-encoded later; geometry blobs in §6)
 ## 3. The node graph
 
 `message.nodeChanges` is a **flat array** of every node (tens of thousands).
-There is no nested tree — `lib.mts` rebuilds it:
+There is no nested tree — `lib/figma-index.mts` rebuilds it:
 
 - Identity: `node.guid = {sessionID, localID}` → string key
   `"${sessionID}:${localID}"`.
@@ -64,13 +64,13 @@ There is no nested tree — `lib.mts` rebuilds it:
   top-level frames/sections.
 
 ```sh
-node tree.mts $WORK/msg-<name>.json                 # pages + top-level frames with guid keys
-node find.mts $WORK/msg-<name>.json "tab.?bar"      # search nodes by name regex
-node find.mts $WORK/msg-<name>.json "." SYMBOL      # list all component masters
-node find.mts $WORK/msg-<name>.json "Version=" SYMBOL --under Header  # scope to a subtree
+node cli/tree.mts $WORK/msg-<name>.json                 # pages + top-level frames with guid keys
+node cli/find.mts $WORK/msg-<name>.json "tab.?bar"      # search nodes by name regex
+node cli/find.mts $WORK/msg-<name>.json "." SYMBOL      # list all component masters
+node cli/find.mts $WORK/msg-<name>.json "Version=" SYMBOL --under Header  # scope to a subtree
 ```
 
-Page and frame *names* carry the information architecture. Watch for scratchpad
+Page and frame _names_ carry the information architecture. Watch for scratchpad
 pages (`trial`, `old`, `draft`, `wip`, `-`, or local-language equivalents) —
 those are rejected explorations; ask the user which pages are canonical if naming
 isn't obvious. Also look for a `todo`/notes page: designers leave notes there
@@ -78,44 +78,44 @@ about undecided content.
 
 ## 4. Node fields that matter for UI code
 
-| Field | Meaning / mapping |
-|---|---|
-| `type` | `FRAME`, `TEXT`, `INSTANCE`, `SYMBOL` (component master), `CANVAS`, `SECTION`, `VECTOR`, `ROUNDED_RECTANGLE`, … |
-| `name` | layer name — semantic gold (`product-card`, `tab-bar`, `icons/Nav/Home`) |
-| `visible` | absent = visible; `false` = hidden (skip it) |
-| `size` | `{x: width, y: height}` |
-| `transform` | 2×3 matrix `{m00,m01,m02,m10,m11,m12}`; `m02`,`m12` = x,y relative to parent |
-| `fillPaints[]` / `strokePaints[]` | `type: "SOLID"` with `color` as **0–1 floats** `{r,g,b,a}` (×255 → hex); `type: "IMAGE"` with `image.hash` (bytes → hex = filename in `images/`, §7); gradients carry `stops[]` |
-| `strokeWeight`, `strokeAlign` | border width / position |
-| `borderStrokeWeightsIndependent` + `borderTop/Right/Bottom/LeftWeight` | **per-side** border widths (when independent these apply INSTEAD of `strokeWeight`; absent side = 0). Lets a **bottom-only divider** survive. IR `style.borderWidths {top,right,bottom,left}` → `border-<side>-width` |
-| `strokeCap`, `strokeJoin`, `dashPattern` | optional stroke detail: `cap`/`join` lower-cased (`join:MITER` is default → omitted), `dashPattern` (`number[]`, e.g. `[10,5]`) → **dashed** stroke (`border-style:dashed` / SVG `stroke-dasharray`). IR per-stroke `cap?`/`join?`/`dash?` |
-| `cornerRadius` or `rectangleTopLeftCornerRadius` (×4) | border radius (uniform or per-corner) |
-| `effects[]` | shadows/blurs (`type`, `color`, `offset`, `radius`) |
-| `opacity` | layer opacity |
+| Field                                                                  | Meaning / mapping                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `type`                                                                 | `FRAME`, `TEXT`, `INSTANCE`, `SYMBOL` (component master), `CANVAS`, `SECTION`, `VECTOR`, `ROUNDED_RECTANGLE`, …                                                                                                                            |
+| `name`                                                                 | layer name — semantic gold (`product-card`, `tab-bar`, `icons/Nav/Home`)                                                                                                                                                                   |
+| `visible`                                                              | absent = visible; `false` = hidden (skip it)                                                                                                                                                                                               |
+| `size`                                                                 | `{x: width, y: height}`                                                                                                                                                                                                                    |
+| `transform`                                                            | 2×3 matrix `{m00,m01,m02,m10,m11,m12}`; `m02`,`m12` = x,y relative to parent                                                                                                                                                               |
+| `fillPaints[]` / `strokePaints[]`                                      | `type: "SOLID"` with `color` as **0–1 floats** `{r,g,b,a}` (×255 → hex); `type: "IMAGE"` with `image.hash` (bytes → hex = filename in `images/`, §7); gradients carry `stops[]`                                                            |
+| `strokeWeight`, `strokeAlign`                                          | border width / position                                                                                                                                                                                                                    |
+| `borderStrokeWeightsIndependent` + `borderTop/Right/Bottom/LeftWeight` | **per-side** border widths (when independent these apply INSTEAD of `strokeWeight`; absent side = 0). Lets a **bottom-only divider** survive. IR `style.borderWidths {top,right,bottom,left}` → `border-<side>-width`                      |
+| `strokeCap`, `strokeJoin`, `dashPattern`                               | optional stroke detail: `cap`/`join` lower-cased (`join:MITER` is default → omitted), `dashPattern` (`number[]`, e.g. `[10,5]`) → **dashed** stroke (`border-style:dashed` / SVG `stroke-dasharray`). IR per-stroke `cap?`/`join?`/`dash?` |
+| `cornerRadius` or `rectangleTopLeftCornerRadius` (×4)                  | border radius (uniform or per-corner)                                                                                                                                                                                                      |
+| `effects[]`                                                            | shadows/blurs (`type`, `color`, `offset`, `radius`)                                                                                                                                                                                        |
+| `opacity`                                                              | layer opacity                                                                                                                                                                                                                              |
 
 **Auto-layout** (flexbox, on frames):
 
-| fig field | CSS / RN equivalent |
-|---|---|
-| `stackMode: "HORIZONTAL" \| "VERTICAL"` | `flexDirection: row \| column` |
-| `stackSpacing` | `gap` |
-| `stackVerticalPadding`, `stackHorizontalPadding`, `stackPaddingBottom`, `stackPaddingRight` | `paddingTop`, `paddingLeft`, `paddingBottom`, `paddingRight` (yes — the first two are **top/left**) |
-| `stackPrimaryAlignItems` | `justifyContent` (`MIN`/`CENTER`/`MAX`/`SPACE_EVENLY`/`SPACE_BETWEEN`). Codegen/render disambiguate `SPACE_EVENLY`→`SPACE_BETWEEN` by **resolved child geometry** (in-flow children flush at both main-axis ends → `space-between`) |
-| `stackCounterAlignItems` | `alignItems` |
-| `stackPrimarySizing` / `stackCounterSizing` | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug` |
-| `stackWrap: "WRAP"` | `flexWrap: wrap`. IR `layout.wrap = true` |
-| absent/`NONE` | absolute positioning via child `transform` |
+| fig field                                                                                   | CSS / RN equivalent                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stackMode: "HORIZONTAL" \| "VERTICAL"`                                                     | `flexDirection: row \| column`                                                                                                                                                                                                      |
+| `stackSpacing`                                                                              | `gap`                                                                                                                                                                                                                               |
+| `stackVerticalPadding`, `stackHorizontalPadding`, `stackPaddingBottom`, `stackPaddingRight` | `paddingTop`, `paddingLeft`, `paddingBottom`, `paddingRight` (yes — the first two are **top/left**)                                                                                                                                 |
+| `stackPrimaryAlignItems`                                                                    | `justifyContent` (`MIN`/`CENTER`/`MAX`/`SPACE_EVENLY`/`SPACE_BETWEEN`). Codegen/render disambiguate `SPACE_EVENLY`→`SPACE_BETWEEN` by **resolved child geometry** (in-flow children flush at both main-axis ends → `space-between`) |
+| `stackCounterAlignItems`                                                                    | `alignItems`                                                                                                                                                                                                                        |
+| `stackPrimarySizing` / `stackCounterSizing`                                                 | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug`                                           |
+| `stackWrap: "WRAP"`                                                                         | `flexWrap: wrap`. IR `layout.wrap = true`                                                                                                                                                                                           |
+| absent/`NONE`                                                                               | absolute positioning via child `transform`                                                                                                                                                                                          |
 
 **Per-child sizing & constraints** (on the child node, not the container):
 
-| fig field | CSS / RN equivalent |
-|---|---|
-| `stackChildPrimaryGrow` (number) | `flexGrow` (`1` → `flex: 1`). IR node `grow` |
-| `stackChildAlignSelf` (`MIN`/`CENTER`/`MAX`/`STRETCH`) | `alignSelf` (`flex-start`/`center`/`flex-end`/`stretch`). IR node `alignSelf` |
-| `stackPositioning: "ABSOLUTE"` | child absolutely positioned **inside** an auto-layout parent (out of flow, placed by `transform`/abs coords). IR node `positioning: "absolute"`. Codegen emits `position:'absolute'` + `left`/`top` (parent `position:'relative'`) for BOTH this flag AND the **absent-`stackMode`** (non-auto-layout frame) case, with `z-index` by child order for overlapping siblings |
-| `horizontalConstraint` / `verticalConstraint` (`MIN`/`MAX`/`CENTER`/`STRETCH`/`SCALE`) | resize constraints for absolute layouts → pin/stretch/scale on resize. IR node `constraints: {h, v}` |
-| `minSize: {value:{x,y}}` | `minWidth`/`minHeight` (emit when > 0). IR node `minW`/`minH` (`maxSize`→`maxW`/`maxH`, absent in current decodes) |
-| `targetAspectRatio: {value:{x,y}}` | `aspectRatio = x / y`. IR node `aspectRatio` |
+| fig field                                                                              | CSS / RN equivalent                                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stackChildPrimaryGrow` (number)                                                       | `flexGrow` (`1` → `flex: 1`). IR node `grow`                                                                                                                                                                                                                                                                                                                              |
+| `stackChildAlignSelf` (`MIN`/`CENTER`/`MAX`/`STRETCH`)                                 | `alignSelf` (`flex-start`/`center`/`flex-end`/`stretch`). IR node `alignSelf`                                                                                                                                                                                                                                                                                             |
+| `stackPositioning: "ABSOLUTE"`                                                         | child absolutely positioned **inside** an auto-layout parent (out of flow, placed by `transform`/abs coords). IR node `positioning: "absolute"`. Codegen emits `position:'absolute'` + `left`/`top` (parent `position:'relative'`) for BOTH this flag AND the **absent-`stackMode`** (non-auto-layout frame) case, with `z-index` by child order for overlapping siblings |
+| `horizontalConstraint` / `verticalConstraint` (`MIN`/`MAX`/`CENTER`/`STRETCH`/`SCALE`) | resize constraints for absolute layouts → pin/stretch/scale on resize. IR node `constraints: {h, v}`                                                                                                                                                                                                                                                                      |
+| `minSize: {value:{x,y}}`                                                               | `minWidth`/`minHeight` (emit when > 0). IR node `minW`/`minH` (`maxSize`→`maxW`/`maxH`, absent in current decodes)                                                                                                                                                                                                                                                        |
+| `targetAspectRatio: {value:{x,y}}`                                                     | `aspectRatio = x / y`. IR node `aspectRatio`                                                                                                                                                                                                                                                                                                                              |
 
 **Text** (`type: "TEXT"`):
 
@@ -125,12 +125,12 @@ about undecided content.
 - **Text transform & alignment** (IR `text.case` / `text.align` /
   `text.alignVertical` / `text.leadingTrim`; emitted only when non-default):
 
-  | fig field | IR field | CSS |
-  |---|---|---|
-  | `textCase` (`UPPER`/`LOWER`/`TITLE`/`SMALL_CAPS`/`ORIGINAL`) | `text.case` | `text-transform` — UPPER→`uppercase`, LOWER→`lowercase`, TITLE→`capitalize`, SMALL_CAPS→`uppercase`, ORIGINAL/absent→omitted |
-  | `textAlignHorizontal` (`LEFT`/`CENTER`/`RIGHT`/`JUSTIFIED`) | `text.align` | `text-align` — CENTER→`center`, RIGHT→`right`, JUSTIFIED→`justify`, LEFT/absent→omitted |
-  | `textAlignVertical` (`TOP`/`CENTER`/`BOTTOM`) | `text.alignVertical` | no single CSS prop — center via flex; TOP/absent→omitted |
-  | `leadingTrim` (`CAP_HEIGHT`/`NONE`) | `text.leadingTrim` | optional; NONE/absent→omitted |
+  | fig field                                                    | IR field             | CSS                                                                                                                          |
+  | ------------------------------------------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+  | `textCase` (`UPPER`/`LOWER`/`TITLE`/`SMALL_CAPS`/`ORIGINAL`) | `text.case`          | `text-transform` — UPPER→`uppercase`, LOWER→`lowercase`, TITLE→`capitalize`, SMALL_CAPS→`uppercase`, ORIGINAL/absent→omitted |
+  | `textAlignHorizontal` (`LEFT`/`CENTER`/`RIGHT`/`JUSTIFIED`)  | `text.align`         | `text-align` — CENTER→`center`, RIGHT→`right`, JUSTIFIED→`justify`, LEFT/absent→omitted                                      |
+  | `textAlignVertical` (`TOP`/`CENTER`/`BOTTOM`)                | `text.alignVertical` | no single CSS prop — center via flex; TOP/absent→omitted                                                                     |
+  | `leadingTrim` (`CAP_HEIGHT`/`NONE`)                          | `text.leadingTrim`   | optional; NONE/absent→omitted                                                                                                |
 
 - Mixed-style runs live in `textData.styleOverrideTable` — rare in app UI; flag
   if styling looks inconsistent within one string (it is invisible to the tools).
@@ -162,9 +162,9 @@ box.y=20 < lh=36 → size likely ~16` when a declared line-height cannot fit the
   where per-instance text lives.
 
 ```sh
-node raw.mts overrides $WORK/msg-<name>.json <screen-guidKey>          # raw override list
-node raw.mts overrides $WORK/msg-<name>.json <screen-guidKey> --full   # value-print lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings
-node raw.mts resolve   $WORK/msg-<name>.json <instance-guidKey>        # composed master + overrides = the rendered tree
+node cli/raw.mts overrides $WORK/msg-<name>.json <screen-guidKey>          # raw override list
+node cli/raw.mts overrides $WORK/msg-<name>.json <screen-guidKey> --full   # value-print lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings
+node cli/raw.mts resolve   $WORK/msg-<name>.json <instance-guidKey>        # composed master + overrides = the rendered tree
 ```
 
 `raw.mts resolve` composes `master subtree + symbolOverrides` into the rendered
@@ -173,7 +173,7 @@ tree, so instances no longer dead-end at `instanceOf=`; it tags overridden text
 `raw.mts dump --resolve` does the same in the per-screen dump (the default dump
 stays raw/fast).
 
-**Designer-intent signal:** an instance with *no* `textData` override renders the
+**Designer-intent signal:** an instance with _no_ `textData` override renders the
 master's placeholder text (e.g. every CTA showing the master's default label =
 copy never decided). Detect this and **ask the user instead of shipping
 placeholders**.
@@ -182,7 +182,7 @@ placeholders**.
 lists them and derives a typed prop API:
 
 ```sh
-node raw.mts components $WORK/msg-<name>.json [nameRegex]   # list sets + variants + proposed prop type
+node cli/raw.mts components $WORK/msg-<name>.json [nameRegex]   # list sets + variants + proposed prop type
 ```
 
 Detection is **structural first**: a frame whose visible direct children are all
@@ -191,7 +191,7 @@ Detection is **structural first**: a frame whose visible direct children are all
 (`[stroke-hint, medium]`) — an editor render hint, not a format guarantee, so
 never rely on it alone. A single-axis set proposes a prop named `variant`
 regardless of the axis's own name; multi-axis sets get one prop per axis.
-`raw.mts components` lists only component *sets*; a standalone master (a lone
+`raw.mts components` lists only component _sets_; a standalone master (a lone
 SYMBOL with no variant siblings) is found via `find … SYMBOL` (§3).
 
 **Non-variant props (text / boolean / instance-swap).** Beyond the variant axes,
@@ -231,7 +231,7 @@ standalone logos/illustrations. Vector shapes index into `message.blobs`:
 - Fill color from `fillPaints[0].color`; multiply node × paint opacities.
 
 ```sh
-node export-svg.mts $WORK/msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
+node cli/export-svg.mts $WORK/msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
 ```
 
 `export-svg.mts` (and `extractGeometry`) follow `symbolData.symbolID` into masters, so
@@ -261,7 +261,7 @@ SVG on the brand background, screenshotted at 3×.)
 - Video fills: `paint.video.hash` → file in `videos/`. Check the codec before
   bundling (H.264 `avc1` is safe cross-platform; the `mvhd` box gives duration —
   useful for splash-animation timing).
-- A screen-sized PNG in `images/` may be a *reference screenshot* of another app,
+- A screen-sized PNG in `images/` may be a _reference screenshot_ of another app,
   not an asset — view it before using.
 
 ## 8. IR node schema (what `screens/<…>.json` carries)
@@ -282,9 +282,9 @@ present so files stay lean.
   One shared resolver (`resolvePaintColor`) drives `color`, `style.fills[]`, and
   `style.strokes[]` so all three stay consistent.
 - **`style?`** `{ fills?, cornerRadius?, strokes?, borderWidths?, effects?,
-  opacity? }`:
+opacity? }`:
   - `fills[]` — the COMPLETE paint list: each `{type:"solid"|"gradient"|"image",
-    hex?, var?, varGuid?, stops?:[{position,hex}], imageHash?, opacity?}`.
+hex?, var?, varGuid?, stops?:[{position,hex}], imageHash?, opacity?}`.
     Gradients keep `stops`; images keep `imageHash` (bytes→hex, the `images/`
     filename); solids keep the bound `var`/`varGuid`.
   - `cornerRadius` — a bare number (uniform) or `{tl,tr,br,bl}` (per-corner).
@@ -298,8 +298,8 @@ present so files stay lean.
   - `effects[]` — `{type, hex, offsetX, offsetY, radius, spread?}`
     (DROP_SHADOW/INNER_SHADOW/*_BLUR). `opacity` only when < 1.
 - **`layout?`** `{mode:"row"|"column", gap?, paddingTop?, paddingRight?,
-  paddingBottom?, paddingLeft?, justify?, align?, primarySizing?, counterSizing?,
-  wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
+paddingBottom?, paddingLeft?, justify?, align?, primarySizing?, counterSizing?,
+wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
   absolutely positioned (use `box.absX/absY`).
 - **Responsive child fields:** `grow`, `alignSelf`, `positioning:"absolute"`,
   `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`.
@@ -307,7 +307,7 @@ present so files stay lean.
   absolute from the page origin.
 - **`text?`** `{value, placeholder, …}` and **`font?`** — reconciled
   `{family, appFamily, weight, size, sizeSource, sizeToken?, sizeMatch?,
-  styleName?, vars?, lineHeightPx, letterSpacingPx, conflicts[]}`. **Trust the
+styleName?, vars?, lineHeightPx, letterSpacingPx, conflicts[]}`. **Trust the
   reconciled `font.size` + `sizeSource`, not the raw `fontSize`.** `vars` carries
   per-property variable bindings (family/weight/size/lineHeight/letterSpacing) so
   codegen references the theme, not literals.
@@ -360,7 +360,7 @@ token **by value, within kind** (`color.{token,match}`,
       (invisible even with a width/color); codegen emits `borderStyle`
       `'solid'`/`'dashed'`.
 - [ ] `lineHeight` is **framework-conditional**: web emits a `'<n>px'` **string**
-      (a bare unitless number is a *multiplier* in React), rn emits a bare px
+      (a bare unitless number is a _multiplier_ in React), rn emits a bare px
       **number**.
 - [ ] Non-auto-layout frames and `positioning:'absolute'` children get
       `position:'absolute'` + `left`/`top` with the parent `position:'relative'`.
@@ -375,29 +375,31 @@ token **by value, within kind** (`color.{token,match}`,
 ## 10. Complete script reference
 
 Runtime: plain Node-compatible `.mts` (Node ≥ 22.18 runs them directly; Bun and
-`npx tsx` also work). One dependency: `kiwi-schema`. All scripts import `lib.mts`
-(tree index + color helpers) — copy the whole `scripts/` directory together.
+`npx tsx` also work). One dependency: `kiwi-schema`. Entry points live in
+`scripts/cli/`, the pure modules they import in `scripts/lib/` (every CLI imports
+`lib/figma-index.mts`, the tree index + color helpers) — copy the whole `scripts/`
+directory together so the relative imports resolve.
 
 ### Decode & locate (pre-IR)
 
-| Script | Usage | Purpose |
-|---|---|---|
-| `parse.mts` | `node parse.mts <canvas.fig> <out.json>` | fig-kiwi → message.json |
-| `tree.mts` | `node tree.mts <msg.json>` | page/frame skeleton with guid keys |
-| `find.mts` | `node find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree) |
-| `node.mts` | `node node.mts <msg.json> <guidKey> [field …]` | raw single-node JSON (confirm a field before relying on it) |
+| Script      | Usage                                                          | Purpose                                                     |
+| ----------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
+| `parse.mts` | `node cli/parse.mts <canvas.fig> <out.json>`                   | fig-kiwi → message.json                                     |
+| `tree.mts`  | `node cli/tree.mts <msg.json>`                                 | page/frame skeleton with guid keys                          |
+| `find.mts`  | `node cli/find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree)        |
+| `node.mts`  | `node cli/node.mts <msg.json> <guidKey> [field …]`             | raw single-node JSON (confirm a field before relying on it) |
 
 ### IR pipeline (the harness spine)
 
-| Script | Usage | Purpose |
-|---|---|---|
-| `build-ir.mts` | `node build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--mode <name>] [--out ir-<name>] [--force]` | compile the scoped, provenance-stamped IR: `manifest.json` (incl. `modes` + the resolved `activeMode`) + `raw-map.json` + `fonts.json` + `tokens/*` (incl. `variables.json` = the COMPLETE soft-delete-filtered catalog) + `components/*` (variant matrix + prop API + non-variant `props`/`propGroups` + per-variant `bindings`) + `screens/<page>/<screen>.json` (resolved, reconciled, placeholder-detected, abs-coordinated, full `style`/`layout`). `--mode <name>` pins every variable-bound value to one mode (default: the catalog's primary). With `--theme`: value-maps each unbound color/size to a code token and writes informational `issues.json` + `intent.json` (review notes, never a gate). Faithful defaults: unmapped font → its Figma family; unmatched colour → its literal hex. Re-runs with same source+mode are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts` |
-| `theme-gen.mts` | `node theme-gen.mts <ir-dir> [--framework web\|rn] [--mode <name>] [--out <dir>]` • `node theme-gen.mts <ir-dir> --list-modes` | the IR's complete variable catalog → a typed theme. No `--framework` → both `theme.ts` (rn) + `theme.css` (web). Mirrors Figma's `/`-hierarchy (`Color/praline/950` → `color.praline['950']`), emitting EVERY mode but making `--mode <name>` (default: `manifest.activeMode`) the active block — web `:root`, RN `defaultMode`. `--list-modes` prints the catalog's modes (the active one marked). **Aliases emitted as CODE REFERENCES to the direct target** (CSS `var(--…)`; RN per-mode IIFE in topological order). Pure logic in `theme-lib.mts` (shared with `codegen.mts`) |
-| `codegen.mts` | `node codegen.mts <ir-dir> <set> [--out <dir>] [--framework rn\|web] [--theme-import <module>] [--mode <name>] [--svg <msg.json>] [--images <dir>]` | multi-file component **scaffold** from `components/<set>.json`: `<out>/<slug>/` = `index.tsx` (variant dispatcher) + `types.ts` (`Props` = variant union + COLLAPSED non-variant props) + one `<variant>.tsx` per variant (each renders THAT variant's OWN resolved subtree as JSX — rn View/Text + StyleSheet, web div/span + style objects — with reconciled style/layout/font/text). A value **bound to a Figma variable** is emitted as a **reference into the theme-gen theme**; unbound values keep the reconciled literal + a `// TODO` adjudication. **`--svg <msg.json>`** exports each icon's geometry into a deduplicated owned, recolorable component under `<out>/icons/` (geometry via `svg-lib.mts`; colour from the IR's override-aware resolved value — mono icons use `currentColor` + the token), and renders instance-swap slots as `{slot ?? <Default/>}`. **`--images <dir>`** extracts raster fills into `<slug>/assets/`. PROP COLLAPSE: TEXT→`name?: string`, BOOL-visible→conditional render, BOOL ⊕ TEXT on one node→ONE optional string, INSTANCE_SWAP→`React.ReactNode` slot. Default framework React Native |
-| `diff-ir.mts` | `node diff-ir.mts <ir-old> <ir-new>` | design-version diff over two emitted IRs (no decode): added/removed screens & components, changed tokens per mode, drifted type specs, per-screen node/color drift (aligned by `path`, never `guid`). Compares reconciled **truth vs truth**; refuses to diff an IR against itself |
-| `ir.mts` | `node ir.mts <ir-dir> <query>` | dumb reader over an emitted IR (no decode): `"fonts where appFamily is empty"`, `"colors with match=none"`, `"nodes with conflicts"`. Otherwise read the small per-screen JSON directly |
-| `export-svg.mts` | `node export-svg.mts <msg.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]` | a STANDALONE vector → SVG (logos/illustrations; codegen does component icons internally via the same core). Geometry from `svg-lib.mts`. `--recolor=currentColor` emits recolorable fills; `--png` rasterizes via headless Chrome @3× (degrades gracefully if Chrome is absent) |
-| `icons.mts` | `node icons.mts <msg.json> <screen-guidKey>` | inventory icon instances under a screen, resolve each to its library export name (Phosphor `MagnifyingGlass`…), emit the exact `AppIconName` union additions |
+| Script           | Usage                                                                                                                                                   | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `build-ir.mts`   | `node cli/build-ir.mts <msg.json> --scope <pages\|all> [--theme <p>] [--mode <name>] [--out ir-<name>] [--force]`                                       | compile the scoped, provenance-stamped IR: `manifest.json` (incl. `modes` + the resolved `activeMode`) + `raw-map.json` + `fonts.json` + `tokens/*` (incl. `variables.json` = the COMPLETE soft-delete-filtered catalog) + `components/*` (variant matrix + prop API + non-variant `props`/`propGroups` + per-variant `bindings`) + `screens/<page>/<screen>.json` (resolved, reconciled, placeholder-detected, abs-coordinated, full `style`/`layout`). `--mode <name>` pins every variable-bound value to one mode (default: the catalog's primary). With `--theme`: value-maps each unbound color/size to a code token and writes informational `issues.json` + `intent.json` (review notes, never a gate). Faithful defaults: unmapped font → its Figma family; unmatched colour → its literal hex. Re-runs with same source+mode are a no-op; refuses to overwrite an IR built from different bytes without `--force`. Imports only `*-lib.mts`                                                                                                                                                                                      |
+| `theme-gen.mts`  | `node cli/theme-gen.mts <ir-dir> [--framework web\|rn] [--mode <name>] [--out <dir>]` • `node cli/theme-gen.mts <ir-dir> --list-modes`                  | the IR's complete variable catalog → a typed theme. No `--framework` → both `theme.ts` (rn) + `theme.css` (web). Mirrors Figma's `/`-hierarchy (`Color/praline/950` → `color.praline['950']`), emitting EVERY mode but making `--mode <name>` (default: `manifest.activeMode`) the active block — web `:root`, RN `defaultMode`. `--list-modes` prints the catalog's modes (the active one marked). **Aliases emitted as CODE REFERENCES to the direct target** (CSS `var(--…)`; RN per-mode IIFE in topological order). Pure logic in `theme-lib.mts` (shared with `codegen.mts`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `codegen.mts`    | `node cli/codegen.mts <ir-dir> <set> [--out <dir>] [--framework rn\|web] [--theme-import <module>] [--mode <name>] [--svg <msg.json>] [--images <dir>]` | multi-file component **scaffold** from `components/<set>.json`: `<out>/<slug>/` = `index.tsx` (variant dispatcher) + `types.ts` (`Props` = variant union + COLLAPSED non-variant props) + one `<variant>.tsx` per variant (each renders THAT variant's OWN resolved subtree as JSX — rn View/Text + StyleSheet, web div/span + style objects — with reconciled style/layout/font/text). A value **bound to a Figma variable** is emitted as a **reference into the theme-gen theme**; unbound values keep the reconciled literal + a `// TODO` adjudication. **`--svg <msg.json>`** exports each icon's geometry into a deduplicated owned, recolorable component under `<out>/icons/` (geometry via `svg-lib.mts`; colour from the IR's override-aware resolved value — mono icons use `currentColor` + the token), and renders instance-swap slots as `{slot ?? <Default/>}`. **`--images <dir>`** extracts raster fills into `<slug>/assets/`. PROP COLLAPSE: TEXT→`name?: string`, BOOL-visible→conditional render, BOOL ⊕ TEXT on one node→ONE optional string, INSTANCE_SWAP→`React.ReactNode` slot. Default framework React Native |
+| `diff-ir.mts`    | `node cli/diff-ir.mts <ir-old> <ir-new>`                                                                                                                | design-version diff over two emitted IRs (no decode): added/removed screens & components, changed tokens per mode, drifted type specs, per-screen node/color drift (aligned by `path`, never `guid`). Compares reconciled **truth vs truth**; refuses to diff an IR against itself                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `ir.mts`         | `node cli/ir.mts <ir-dir> <query>`                                                                                                                      | dumb reader over an emitted IR (no decode): `"fonts where appFamily is empty"`, `"colors with match=none"`, `"nodes with conflicts"`. Otherwise read the small per-screen JSON directly                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `export-svg.mts` | `node cli/export-svg.mts <msg.json> <guidKey> <out.svg> [--png] [--recolor=currentColor]`                                                               | a STANDALONE vector → SVG (logos/illustrations; codegen does component icons internally via the same core). Geometry from `svg-lib.mts`. `--recolor=currentColor` emits recolorable fills; `--png` rasterizes via headless Chrome @3× (degrades gracefully if Chrome is absent)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `icons.mts`      | `node cli/icons.mts <msg.json> <screen-guidKey>`                                                                                                        | inventory icon instances under a screen, resolve each to its library export name (Phosphor `MagnifyingGlass`…), emit the exact `AppIconName` union additions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 ### Raw query / verify multiplexer
 
@@ -405,22 +407,22 @@ Runtime: plain Node-compatible `.mts` (Node ≥ 22.18 runs them directly; Bun an
 field-confirmation escape hatch, and the **verifier the IR is checked against**.
 It reads `message.json` (not the IR).
 
-| Subcommand | Usage | Purpose |
-|---|---|---|
-| `dump` | `node raw.mts dump <msg.json> <guidKey> [depth] [--abs] [--resolve]` | per-screen implementation dump (`--abs` absolute coords; `--resolve` composes instances + tags placeholders) |
-| `resolve` | `node raw.mts resolve <msg.json> <guidKey> [depth]` | compose master + symbolOverrides → the rendered instance tree |
-| `overrides` | `node raw.mts overrides <msg.json> <guidKey> [--full]` | instance text/color overrides (`--full` value-prints lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings) |
-| `variables` | `node raw.mts variables <msg.json>` | design tokens from Figma variables (alias chains resolved transitively → concrete value; **skips soft-deleted**) |
-| `components` | `node raw.mts components <msg.json> [nameRegex]` | list component sets + variant masters + proposed TS prop API |
-| `intent` | `node raw.mts intent <msg.json> <screen-guidKey>` | one copy-pasteable designer-intent gap checklist (placeholders, denylisted/repeated strings, reconciliation conflicts, default-variant instances, mono-color icons) |
-| `match-tokens` | `node raw.mts match-tokens <msg.json> <theme.(ts\|json)> [guidKey]` | brownfield map mode: annotate fig values vs a code theme **by value, within kind** (`exact`/`nearest(Δ)`/`none`); never rewrites |
-| `diff-frames` | `node raw.mts diff-frames <msg.json> <guidA> <guidB>` | resolve both frames, align by name-path, report per-node property deltas. **Surfaces** drift; does **not** pick a canonical winner |
+| Subcommand     | Usage                                                                    | Purpose                                                                                                                                                             |
+| -------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dump`         | `node cli/raw.mts dump <msg.json> <guidKey> [depth] [--abs] [--resolve]` | per-screen implementation dump (`--abs` absolute coords; `--resolve` composes instances + tags placeholders)                                                        |
+| `resolve`      | `node cli/raw.mts resolve <msg.json> <guidKey> [depth]`                  | compose master + symbolOverrides → the rendered instance tree                                                                                                       |
+| `overrides`    | `node cli/raw.mts overrides <msg.json> <guidKey> [--full]`               | instance text/color overrides (`--full` value-prints lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings)                                                   |
+| `variables`    | `node cli/raw.mts variables <msg.json>`                                  | design tokens from Figma variables (alias chains resolved transitively → concrete value; **skips soft-deleted**)                                                    |
+| `components`   | `node cli/raw.mts components <msg.json> [nameRegex]`                     | list component sets + variant masters + proposed TS prop API                                                                                                        |
+| `intent`       | `node cli/raw.mts intent <msg.json> <screen-guidKey>`                    | one copy-pasteable designer-intent gap checklist (placeholders, denylisted/repeated strings, reconciliation conflicts, default-variant instances, mono-color icons) |
+| `match-tokens` | `node cli/raw.mts match-tokens <msg.json> <theme.(ts\|json)> [guidKey]`  | brownfield map mode: annotate fig values vs a code theme **by value, within kind** (`exact`/`nearest(Δ)`/`none`); never rewrites                                    |
+| `diff-frames`  | `node cli/raw.mts diff-frames <msg.json> <guidA> <guidB>`                | resolve both frames, align by name-path, report per-node property deltas. **Surfaces** drift; does **not** pick a canonical winner                                  |
 
 ### Libraries & test
 
-Pure modules imported by the CLIs (no top-level side effects), so deterministic
-logic is written once and never drifts: `lib.mts`, `resolve-lib.mts`,
-`screens-lib.mts`, `components-lib.mts`, `reconcile-lib.mts`, `tokens-lib.mts`,
-`mapping-lib.mts`, `theme-lib.mts`, `intent-lib.mts`, `ir-lib.mts`,
-`raster-lib.mts`, `describe-lib.mts`, `svg-lib.mts`. Run the regression
-suite with `npm test` (`selftest.mts`).
+Pure modules in `scripts/lib/`, imported by the CLIs (no top-level side effects),
+so deterministic logic is written once and never drifts: `figma-index.mts`,
+`naming.mts`, `resolve-lib.mts`, `screens-lib.mts`, `components-lib.mts`,
+`reconcile-lib.mts`, `tokens-lib.mts`, `mapping-lib.mts`, `theme-lib.mts`,
+`intent-lib.mts`, `ir-lib.mts`, `raster-lib.mts`, `describe-lib.mts`,
+`svg-lib.mts`. Run the regression suite with `npm test` (`selftest.mts`).

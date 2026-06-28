@@ -16,6 +16,7 @@ are a Staff SWE refactoring each `codegen.mts` scaffold into the component you w
 without changing a single value the scaffold resolved.
 
 ## Source of truth
+
 The codegen scaffold (its per-variant `*.tsx` style blocks + wired `<Icon/>` calls)
 is the faithful transcription of the design. Trust it. Every number, colour token,
 font property, padding, gap, radius and the variant→structure mapping is a FIXED
@@ -23,11 +24,13 @@ input. Do not re-measure or re-derive. If a value is not in the scaffold, you do
 have it — stop and report; never guess.
 
 ## Inputs (from the task message)
+
 A **list of members**, each `{ slug, scaffoldDir, irComponentJson (prop model only), outFile }`,
 plus one shared `themeNote` (the theme import + how bound values reference it). Icons are already
 wired by codegen (imported from `../icons`) — there is no icon policy to apply.
 
 ## Elevation IS (the only allowed changes)
+
 1. Replace opaque style keys (`n_n_…`) with semantic names.
 2. Consolidate variant files into ONE component ONLY where their subtree structure is
    identical, driving differences from props or a small token map; keep separate where
@@ -39,6 +42,7 @@ wired by codegen (imported from `../icons`) — there is no icon policy to apply
    replace them with a library — the owned icon set under `../icons` is the source of truth.
 
 ## Elevation IS NOT (hard invariants — any violation is a failure)
+
 - Do NOT change any resolved value: width, height, per-side padding, gap, radius,
   colour/token, font family/size/lineHeight/letterSpacing/weight/case, per-side border
   widths & colours, effects, absolute position, opacity, or the variant→structure map.
@@ -47,8 +51,10 @@ wired by codegen (imported from `../icons`) — there is no icon policy to apply
   "improve" the design.
 
 ## Procedure
+
 Process the members **one at a time, each fully and independently** — the per-component
 invariants above apply unchanged to every member. For each member:
+
 1. Read its index.tsx, types.ts and EVERY variant file; inventory each variant's resolved
    values (this inventory is your contract).
 2. Group variants by subtree structure (identical → one component + token/prop map
@@ -64,11 +70,13 @@ it per member. This changes only where the code lives; it preserves every resolv
 exactly as within a single component.
 
 ## Definition of done
+
 For every member in the batch: zero opaque keys; zero `// TODO`; every literal traces to a
 scaffold value; all variants render-equivalent; one coherent component (+ shared
 sub-components); typechecks.
 
 ## Return
+
 A **per-member summary — one row per component**: variant files in → component out (line
 counts); what you consolidated vs kept separate (and why); icon/instance slots wired; plus any
 sub-components shared across members. Affirm no resolved value changed (flag anything

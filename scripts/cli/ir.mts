@@ -12,7 +12,9 @@ import * as path from "path";
 const [, , dir, ...rest] = process.argv;
 const query = rest.join(" ").trim().toLowerCase();
 if (!dir || !query)
-  throw new Error('usage: ir.mts <ir-dir> <query>   e.g. ir.mts ir-new "fonts where appFamily is empty"');
+  throw new Error(
+    'usage: ir.mts <ir-dir> <query>   e.g. ir.mts ir-new "fonts where appFamily is empty"',
+  );
 
 const readJSON = (rel: string): any => {
   const p = path.join(dir, rel);
@@ -24,12 +26,14 @@ if (/fonts.*appfamily.*empty|fonts where appfamily/.test(query)) {
   const fonts = readJSON("fonts.json") ?? [];
   const hits = fonts.filter((f: any) => !f.appFamily);
   if (!hits.length) console.error("(no fonts with an empty appFamily slot)");
-  for (const f of hits) console.log(`${f.family}  (count ${f.count}, used by: ${(f.usedBy ?? []).join(", ")})`);
+  for (const f of hits)
+    console.log(`${f.family}  (count ${f.count}, used by: ${(f.usedBy ?? []).join(", ")})`);
 } else if (/colors.*match.*none|colors with match/.test(query)) {
   const colors = readJSON("tokens/colors.json") ?? [];
   // match field arrives in Phase 8; tolerate its absence (nothing matches yet).
   const hits = colors.filter((c: any) => c.match === "none");
-  if (!hits.length) console.error("(no colors with match=none — the match field arrives in Phase 8)");
+  if (!hits.length)
+    console.error("(no colors with match=none — the match field arrives in Phase 8)");
   for (const c of hits) console.log(`${c.name}  ${JSON.stringify(c.modes)}`);
 } else if (/nodes with conflicts|conflicts/.test(query)) {
   // Phase 7 screens live at screens/<page>/<screen>.json. The reconciled
@@ -64,6 +68,6 @@ if (/fonts.*appfamily.*empty|fonts where appfamily/.test(query)) {
   if (!any) console.error("(no nodes with conflicts in any screen)");
 } else {
   throw new Error(
-    `unrecognized query: "${rest.join(" ")}". Supported: "fonts where appFamily is empty", "colors with match=none", "nodes with conflicts".`
+    `unrecognized query: "${rest.join(" ")}". Supported: "fonts where appFamily is empty", "colors with match=none", "nodes with conflicts".`,
   );
 }

@@ -22,7 +22,7 @@ those right and the whole design comes out 1:1.
 
 **Read via the IR, never the blob.** The decoded `message.json` is ~80MB for a 20MB fig —
 never load it into context. After `build-ir`, read the small per-screen / per-component JSON
-**directly**. The raw scripts (`raw.mts …`, `tree`, `find`, `node`) are the quick-query path.
+**directly**. The raw scripts (`cli/raw.mts …`, `cli/tree`, `cli/find`, `cli/node`) are the quick-query path.
 
 **Field-level details live in [`REFERENCE.md`](./REFERENCE.md)** — the binary format, the
 node-field tables, the IR schema, and every script's flags. You don't need it to follow this
@@ -46,11 +46,11 @@ harness; reach for it for a specific field.
 
 ## Decision points — STOP and ask the user
 
-| When | Decision |
-|---|---|
-| Step 1/4 | **Scope** — which pages are canonical, and which component sets to build. **Read the set inventory and identify platform/device chrome yourself** (judgment, not a script — set names are often non-English), then propose a keep/exclude split for the user to confirm. |
-| Step 3 | **Mode** — when the catalog has >1 variable mode, which one to style at. Skip the question when there's only one. |
-| Step 5 | **Grouping** — how to batch the in-scope components into subagent calls (and screens, Step 6). Score each unit's complexity, propose batches that keep related units together and isolate high-complexity ones, each packed as large as one subagent's context allows (fewest calls wins; a homogeneous low-complexity family collapses to a single subagent regardless of count). Confirm membership and granularity with the user, then write `groups-<kind>.json`. |
+| When     | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Step 1/4 | **Scope** — which pages are canonical, and which component sets to build. **Read the set inventory and identify platform/device chrome yourself** (judgment, not a script — set names are often non-English), then propose a keep/exclude split for the user to confirm.                                                                                                                                                                                              |
+| Step 3   | **Mode** — when the catalog has >1 variable mode, which one to style at. Skip the question when there's only one.                                                                                                                                                                                                                                                                                                                                                     |
+| Step 5   | **Grouping** — how to batch the in-scope components into subagent calls (and screens, Step 6). Score each unit's complexity, propose batches that keep related units together and isolate high-complexity ones, each packed as large as one subagent's context allows (fewest calls wins; a homogeneous low-complexity family collapses to a single subagent regardless of count). Confirm membership and granularity with the user, then write `groups-<kind>.json`. |
 
 ---
 
@@ -58,19 +58,19 @@ harness; reach for it for a specific field.
 
 ```sh
 WORK=/tmp/figparse && mkdir -p $WORK && cd $WORK
-cp <repo>/scripts/*.mts .
+cp -r <repo>/scripts/. .          # keeps the cli/ + lib/ layout (relative imports + bare kiwi resolve)
 npm init -y >/dev/null 2>&1 && npm i kiwi-schema
 ```
 
-Run with `node <script>.mts …` (Node ≥ 22.15 / Bun — for `zstd`). For React Native, generated
+Run with `node cli/<script>.mts …` (Node ≥ 22.15 / Bun — for `zstd`). For React Native, generated
 owned icons import `react-native-svg` (a peer dep of the consuming app); web needs no dep.
 
 ## Step 1 — Decode & scope
 
 ```sh
 unzip -o file.fig -d $WORK/ex
-node parse.mts $WORK/ex/canvas.fig $WORK/msg-<name>.json
-node tree.mts  $WORK/msg-<name>.json          # pages + top-level frames
+node cli/parse.mts $WORK/ex/canvas.fig $WORK/msg-<name>.json
+node cli/tree.mts  $WORK/msg-<name>.json          # pages + top-level frames
 ```
 
 Page/frame names carry the IA. Reject scratchpad pages (`trial`, `old`, `wip`, `-`, local
@@ -79,22 +79,21 @@ equivalents). **Confirm the canonical pages with the user** before compiling.
 ## Step 2 — Build the IR
 
 ```sh
-node build-ir.mts msg-<name>.json --scope <pages|all> --out ir-<name>
+node cli/build-ir.mts msg-<name>.json --scope <pages|all> --out ir-<name>
 ```
 
 A **pure function of the bytes**. Emits a small, provenance-stamped `ir-<name>/`: `manifest.json`
-(now carries `modes` + `activeMode`) + `tokens/*` (incl. `variables.json`) + `components/<set>.json`
-+ `screens/<page>/<screen>.json` (resolved instances, reconciled text, absolute coords, full
-`style`/`layout` per node). Read those files directly. **Trust the reconciled `font.size`**, not
-the raw `fontSize`. Faithful defaults: an unmapped font uses its Figma family; an unmatched colour
-keeps its literal hex; placeholder/denylisted copy renders the master text with a `// TODO`. Nothing
-blocks.
+(now carries `modes` + `activeMode`), `tokens/*` (incl. `variables.json`), `components/<set>.json`,
+and `screens/<page>/<screen>.json` (resolved instances, reconciled text, absolute coords, full
+`style`/`layout` per node). Read those files directly. **Trust the reconciled `font.size`**, not the
+raw `fontSize`. Faithful defaults: an unmapped font uses its Figma family; an unmatched colour keeps
+its literal hex; placeholder/denylisted copy renders the master text with a `// TODO`. Nothing blocks.
 
 ## Step 3 — Theme from the variables (+ pick the mode)
 
 ```sh
-node theme-gen.mts ir-<name> --list-modes              # the catalog's variable modes
-node theme-gen.mts ir-<name> --framework web --mode <M> --out src/theme
+node cli/theme-gen.mts ir-<name> --list-modes              # the catalog's variable modes
+node cli/theme-gen.mts ir-<name> --framework web --mode <M> --out src/theme
 ```
 
 Variables are the design tokens — turn the catalog into a typed theme (`theme.css` web /
@@ -111,7 +110,7 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
 > **Scope first (your judgment, no script).** A `.fig` ships platform/device chrome that is NOT
 > your product (iOS/Android keyboards, status bars, home indicators, device frames). Inventory the
 > sets and **read them yourself**: list `ir-<name>/components/` and check each set's name and variant
-> axes (`manifest.json` / `components/<set>.json`). Identify chrome by what each set *is* — a keyboard,
+> axes (`manifest.json` / `components/<set>.json`). Identify chrome by what each set _is_ — a keyboard,
 > a status bar, a device frame, or a set whose variant axis is a device (`Size=iPhone 14`). Use
 > judgment, not pattern-matching: names are often non-English (a keyboard may be "klavye"), and a
 > device-width size alone doesn't make a set chrome. Propose a keep/exclude split, confirm with the
@@ -120,7 +119,7 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
 For each in-scope set:
 
 ```sh
-node codegen.mts ir-<name> <set> --framework web --out src/components --theme-import ../theme \
+node cli/codegen.mts ir-<name> <set> --framework web --out src/components --theme-import ../theme \
   --mode <M> --svg msg-<name>.json --images $WORK/ex/images
 ```
 
@@ -171,7 +170,7 @@ It operates **only on the in-scope set** — grouping never re-opens the Scope d
 
 ```jsonc
 {
-  "kind": "elevate",            // or "assemble" (Step 6)
+  "kind": "elevate", // or "assemble" (Step 6)
   "irDir": "ir-<name>",
   "themeNote": "<the theme import + how bound values reference it>",
   "componentsDir": "<assemble only: where the elevated components live>",
@@ -182,9 +181,9 @@ It operates **only on the in-scope set** — grouping never re-opens the Scope d
       "members": [
         // elevate:  { slug, scaffoldDir, irComponentJson, outFile }
         // assemble: { slug, screenJson, outFile }
-      ]
-    }
-  ]
+      ],
+    },
+  ],
 }
 ```
 
@@ -229,7 +228,7 @@ Icons are handled inside codegen (Step 4). `export-svg.mts` remains for **standa
 illustrations and for raw SVG export:
 
 ```sh
-node export-svg.mts msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
+node cli/export-svg.mts msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
 ```
 
 Video fills (from the zip's `videos/` by content hash) are the only assets left to wire by hand.
@@ -239,19 +238,20 @@ Video fills (from the zip's `videos/` by content hash) are the only assets left 
 ## Verification
 
 All deterministic — no visual-diff/fidelity step:
+
 - `npm test` (`selftest.mts`) — the unit suite (IR, theme, svg-lib, prop model).
 - TypeScript: the generated components + screens must typecheck in the consuming app.
 - Re-read the elevated component / assembled screen against the IR: every resolved value traces back.
 
 ## Toolkit
 
-| Stage | Scripts |
-|---|---|
-| Decode & locate | `parse`, `tree`, `find`, `node` |
-| IR spine | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir` |
-| Assets | `export-svg`, `icons`, `svg-lib` (shared geometry core) |
-| Raw query | `raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames>` |
-| Test | `selftest.mts` (`npm test`) |
+| Stage           | Scripts                                                                                            |
+| --------------- | -------------------------------------------------------------------------------------------------- |
+| Decode & locate | `parse`, `tree`, `find`, `node`                                                                    |
+| IR spine        | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir`                                                |
+| Assets          | `export-svg`, `icons`, `svg-lib` (shared geometry core)                                            |
+| Raw query       | `cli/raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames>` |
+| Test            | `selftest.mts` (`npm test`)                                                                        |
 
 Full usage, every flag, the `.fig` format, the node-field tables, and the IR schema →
 **[`REFERENCE.md`](./REFERENCE.md)**.

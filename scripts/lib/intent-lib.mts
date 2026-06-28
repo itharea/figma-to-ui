@@ -3,7 +3,7 @@
 // components-lib (default-variant): the placeholder denylist / repeated-string
 // scan, and the mono-color icon-fill scan. NO top-level side effects — shared
 // verbatim by intent.mts (Phase 5) and build-ir.mts's intent.json pass (Phase 8).
-import { colorStr } from "./lib.mts";
+import { colorStr } from "./figma-index.mts";
 
 // Strings that are almost always stand-ins, not real copy. Anchored, case-
 // insensitive. Kept distinct from reconcile-lib's classifyPlaceholderText pattern
@@ -50,7 +50,7 @@ export function repeatedStrings(texts: string[]): Map<string, number> {
 // a node with no SOLID fill is not a mono-color icon.
 export function isMonoColorIconFill(node: any): boolean {
   const solids = (node?.fillPaints ?? []).filter(
-    (p: any) => p.visible !== false && p.type === "SOLID"
+    (p: any) => p.visible !== false && p.type === "SOLID",
   );
   if (!solids.length) return false;
   return solids.every((p: any) => {

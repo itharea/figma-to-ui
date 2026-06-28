@@ -14,21 +14,29 @@
     "design-to-code"
   ],
   "scripts": {
-    "parse": "node scripts/parse.mts",
-    "tree": "node scripts/tree.mts",
-    "find": "node scripts/find.mts",
-    "build-ir": "node scripts/build-ir.mts",
-    "theme-gen": "node scripts/theme-gen.mts",
-    "codegen": "node scripts/codegen.mts",
-    "raw": "node scripts/raw.mts",
-    "export-svg": "node scripts/export-svg.mts",
+    "parse": "node scripts/cli/parse.mts",
+    "tree": "node scripts/cli/tree.mts",
+    "find": "node scripts/cli/find.mts",
+    "build-ir": "node scripts/cli/build-ir.mts",
+    "theme-gen": "node scripts/cli/theme-gen.mts",
+    "codegen": "node scripts/cli/codegen.mts",
+    "raw": "node scripts/cli/raw.mts",
+    "export-svg": "node scripts/cli/export-svg.mts",
     "selftest": "node scripts/selftest.mts",
-    "test": "node scripts/selftest.mts"
+    "test": "node scripts/selftest.mts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "engines": {
     "node": ">=22.18"
   },
   "dependencies": {
     "kiwi-schema": "^0.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "prettier": "^3.9.0",
+    "typescript": "^6.0.3"
   }
 }

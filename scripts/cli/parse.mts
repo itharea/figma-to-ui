@@ -11,7 +11,8 @@ if (!inPath || !outPath) throw new Error("usage: parse.mts <canvas.fig> <out-mes
 
 const buf = fs.readFileSync(inPath);
 const magic = buf.subarray(0, 8).toString("utf8");
-if (magic !== "fig-kiwi") throw new Error("bad magic: " + magic + " (did you unzip the .fig first?)");
+if (magic !== "fig-kiwi")
+  throw new Error("bad magic: " + magic + " (did you unzip the .fig first?)");
 console.error("format version:", buf.readUInt32LE(8));
 
 let offset = 12;
@@ -22,7 +23,10 @@ while (offset < buf.length) {
   chunks.push(buf.subarray(offset, offset + size));
   offset += size;
 }
-console.error("chunk sizes:", chunks.map((c) => c.length));
+console.error(
+  "chunk sizes:",
+  chunks.map((c) => c.length),
+);
 
 // chunk 0 = kiwi schema (raw deflate); chunk 1 = document (zstd in modern files,
 // raw deflate in older ones — detect by zstd magic 28 B5 2F FD)
@@ -35,10 +39,9 @@ fs.writeFileSync(
   outPath,
   JSON.stringify(
     message,
-    (k, v) =>
-      typeof v === "bigint" ? v.toString() : v instanceof Uint8Array ? Array.from(v) : v,
-    1
-  )
+    (k, v) => (typeof v === "bigint" ? v.toString() : v instanceof Uint8Array ? Array.from(v) : v),
+    1,
+  ),
 );
 console.error("nodeChanges:", message.nodeChanges?.length, "blobs:", message.blobs?.length);
 console.error("wrote", outPath);

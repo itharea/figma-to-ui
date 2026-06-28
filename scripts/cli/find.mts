@@ -2,7 +2,7 @@
 // Usage: node find.mts <message.json> <name-regex> [type-filter] [--under <name>]
 // Example: node find.mts msg.json "product.?card" SYMBOL
 //          node find.mts msg.json "Version=" SYMBOL --under Header
-import { load, key } from "./lib.mts";
+import { load, key } from "../lib/figma-index.mts";
 
 const { nodes, byKey } = load(process.argv[2]);
 
@@ -41,8 +41,7 @@ function pathOf(n: any): string {
 for (const n of nodes) {
   if (!n.name || !re.test(n.name)) continue;
   if (typeFilter && n.type !== typeFilter) continue;
-  if (underRe && !ancestors(n).some((a) => a.name && underRe!.test(a.name)))
-    continue;
+  if (underRe && !ancestors(n).some((a) => a.name && underRe!.test(a.name))) continue;
   const sz = n.size ? ` ${Math.round(n.size.x)}x${Math.round(n.size.y)}` : "";
   const hidden = n.visible === false ? " (HIDDEN)" : "";
   console.log(`${n.type} "${n.name}"${sz}${hidden} [${key(n.guid)}]  —  ${pathOf(n)}`);

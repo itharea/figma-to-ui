@@ -43,11 +43,13 @@ export function lineHeightPx(lh: any, fontSize: number): number | null {
   return lh.value; // PIXELS
 }
 
-// Box-vs-font reconciliation (the P0-1 core). DETECTION is deterministic; the
+// Box-vs-font reconciliation (the core). DETECTION is deterministic; the
 // suggested size is a labeled heuristic.
-export function reconcileTextSize(
-  node: any
-): { size: number; source: "fontSize" | "geometry"; conflicts: Conflict[] } {
+export function reconcileTextSize(node: any): {
+  size: number;
+  source: "fontSize" | "geometry";
+  conflicts: Conflict[];
+} {
   const fontSize = node?.fontSize;
   const noConflict = { size: fontSize, source: "fontSize" as const, conflicts: [] as Conflict[] };
   if (node?.type !== "TEXT" || !fontSize || !node.size) return noConflict;
@@ -129,7 +131,11 @@ export function deriveFontFromRender(node: any): DerivedFont | null {
     if (typeof g?.fontSize === "number") counts.set(g.fontSize, (counts.get(g.fontSize) ?? 0) + 1);
   let size: number | null = null;
   let best = -1;
-  for (const [sz, c] of counts) if (c > best) { best = c; size = sz; }
+  for (const [sz, c] of counts)
+    if (c > best) {
+      best = c;
+      size = sz;
+    }
 
   // line height: the rendered baseline (kill binary-decode float noise → 2dp).
   const lhRaw = dtd.baselines?.[0]?.lineHeight;
@@ -139,7 +145,7 @@ export function deriveFontFromRender(node: any): DerivedFont | null {
   return { family, weight, size, lineHeightPx, mixed: metas.length > 1 || counts.size > 1 };
 }
 
-// Placeholder string classifier (the P0-3 string half; override-presence half is
+// Placeholder string classifier (the string half; override-presence half is
 // wired in Phase 2). masterDefault may be undefined in Phase 1.
 //   placeholder=true iff !hasTextOverride AND
 //     ( /^(test|label|placeholder|title|body|description|lorem)/i matches text
@@ -147,7 +153,7 @@ export function deriveFontFromRender(node: any): DerivedFont | null {
 export function classifyPlaceholderText(
   text: string,
   hasTextOverride: boolean,
-  masterDefault?: string
+  masterDefault?: string,
 ): { placeholder: boolean; reason: string } {
   if (hasTextOverride) return { placeholder: false, reason: "has-override" };
   if (/^(test|label|placeholder|title|body|description|lorem)/i.test(text ?? ""))
@@ -157,7 +163,7 @@ export function classifyPlaceholderText(
   return { placeholder: false, reason: "looks-real" };
 }
 
-// SPACE_EVENLY-vs-SPACE_BETWEEN disambiguation (CODEGEN_BUGS #8: SPACE_EVENLY
+// SPACE_EVENLY-vs-SPACE_BETWEEN disambiguation (SPACE_EVENLY
 // emitted where the layout means SPACE_BETWEEN). Figma's primaryAxisAlignItems
 // reports SPACE_BETWEEN as "space-evenly" in some exports, but the two differ
 // geometrically: SPACE_BETWEEN pins the first child to the content start and the
@@ -167,10 +173,21 @@ export function classifyPlaceholderText(
 // ends at the opposite padding edge (within tol px), the intent is space-between.
 // Returns layout.justify unchanged in every other case.
 export function disambiguateJustify(
-  layout: { mode: "row" | "column"; justify?: string; paddingLeft?: number; paddingRight?: number; paddingTop?: number; paddingBottom?: number },
+  layout: {
+    mode: "row" | "column";
+    justify?: string;
+    paddingLeft?: number;
+    paddingRight?: number;
+    paddingTop?: number;
+    paddingBottom?: number;
+  },
   parentBox: { w?: number; h?: number } | undefined,
-  children: { box?: { x?: number; y?: number; w?: number; h?: number }; positioning?: string; visible?: boolean }[],
-  tol: number = 1.5
+  children: {
+    box?: { x?: number; y?: number; w?: number; h?: number };
+    positioning?: string;
+    visible?: boolean;
+  }[],
+  tol: number = 1.5,
 ): string | undefined {
   if (layout.justify !== "space-evenly") return layout.justify;
 

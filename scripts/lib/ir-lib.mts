@@ -1,29 +1,11 @@
-// Deterministic IR assembly helpers (IR-PLAN Phase 1). NO top-level side effects
+// Deterministic IR assembly helpers. NO top-level side effects
 // — build-ir.mts imports these at build time. Everything here is a pure function
 // of the decoded bytes: slug derivation, token kind-split, composite typography/
 // effect assembly, and font collection. Faithful defaults handle the rest (the Figma
 // family for fonts, the literal hex for unmatched colours); no decisions overlay.
-import { load, key, colorStr } from "./lib.mts";
+import { load, key, colorStr } from "./figma-index.mts";
 import { letterSpacingToPx, lineHeightPx } from "./reconcile-lib.mts";
 import type { Token } from "./tokens-lib.mts";
-
-// --- slug (component <set-name> file naming, IR-PLAN layout) ---------------
-// lower-case, keep [a-z0-9], collapse any other run → "-", trim "-".
-// On collision the caller appends "-2","-3",… (use uniqueSlug).
-export function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-export function uniqueSlug(name: string, taken: Set<string>): string {
-  let base = slugify(name) || "set";
-  let slug = base;
-  let i = 2;
-  while (taken.has(slug)) slug = `${base}-${i++}`;
-  taken.add(slug);
-  return slug;
-}
 
 // --- token kind-split (pass 2a) --------------------------------------------
 // COLOR → colors; FLOAT split by semantics (radius-named → radius, else spacing).
@@ -149,7 +131,13 @@ const TYPE_VAR_FIELD: Record<string, keyof TypeVars> = {
 // The per-property variable bindings on a TEXT STYLE node, resolved to variable NAMES
 // via `varNames` (variable guidKey → name). Reads node.variableConsumptionMap.entries.
 function textVarBindings(styleNode: any, varNames: Map<string, string>): TypeVars {
-  const out: TypeVars = { family: null, weight: null, size: null, lineHeight: null, letterSpacing: null };
+  const out: TypeVars = {
+    family: null,
+    weight: null,
+    size: null,
+    lineHeight: null,
+    letterSpacing: null,
+  };
   const entries = styleNode?.variableConsumptionMap?.entries ?? [];
   for (const e of entries) {
     const field = TYPE_VAR_FIELD[e?.variableField];
@@ -164,7 +152,8 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
   const { nodes } = index;
   // variable guidKey → name, to resolve each style's per-property variable bindings.
   const varNames = new Map<string, string>();
-  for (const n of nodes) if (n.type === "VARIABLE" && n.guid) varNames.set(key(n.guid), n.name ?? "");
+  for (const n of nodes)
+    if (n.type === "VARIABLE" && n.guid) varNames.set(key(n.guid), n.name ?? "");
   const styles = nodes.filter((n) => n.styleType === "TEXT");
   if (styles.length) {
     return styles.map((n) => {
@@ -187,7 +176,10 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
   // Fallback: group Typography/* FLOAT variables by their last-but-one path part
   // (size/line-height/spacing) keyed on the leaf (xs, m, l…). One entry per leaf.
   const floats = nodes.filter(
-    (n) => n.type === "VARIABLE" && n.variableResolvedType === "FLOAT" && /typography\//i.test(n.name ?? "")
+    (n) =>
+      n.type === "VARIABLE" &&
+      n.variableResolvedType === "FLOAT" &&
+      /typography\//i.test(n.name ?? ""),
   );
   const byLeaf = new Map<string, { size?: number; lh?: number; ls?: number; guid: string }>();
   for (const n of floats) {
@@ -208,7 +200,10 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
     size: e.size ?? null,
     weight: null,
     lineHeightPx: e.lh ?? null,
-    "letterSpacingPx@size": e.ls != null && e.size != null ? letterSpacingToPx({ value: e.ls, units: "PIXELS" }, e.size) : 0,
+    "letterSpacingPx@size":
+      e.ls != null && e.size != null
+        ? letterSpacingToPx({ value: e.ls, units: "PIXELS" }, e.size)
+        : 0,
     textCase: null,
     vars: { family: null, weight: null, size: null, lineHeight: null, letterSpacing: null },
     source: "grouped-variables",
@@ -263,7 +258,7 @@ export type IRFont = {
 export function collectFonts(
   scopedNodes: any[],
   typography: IRTypography[],
-  appFamilyMap: Record<string, string> = {}
+  appFamilyMap: Record<string, string> = {},
 ): IRFont[] {
   const fams = new Map<string, { count: number; usedBy: Set<string> }>();
   const bump = (family: string | undefined | null, label: string) => {
@@ -301,7 +296,7 @@ export function pageOf(index: ReturnType<typeof load>, node: any): any | null {
 const SCREEN_ROOT_TYPES = new Set(["FRAME", "SECTION", "INSTANCE", "COMPONENT"]);
 export function scopedScreenRoots(
   index: ReturnType<typeof load>,
-  scopePages: Set<string> | null
+  scopePages: Set<string> | null,
 ): { page: any; root: any }[] {
   const out: { page: any; root: any }[] = [];
   for (const n of index.nodes) {
@@ -318,7 +313,7 @@ export function scopedScreenRoots(
 // scopePages: lower-cased page-name set, or null = all pages.
 export function scopedRawNodes(
   index: ReturnType<typeof load>,
-  scopePages: Set<string> | null
+  scopePages: Set<string> | null,
 ): any[] {
   if (!scopePages) return index.nodes;
   return index.nodes.filter((n) => {
