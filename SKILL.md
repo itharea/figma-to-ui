@@ -149,7 +149,16 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
   references (web `backgroundImage` / rn `<Image>`), honouring each paint's own
   `imageScaleMode` — `FILL`→`cover`, `FIT`→`contain`, `STRETCH`→`100% 100%`, `TILE`→`repeat`.
   A placement CSS can't express (a `STRETCH` crop matrix, a `TILE` scaling factor) is
-  approximated and gets a `// TODO`.
+  approximated and gets a `// TODO`. Web emits a **static import per raster** and reads back the
+  URL the bundler resolved — a document-relative `url('./assets/…')` inside an inline style
+  resolves against the _page_, not the module, so it 404s on every route that is not at the
+  directory root. The generated file normalises the two bundler shapes itself (a URL string from
+  webpack/Vite/Parcel, a `.src` record from Next.js), so it needs no runtime dependency and no
+  loader config.
+- **`--asset-base <prefix>`** switches that reference to a literal `url('<prefix>/<file>')` for a
+  target with no module graph (plain CSS, a CDN origin, a static `public/` dir). Pass it only
+  when the consumer serves the assets itself — the bundler import is the default because it is
+  the form that stays correct without knowing where the app is mounted.
 - **Prop names are sanitised identifiers; variant values are transliterated.** A Figma axis or
   component prop named with a space, punctuation or a JavaScript reserved word is emitted as a
   legal camelCase identifier (reserved words take a `Prop` suffix, and two names that sanitise

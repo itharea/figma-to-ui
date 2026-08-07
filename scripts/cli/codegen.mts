@@ -39,7 +39,7 @@ const dir = argv[0];
 const setName = argv[1];
 if (!dir || !setName || setName.startsWith("--"))
   throw new Error(
-    "usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>]",
+    "usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>] [--asset-base <prefix>]",
   );
 const flag = (n: string) => {
   const i = argv.indexOf(n);
@@ -50,6 +50,12 @@ const outDir = flag("--out");
 // When given (with --out), codegen EXTRACTS each referenced image fill into the component
 // folder's assets/ and emits a real src reference instead of a placeholder TODO.
 const imagesDir = flag("--images");
+// Where a PLAIN-CSS consumer serves the extracted rasters from (e.g. "/static/img", a CDN
+// origin). Given ⇒ web emits a literal `url('<base>/<file>')` under that prefix; absent ⇒
+// the bundler form (a static import + its resolved URL), which is the only form that keeps
+// working on a route that is not at the directory root. Never guessed: a plain-CSS target
+// has no module graph to resolve against, so the base has to come from the caller.
+const assetBase = flag("--asset-base");
 const framework = (flag("--framework") ?? "rn").toLowerCase();
 if (framework !== "rn" && framework !== "web")
   throw new Error(`--framework must be rn|web (got "${framework}")`);
@@ -246,6 +252,34 @@ function assetRef(hash: string | undefined): string | null {
   assetCache.set(hash, file);
   return file;
 }
+// The import identifier a written asset binds to in a variant file. The files are
+// content-hash named ("06cc1aa3….png"), so the basename can never be used raw — it is not a
+// valid JS identifier, and truncating it invites two rasters collapsing onto one binding.
+// Derived from the basename (same raster → same identifier in every file it appears in, so
+// the output is byte-stable across runs) and disambiguated against the names already issued.
+const assetIdents = new Map<string, string>(); // written basename → import identifier
+const assetIdentsTaken = new Set<string>();
+function assetIdent(file: string): string {
+  const hit = assetIdents.get(file);
+  if (hit) return hit;
+  const stem = path.basename(file, path.extname(file)).replace(/[^A-Za-z0-9]+/g, "");
+  const base = `asset_${stem.slice(0, 12) || "raster"}`;
+  let name = base,
+    i = 2;
+  while (assetIdentsTaken.has(name)) name = `${base}_${i++}`;
+  assetIdentsTaken.add(name);
+  assetIdents.set(file, name);
+  return name;
+}
+// The literal URL for the plain-CSS target: the configured base joined to the basename.
+const assetBaseUrl = (file: string) => `${(assetBase ?? "").replace(/\/+$/, "")}/${file}`;
+
+// nodeStyleBody is module-level (the per-instance override path shares it), but the import
+// line an extracted raster implies belongs to the variant FILE currently being rendered.
+// renderVariant parks its collector here for the duration of its own walk — the renders are
+// sequential and never nested, so exactly one sink is live at a time.
+let assetImportSink: Map<string, string> | null = null;
+
 // The node's raster fill — the ONE selector both emitters (web backgroundImage, rn
 // <Image>) use, so they can never disagree about which paint won. "First" is safe
 // because style.fills[] is already a VISIBLE-paint list (fillToIR drops visible:false),
@@ -464,6 +498,14 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   if (want("size")) lines.push(...sizingLines(n));
   // background = first solid fill (bound var wins as a token comment).
   if (want("fillPaints")) {
+    // An image fill on the SAME node forces the `backgroundColor` LONGHAND for the solid
+    // fill. React patches only the style keys whose VALUES changed between renders, so a
+    // variant change that alters the fill re-applies the `background` SHORTHAND — which
+    // resets background-image to `none` — and does NOT re-set backgroundImage, because that
+    // key did not change. The raster then vanishes on interaction, and only on interaction.
+    // Read outside the `!only && web` gate below on purpose: a per-instance root override
+    // carrying the shorthand would wipe the referenced child's image the same way.
+    const imgFill = imageFillOf(n);
     const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
     if (fill) {
       const ref = colorRef(
@@ -475,7 +517,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
         `${n.name} background`,
         push,
       );
-      lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
+      lines.push(`${web && !imgFill ? "background" : "backgroundColor"}: ${ref},`);
     }
     // image fill: with --images, EXTRACT the raster fill into
     // assets/ and emit a real backgroundImage reference; without it, leave a placeholder
@@ -483,8 +525,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
     // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
     // (handled there). Skipped in override mode (`only`): an image override is flagged by
     // the caller's instance-override TODO, not inlined into a `style={{…}}` prop.
-    const imgFill = !only && web ? imageFillOf(n) : undefined;
-    if (imgFill) {
+    if (!only && web && imgFill) {
       const hash = imgFill.imageHash as string;
       // background-size/-repeat come from the paint's own imageScaleMode — a STRETCH
       // raster forced to `cover` is cropped by a different amount per source aspect.
@@ -492,7 +533,18 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
       if (place.note) push(`image fill "${n.name}" (${n.guid}) — ${place.note}`);
       const file = assetRef(hash);
       if (file) {
-        lines.push(`backgroundImage: "url('./assets/${file}')",`);
+        // A document-relative `url('./assets/x.png')` in an INLINE style resolves against
+        // the page URL, not the module, so it 404s on every route that is not at the
+        // directory root. The bundler form imports the asset and reads back the URL the
+        // bundler resolved (and picks up content hashing / image optimisation with it);
+        // the plain-CSS form needs a real base path, which only the caller knows.
+        if (assetBase !== undefined) {
+          lines.push(`backgroundImage: "url('${assetBaseUrl(file)}')",`);
+        } else {
+          const ident = assetIdent(file);
+          assetImportSink?.set(ident, file);
+          lines.push(`backgroundImage: \`url(\${assetUrl(${ident})})\`,`);
+        }
         lines.push(`backgroundSize: '${place.size}',`);
         lines.push(`backgroundPosition: '${place.position}',`);
         lines.push(`backgroundRepeat: '${place.repeat}',`);
@@ -912,6 +964,7 @@ type VariantRender = {
   usedProps: Set<string>; // logical prop names this variant references
   refImports: Map<string, string>; // referenced child component: Comp identifier → file slug
   iconImports: Map<string, string>; // owned icon component: identifier → file (in ../icons)
+  assetImports: Map<string, string>; // extracted raster: identifier → basename (in ./assets)
   usesStyleProp: boolean; // root merges the `style` override prop → destructure it
   rnImageUsed: boolean; // an rn <Image> was emitted → import it
   todos: string[];
@@ -945,6 +998,7 @@ function renderVariant(v: any): VariantRender {
   const usedProps = new Set<string>();
   const refImports = new Map<string, string>(); // nested child components referenced here
   const iconImports = new Map<string, string>(); // owned icons referenced here (../icons/<file>)
+  const assetImports = new Map<string, string>(); // extracted rasters referenced here (./assets/…)
   let usesStyleProp = false; // set when the root node merges the `style` override prop
   let rnImageUsed = false; // set when an rn <Image> is emitted for an extracted fill
 
@@ -982,6 +1036,7 @@ function renderVariant(v: any): VariantRender {
       usedProps,
       refImports,
       iconImports,
+      assetImports,
       usesStyleProp,
       rnImageUsed,
       todos,
@@ -1321,7 +1376,9 @@ function renderVariant(v: any): VariantRender {
     return wrapConditional(el, binds, depth, n);
   }
 
+  assetImportSink = assetImports;
   const jsx = emit(subtree, 0, false);
+  assetImportSink = null;
   return {
     v,
     propKey,
@@ -1332,6 +1389,7 @@ function renderVariant(v: any): VariantRender {
     usedProps,
     refImports,
     iconImports,
+    assetImports,
     usesStyleProp,
     rnImageUsed,
     todos,
@@ -1437,6 +1495,13 @@ function variantFile(r: VariantRender): string {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([Name, file]) => `import { ${Name} } from '../icons/${file}';`)
     .join("\n");
+  // extracted rasters → ONE static import per asset, from this component folder's own
+  // assets/. The import is what makes the reference module-relative: the bundler rewrites it
+  // to the URL the asset is actually served from, wherever the route lives.
+  const assetImportLines = [...r.assetImports.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([ident, file]) => `import ${ident} from './assets/${file}';`)
+    .join("\n");
   const rnImports = ["View", "Text", "StyleSheet", ...(r.rnImageUsed ? ["Image"] : [])].join(", ");
   const imports =
     (web
@@ -1444,7 +1509,15 @@ function variantFile(r: VariantRender): string {
       : `import * as React from 'react';\nimport { ${rnImports} } from 'react-native';`) +
     (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "") +
     (refImportLines ? `\n${refImportLines}` : "") +
-    (iconImportLines ? `\n${iconImportLines}` : "");
+    (iconImportLines ? `\n${iconImportLines}` : "") +
+    (assetImportLines ? `\n${assetImportLines}` : "");
+  // Bundlers disagree on what a static image import EVALUATES to: webpack/Vite/Parcel hand
+  // back the URL string, Next.js hands back a StaticImageData record whose `.src` holds it.
+  // A two-line local normaliser covers both with no runtime dependency and no build config,
+  // and it is declared above `styles` because that object literal calls it at module scope.
+  const assetHelper = r.assetImports.size
+    ? `\n// A static image import is the url string (webpack/Vite/Parcel) or a static-image\n// record carrying it on .src (Next.js StaticImageData) — accept both.\ntype AssetImport = string | { src: string };\nconst assetUrl = (a: AssetImport): string => (typeof a === 'string' ? a : a.src);\n`
+    : "";
   const todoBlock = r.todos.length
     ? "\n// === TODO (this variant — unconfirmed values) ===\n" +
       r.todos.map((t) => `// TODO: ${t}`).join("\n") +
@@ -1455,7 +1528,7 @@ function variantFile(r: VariantRender): string {
 // per-node style/layout/font/text; bound nodes consume props. Review every // TODO.
 ${imports}
 import type { ${Comp}Props } from './types';
-
+${assetHelper}
 export function ${r.compName}(${destructure(r.usedProps, r.usesStyleProp)}: ${Comp}Props) {
   return (
 ${ind(r.jsx, 4)}
