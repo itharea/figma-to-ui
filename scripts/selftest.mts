@@ -51,7 +51,13 @@ import {
 import { spawnSync } from "child_process";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { extractGeometry, toSvgString, emitIconComponent } from "./lib/svg-lib.mts";
+import {
+  extractGeometry,
+  toSvgString,
+  emitIconComponent,
+  planIcon,
+  isVariantSheet,
+} from "./lib/svg-lib.mts";
 import { deriveLogicals, mapValue, proposePropApi } from "./lib/components-lib.mts";
 import {
   slugify,
@@ -2048,6 +2054,243 @@ const bind = (node: string, field: string) => [{ node, field }];
       JSON.stringify(warns),
     );
   }
+}
+
+// ── svg-lib: icon SHARING identity — geometry may be shared, colour never inherited ─
+{
+  // A two-pip row: the shape four different level-indicator components all draw, each
+  // binding its own colour ramp. The master paints are the SAME for every consumer
+  // (extractGeometry reads the master only, and a variable binding supersedes the cached
+  // literal), so sharing on shape alone used to hand one component's ramp to the rest.
+  const blob = (() => {
+    const bytes: number[] = [];
+    const f = (v: number) => {
+      const b = Buffer.alloc(4);
+      b.writeFloatLE(v);
+      bytes.push(b[0], b[1], b[2], b[3]);
+    };
+    bytes.push(1);
+    f(0);
+    f(0); // M0 0
+    bytes.push(2);
+    f(8);
+    f(0); // L8 0
+    bytes.push(0); // Z
+    return { bytes };
+  })();
+  const pip = (i: number, rgb: [number, number, number]) => ({
+    guid: { sessionID: 1, localID: 2 + i },
+    type: "VECTOR",
+    visible: true,
+    opacity: 1,
+    size: { x: 8, y: 4 },
+    transform: { m00: 1, m01: 0, m02: i * 10, m10: 0, m11: 1, m12: 0 },
+    fillGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+    // Two STACKED fills with the first hidden — how these nodes are actually authored.
+    // Only the visible paint is the colour; the hidden one must never reach the export.
+    fillPaints: [
+      { type: "SOLID", visible: false, opacity: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+      {
+        type: "SOLID",
+        visible: true,
+        opacity: 1,
+        color: { r: rgb[0], g: rgb[1], b: rgb[2], a: 1 },
+      },
+    ],
+  });
+  const kids = [pip(0, [0.5, 0.3, 0.2]), pip(1, [0.3, 0.2, 0.1])];
+  const row: any = {
+    guid: { sessionID: 1, localID: 1 },
+    type: "FRAME",
+    visible: true,
+    size: { x: 24, y: 8 },
+  };
+  const index = {
+    msg: { blobs: [blob] },
+    byKey: new Map<string, any>([
+      ["1:1", row],
+      ...kids.map((k) => [key(k.guid), k] as [string, any]),
+    ]),
+    children: new Map([["1:1", kids]]),
+  } as any;
+  const geo = extractGeometry(index, "1:1");
+  eq("svg: hidden stacked fill is not extracted", geo.paths.length, 2);
+  eq("svg: two distinct master fills", geo.fills.length, 2);
+
+  // The SAME geometry, resolved by two components to two different ramps.
+  const roast = planIcon(geo, [
+    { hex: "#8a5a3c", var: "icon/levels-a/1" },
+    { hex: "#5c3a26", var: "icon/levels-a/2" },
+  ]);
+  const body = planIcon(geo, [
+    { hex: "#f0c419", var: "icon/levels-b/1" },
+    { hex: "#c79a10", var: "icon/levels-b/2" },
+  ]);
+  check(
+    "svg: same shape + different resolved ramps ⇒ separate icons",
+    roast.dedupKey !== body.dedupKey && roast.idHash !== body.idHash,
+    `${roast.dedupKey} vs ${body.dedupKey}`,
+  );
+  const roastSrc = emitIconComponent("LevelsIcon", geo, {
+    web: true,
+    mono: false,
+    palette: roast.palette,
+  });
+  check(
+    "svg: a baked icon bakes the RESOLVED palette, not the master's",
+    /fill="#8a5a3c"/.test(roastSrc) &&
+      /fill="#5c3a26"/.test(roastSrc) &&
+      !roastSrc.includes(geo.fills[0]),
+    roastSrc.slice(0, 200),
+  );
+
+  // The sharing we must NOT lose: one resolved colour ⇒ recolourable, shared on shape.
+  const monoStrong = planIcon(geo, [{ hex: "#111111", var: "icon/default/strong" }]);
+  const monoInverse = planIcon(geo, [{ hex: "#ffffff", var: "icon/default/inverse" }]);
+  check(
+    "svg: a recolourable mono glyph still dedups across palettes",
+    monoStrong.mono && monoInverse.mono && monoStrong.dedupKey === monoInverse.dedupKey,
+    `${monoStrong.dedupKey} vs ${monoInverse.dedupKey}`,
+  );
+  eq(
+    "svg: mono icon file name stays geometry-addressed",
+    monoStrong.idHash,
+    geo.geomHash.slice(0, 8),
+  );
+
+  // …because a shared mono icon bakes NOTHING: its colour is a required prop.
+  const webReq = emitIconComponent("PipIcon", geo, { web: true, mono: true });
+  check(
+    "svg: web mono icon REQUIRES color (no baked default to inherit)",
+    /color: string;/.test(webReq) && !/color\?: string/.test(webReq) && !/color = /.test(webReq),
+    webReq.slice(0, 220),
+  );
+  const rnReq = emitIconComponent("PipIcon", geo, { web: false, mono: true });
+  check(
+    "svg: rn mono icon REQUIRES color (no baked default to inherit)",
+    /color: string \}/.test(rnReq) && !/color = /.test(rnReq),
+    rnReq.slice(0, 220),
+  );
+
+  // Regression guards — do not over-correct:
+  // nothing resolved ⇒ the master paints stand, and the palette is still part of the key.
+  const bare = planIcon(geo, []);
+  check(
+    "svg: no resolved colour ⇒ master paints kept + palette still in the key",
+    !bare.mono &&
+      bare.palette === null &&
+      bare.dedupKey === `${geo.geomHash}#${geo.fills.join(",")}`,
+    JSON.stringify(bare),
+  );
+  // a resolved/master count mismatch ⇒ no guessed remap (the caller flags it instead).
+  const mismatch = planIcon(geo, [{ hex: "#111111" }, { hex: "#222222" }, { hex: "#333333" }]);
+  check(
+    "svg: resolved/master colour count mismatch ⇒ no guessed remap",
+    mismatch.palette === null && !mismatch.mono,
+    JSON.stringify(mismatch),
+  );
+}
+
+// ── svg-lib: a variant SHEET is N drawings — one icon per SYMBOL, never one ──
+{
+  // A set frame with two SYMBOL variants, each drawing its own line. Rendered as one
+  // composite glyph it becomes a single drawing of the whole sheet; it must be split.
+  const blobs = [0, 1].map((i) => {
+    const bytes: number[] = [];
+    const f = (v: number) => {
+      const b = Buffer.alloc(4);
+      b.writeFloatLE(v);
+      bytes.push(b[0], b[1], b[2], b[3]);
+    };
+    bytes.push(1);
+    f(0);
+    f(0); // M0 0
+    bytes.push(2);
+    f(6 + i * 4);
+    f(0); // L6/L10 0 — distinct shapes
+    bytes.push(0); // Z
+    return { bytes };
+  });
+  const vector = (i: number) => ({
+    guid: { sessionID: 1, localID: 10 + i },
+    type: "VECTOR",
+    visible: true,
+    opacity: 1,
+    size: { x: 16, y: 16 },
+    fillGeometry: [{ commandsBlob: i, windingRule: "NONZERO" }],
+    fillPaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0, g: 0, b: 0, a: 1 } }],
+  });
+  const symbol = (i: number) => ({
+    guid: { sessionID: 1, localID: 2 + i },
+    type: "SYMBOL",
+    visible: true,
+    name: `banner-${i + 1}`,
+    size: { x: 16, y: 16 },
+    transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: i * 20 },
+  });
+  const sheet: any = {
+    guid: { sessionID: 1, localID: 1 },
+    type: "FRAME",
+    visible: true,
+    size: { x: 16, y: 36 },
+  };
+  const syms = [symbol(0), symbol(1)];
+  const vecs = [vector(0), vector(1)];
+  const index = {
+    msg: { blobs },
+    byKey: new Map<string, any>([
+      ["1:1", sheet],
+      ...syms.map((s) => [key(s.guid), s] as [string, any]),
+      ...vecs.map((v) => [key(v.guid), v] as [string, any]),
+    ]),
+    children: new Map<string, any[]>([
+      ["1:1", syms],
+      [key(syms[0].guid), [vecs[0]]],
+      [key(syms[1].guid), [vecs[1]]],
+    ]),
+  } as any;
+
+  // raw casing (SYMBOL) and IR casing (symbol) must both classify.
+  check(
+    "svg: a frame of raw SYMBOL children is a variant sheet",
+    isVariantSheet({ ...sheet, children: syms }),
+  );
+  check(
+    "svg: an IR frame of symbol children is a variant sheet",
+    isVariantSheet({ type: "frame", children: [{ type: "symbol" }, { type: "symbol" }] }),
+  );
+  check(
+    "svg: a frame of VECTOR children is NOT a sheet (still one composite glyph)",
+    !isVariantSheet({ type: "frame", children: [{ type: "vector" }, { type: "vector" }] }),
+  );
+  check(
+    "svg: a lone SYMBOL in a wrapper is NOT a sheet (still one drawing)",
+    !isVariantSheet({ type: "frame", children: [{ type: "symbol" }] }),
+  );
+  check(
+    "svg: an invisible symbol does not count toward a sheet",
+    !isVariantSheet({
+      type: "frame",
+      children: [{ type: "symbol" }, { type: "symbol", visible: false }],
+    }),
+  );
+
+  // Extracting the SHEET yields the whole set as one drawing (what codegen must not emit)…
+  eq(
+    "svg: sheet extracted whole = one combined drawing",
+    extractGeometry(index, "1:1").paths.length,
+    2,
+  );
+  // …while extracting per SYMBOL child yields one icon each, with its own geometry.
+  const a = extractGeometry(index, key(syms[0].guid));
+  const b = extractGeometry(index, key(syms[1].guid));
+  eq("svg: per-symbol extraction = one path each (a)", a.paths.length, 1);
+  eq("svg: per-symbol extraction = one path each (b)", b.paths.length, 1);
+  check(
+    "svg: per-symbol icons are distinct components",
+    a.geomHash !== b.geomHash && planIcon(a, []).dedupKey !== planIcon(b, []).dedupKey,
+    `${a.geomHash} vs ${b.geomHash}`,
+  );
 }
 
 // ── raw.mts: dispatch smoke (confirms all 8 folded lib imports resolve) ──────

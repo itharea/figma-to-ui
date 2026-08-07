@@ -154,13 +154,20 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
 
 - **`--svg msg-<name>.json` makes icons an internal, deterministic step.** Codegen exports each
   vector's geometry into a **deduplicated owned icon component** under `<out>/icons/` (the
-  `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value — a
-  mono icon gets `currentColor` + the resolved token, so it recolours correctly. A glyph that is
-  **both filled and outlined** counts as two paints (IR `color` + `stroke`) — it is not mono, so
-  both colours are baked and the outline survives instead of being flattened. Instance-swap
+  `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value.
+  A glyph's PAINT COUNT decides how: one paint ⇒ mono, more than one ⇒ baked. A glyph that is
+  **both filled and outlined** counts as two paints (IR `color` + `stroke`), so it is not mono
+  and the outline survives instead of being flattened into the fill. Icons are shared by
+  GEOMETRY, so a shared icon never bakes a default colour: a mono glyph takes a
+  **required `color` prop** (`currentColor` + the resolved token) and every call site passes
+  its own. A multi-paint glyph does bake, so its resolved palette is part of its identity —
+  same shape in two different ramps ⇒ two icons, not one. Instance-swap
   slots render `{icon ?? <DefaultGlyph/>}`. No `export-svg` placeholder boxes, no manual re-map.
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
-  `--svg` explicitly.)
+  `--svg` explicitly.) A set whose variants carry no `prop=value` names has no variant axes, so
+  the whole set frame is its one pseudo-variant; codegen still emits **one icon per symbol**
+  there (never one drawing of the entire sheet) and flags it — name the variants in Figma to get
+  a real variant API.
 - **`--images $WORK/ex/images`** extracts raster fills into `<slug>/assets/` and wires real
   references (web `backgroundImage` / rn `<Image>`), honouring each paint's own
   `imageScaleMode` — `FILL`→`cover`, `FIT`→`contain`, `STRETCH`→`100% 100%`, `TILE`→`repeat`.

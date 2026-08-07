@@ -28,7 +28,9 @@ export type SvgGeometry = {
   viewBox: string; // "0 0 W H"
   paths: SvgPath[];
   fills: string[]; // distinct master hexes, order-preserved (mono ⇒ length 1)
-  geomHash: string; // sha256 of shape (d+rule+transform+opacity) — COLOUR-INDEPENDENT dedup key
+  // sha256 of shape (d+rule+transform+opacity) — COLOUR-INDEPENDENT. It is the SHAPE's
+  // identity, never an icon component's on its own: see planIcon for the sharing key.
+  geomHash: string;
 };
 
 type SvgIndex = { msg: any; byKey: Map<string, any>; children: Map<string, any[]> };
@@ -526,6 +528,32 @@ export function extractGeometry(index: SvgIndex, guidKey: string): SvgGeometry {
   return { width, height, viewBox: `${vx} ${vy} ${vw} ${vh}`, paths: out, fills, geomHash };
 }
 
+// The minimum any node tree must expose to be classified below — satisfied by both a raw
+// decoded node (`type: "SYMBOL"`) and an IR node (`type: "symbol"`), hence the case fold.
+export type GlyphNode = {
+  type?: string | null;
+  visible?: boolean | null;
+  children?: GlyphNode[] | null;
+};
+
+// A variant SHEET: a node whose visible children are ALL component DEFINITIONS. Figma
+// stores each variant of a component set as its own SYMBOL under the set frame, so such a
+// frame is a set laid out for authoring — N separate drawings side by side, never one.
+//
+// It matters because a set whose variants are not named `prop=value` yields no variant axes
+// (only the weaker `stroke-hint` frame detection fires), and codegen then renders the WHOLE
+// set frame as its single pseudo-variant. Handed to extractGeometry that produces one
+// enormous drawing of every variant at once — observed as a single 390×896 / 828 KB icon
+// for a five-banner illustration set — instead of one icon per variant. Callers must split
+// on this and run extractGeometry per SYMBOL child.
+//
+// Two or more: a lone SYMBOL inside a wrapper frame is still one drawing, and splitting it
+// would only add an indirection.
+export function isVariantSheet(n: GlyphNode): boolean {
+  const kids = (n.children ?? []).filter((c) => c && c.visible !== false);
+  return kids.length >= 2 && kids.every((c) => (c.type ?? "").toLowerCase() === "symbol");
+}
+
 // Serialize a single <path> (or <Path> for react-native-svg). React-style camelCase
 // attrs (fillRule/fillOpacity) so the same string drops into a .tsx component; the raw
 // SVG file path (export-svg CLI) lower-cases them via `dom: true`.
@@ -555,17 +583,79 @@ export function toSvgString(
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${geo.viewBox}" width="${geo.width}" height="${geo.height}">\n${body}\n</svg>\n`;
 }
 
+// One RESOLVED colour a consumer put on an icon subtree: the hex is GROUND TRUTH (the
+// variable's resolved value when the paint is bound), `var` the design-token name.
+export type IconColor = { hex: string; var?: string | null };
+
+export type IconPlan = {
+  mono: boolean; // colour is the CALLER's — emitIconComponent requires a `color` prop
+  palette: string[] | null; // baked fills, positional over geo.fills; null ⇒ master paints
+  dedupKey: string; // sharing identity: same key ⇒ the same generated component
+  idHash: string; // 8 hex chars, content-addressed on dedupKey — for the file NAME
+};
+
+// Decide how a node's geometry becomes an OWNED icon component: who supplies the colour,
+// and what identity the component may be SHARED under.
+//
+// The bug this exists to prevent: `geomHash` is colour-independent (right — a mono glyph
+// drawn by ten components is one file), but a component that BAKES its fills cannot be
+// shared on shape alone. `geo.fills` are the MASTER's paints, which are identical across
+// every consumer (extractGeometry deliberately ignores per-instance overrides) and stale
+// wherever a variable binding replaced them — so shape-only sharing collapsed same-shaped
+// artwork from different components into one baked palette, and generation order decided
+// whose palette the rest inherited.
+//
+// `resolved` is the CALL SITE's colour truth: one entry per distinct visible paint the IR
+// (override- and variable-aware) puts on this subtree, in document order. Then:
+//   ONE resolved colour  ⇒ mono. Share on shape alone and take the colour from a REQUIRED
+//                          `color` prop, so a caller physically cannot inherit a palette.
+//   SEVERAL              ⇒ the fills are baked, so the PALETTE is part of the identity.
+//                          Bake the resolved colours over the master's stale ones when the
+//                          two agree 1:1 (both are distinct-colour document order over the
+//                          same subtree); otherwise keep the master paints — the caller
+//                          flags the mismatch rather than guessing at a mapping.
+// `resolved` empty (nothing resolvable) falls back to the master's own paint count.
+export function planIcon(geo: SvgGeometry, resolved: IconColor[]): IconPlan {
+  const mono = resolved.length ? resolved.length === 1 : geo.fills.length === 1;
+  if (mono)
+    return {
+      mono,
+      palette: null,
+      dedupKey: geo.geomHash,
+      idHash: geo.geomHash.slice(0, 8),
+    };
+  const palette = resolved.length === geo.fills.length ? resolved.map((c) => c.hex) : null;
+  const dedupKey = `${geo.geomHash}#${(palette ?? geo.fills).join(",")}`;
+  return {
+    mono,
+    palette,
+    dedupKey,
+    idHash: createHash("sha256").update(dedupKey).digest("hex").slice(0, 8),
+  };
+}
+
 // Generate an owned, recolorable icon component (the RoastSquare pattern).
-//   mono ⇒ fill is driven by the caller's `color` prop (web `currentColor`, RN `fill={color}`)
-//   multi/duotone ⇒ faithful baked per-path fills; `color` is ignored
+//   mono ⇒ fill is driven by the caller's REQUIRED `color` prop (web `currentColor`,
+//          RN `fill={color}`). No default: the component is shared by GEOMETRY, so a
+//          baked default is one component's palette silently imposed on every other.
+//   multi/duotone ⇒ faithful baked per-path fills; `color` is ignored. `opts.palette`
+//          replaces geo.fills positionally (the caller's resolved colours) — pass it
+//          together with planIcon's dedupKey so a palette never leaks across components.
 // Web emits an inline <svg> (required for currentColor recolouring — <img src> can't recolor).
 // RN emits react-native-svg (a peer dependency of the consuming app).
 export function emitIconComponent(
   name: string,
   geo: SvgGeometry,
-  opts: { web: boolean; mono: boolean },
+  opts: { web: boolean; mono: boolean; palette?: string[] | null },
 ): string {
   const { web, mono } = opts;
+  const palette = opts.palette ?? null;
+  // baked fill for one path: the resolved palette entry for its master hex, else the master.
+  const baked = (p: SvgPath): string => {
+    if (!palette) return p.fill;
+    const i = geo.fills.indexOf(p.fill);
+    return i >= 0 && palette[i] !== undefined ? palette[i] : p.fill;
+  };
   // Render at the glyph's ASPECT RATIO, not a forced square: a non-square glyph (e.g. a
   // stroke-arrow's 2×24 shaft, or a wide arrowhead) would otherwise be squished into size×size
   // and vanish. `size` drives the width; height follows the viewBox aspect. Square glyphs
@@ -574,25 +664,25 @@ export function emitIconComponent(
   const hExpr = Math.abs(ar - 1) < 1e-6 ? "size" : `size * ${+ar.toFixed(5)}`;
   if (web) {
     const paths = geo.paths
-      .map((p) => `      <path ${pathAttrs(p, mono ? null : p.fill, false)} />`)
+      .map((p) => `      <path ${pathAttrs(p, mono ? null : baked(p), false)} />`)
       .join("\n");
     const svgFill = mono ? ` fill="currentColor"` : "";
     const svgStyle = mono ? ` style={{ color, ...style }}` : ` style={style}`;
     const props = mono
-      ? `{ size = ${geo.width}, color = 'currentColor', style }: { size?: number; color?: string; style?: React.CSSProperties }`
+      ? `{ size = ${geo.width}, color, style }: { size?: number; color: string; style?: React.CSSProperties }`
       : `{ size = ${geo.width}, style }: { size?: number; style?: React.CSSProperties }`;
-    return `import * as React from 'react';\n\n// AUTO-GENERATED owned icon (figma-to-ui codegen). ${mono ? "Recolour via the `color` prop." : "Multi-fill — colours baked from the design."}\nexport function ${name}(${props}) {\n  return (\n    <svg width={size} height={${hExpr}} viewBox="${geo.viewBox}"${svgFill}${svgStyle} aria-hidden="true">\n${paths}\n    </svg>\n  );\n}\n`;
+    return `import * as React from 'react';\n\n// AUTO-GENERATED owned icon (figma-to-ui codegen). ${mono ? "Shared by GEOMETRY — `color` is REQUIRED (no baked default to inherit)." : "Multi-fill — colours baked from the design."}\nexport function ${name}(${props}) {\n  return (\n    <svg width={size} height={${hExpr}} viewBox="${geo.viewBox}"${svgFill}${svgStyle} aria-hidden="true">\n${paths}\n    </svg>\n  );\n}\n`;
   }
   // react-native-svg — each <Path> needs its own fill (no svg-level inheritance).
   const rnPath = (p: SvgPath): string => {
-    const a = [`d="${p.d}"`, mono ? `fill={color}` : `fill="${p.fill}"`];
+    const a = [`d="${p.d}"`, mono ? `fill={color}` : `fill="${baked(p)}"`];
     if (p.opacity < 1) a.push(`fillOpacity={${p.opacity.toFixed(3)}}`);
     a.push(`fillRule="${p.fillRule}"`, `transform="${p.transform}"`);
     return `      <Path ${a.join(" ")} />`;
   };
   const paths = geo.paths.map(rnPath).join("\n");
   const props = mono
-    ? `{ size = ${geo.width}, color = '#000' }: { size?: number; color?: string }`
+    ? `{ size = ${geo.width}, color }: { size?: number; color: string }`
     : `{ size = ${geo.width} }: { size?: number }`;
-  return `import * as React from 'react';\nimport Svg, { Path } from 'react-native-svg'; // peer dependency\n\n// AUTO-GENERATED owned icon (figma-to-ui codegen). ${mono ? "Recolour via the `color` prop." : "Multi-fill — colours baked from the design."}\nexport function ${name}(${props}) {\n  return (\n    <Svg width={size} height={${hExpr}} viewBox="${geo.viewBox}">\n${paths}\n    </Svg>\n  );\n}\n`;
+  return `import * as React from 'react';\nimport Svg, { Path } from 'react-native-svg'; // peer dependency\n\n// AUTO-GENERATED owned icon (figma-to-ui codegen). ${mono ? "Shared by GEOMETRY — `color` is REQUIRED (no baked default to inherit)." : "Multi-fill — colours baked from the design."}\nexport function ${name}(${props}) {\n  return (\n    <Svg width={size} height={${hExpr}} viewBox="${geo.viewBox}">\n${paths}\n    </Svg>\n  );\n}\n`;
 }
