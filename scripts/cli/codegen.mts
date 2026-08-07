@@ -25,14 +25,14 @@
 //   (--out is an output DIRECTORY; <out>/<slug>/ is written, a file summary to stderr.)
 import * as fs from "fs";
 import * as path from "path";
-import { imagePlacement, type IRFill, type IRNode } from "../lib/screens-lib.mts";
-import { mapValue, deriveLogicals, type Logical } from "../lib/components-lib.mts";
+import { type IRNode, imagePlacement, type IRFill } from "../lib/screens-lib.mts";
+import { mapValue, deriveLogicals, proposePropApi, type Logical } from "../lib/components-lib.mts";
 import { disambiguateJustify } from "../lib/reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap, sizingLines } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
 import { extractGeometry, emitIconComponent } from "../lib/svg-lib.mts";
-import { slugify, compIdent, kebab } from "../lib/naming.mts";
+import { slugify, compIdent, axisPropNames } from "../lib/naming.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];
@@ -120,6 +120,12 @@ if (!comp) {
 // --- axes / default variant ---------------------------------------------------
 const axes: Record<string, string[]> = comp.axes ?? {};
 const axisNames = Object.keys(axes);
+// Axis name → the prop identifier the generated component exposes. ONE map, consulted by
+// every emitter (the Props type, the destructure in index.tsx, the dispatcher key, and the
+// attrs a PARENT passes on the nested-reference path) — they must agree
+// character-for-character. A Figma axis is free to be named "item count" or "in", neither
+// of which is a legal identifier; axisPropNames sanitises and de-dupes.
+const axisProp = axisPropNames(axisNames);
 // A component with NO detected variants (a heuristic single-frame component — e.g.
 // `stroke-hint` detected a bordered frame, no variant axis) still IS a component: treat
 // the set frame itself as one default variant rendered from its own subtree, instead of
@@ -299,7 +305,7 @@ const propKeyExpr =
     ? `'${defaultKey}'`
     : axisNames.length === 1
       ? "variant"
-      : axisNames.map((a) => kebab(a)).join(" + '/' + ");
+      : axisNames.map((a) => axisProp.get(a)!).join(" + '/' + ");
 
 // Name of the per-instance ROOT style-override prop for a component. Defaults
 // to the idiomatic `style`, but a Figma variant axis can literally be named "Style" (→ a
@@ -310,7 +316,7 @@ function styleOverridePropName(c: any): string {
   const taken = new Set<string>();
   const axNames = Object.keys(c.axes ?? {});
   if (axNames.length === 1) taken.add("variant");
-  else for (const a of axNames) taken.add(kebab(a));
+  else for (const id of axisPropNames(axNames).values()) taken.add(id);
   for (const l of deriveLogicals(c).logicals) taken.add(l.name);
   for (const cand of ["style", "rootStyle", "styleOverride", "rootStyleOverride"])
     if (!taken.has(cand)) return cand;
@@ -854,17 +860,20 @@ function componentReference(
 ): string {
   refImports.set(entry.Comp, entry.slug);
 
-  // variant-selecting attrs — mirrors the meta component's Props (single-axis →
-  // `variant`; multi-axis → one kebab-named prop per axis). Values use the SAME
-  // mapValue() the union type is built from (parity with components-lib).
+  // variant-selecting attrs — mirrors the REFERENCED component's Props (single-axis →
+  // `variant`; multi-axis → one prop per axis, under the same sanitised identifier its own
+  // Props type declares). Values use the SAME mapValue() the union type is built from
+  // (parity with components-lib).
   const rax: Record<string, string[]> = entry.comp.axes ?? {};
   const axNames = Object.keys(rax);
+  const refAxisProp = axisPropNames(axNames);
   const vprops: Record<string, string> = entry.variant?.props ?? {};
   let attrs = "";
   if (entry.variant && axNames.length === 1) {
     attrs += ` variant="${mapValue(String(vprops[axNames[0]] ?? ""))}"`;
   } else if (entry.variant && axNames.length > 1) {
-    for (const a of axNames) attrs += ` ${kebab(a)}="${mapValue(String(vprops[a] ?? ""))}"`;
+    for (const a of axNames)
+      attrs += ` ${refAxisProp.get(a)}="${mapValue(String(vprops[a] ?? ""))}"`;
   }
 
   // guid → resolved IR node for the instance subtree. Invisible nodes were dropped in
@@ -1397,14 +1406,39 @@ for (const r of rendered) allTodos.push(...r.todos);
 // === FILE EMISSION ============================================================
 const reactNodeUsed = logicals.some((l) => l.role === "slot");
 
+// A doc-comment payload can carry an arbitrary Figma name; a literal "*/" inside it would
+// close the comment early and break the file.
+const commentSafe = (s: string) => s.replace(/\*\//g, "* /");
+
 // Props type body (shared by index + types.ts). Variant union first, then the
 // collapsed non-variant props (all optional). Each prop keeps its Figma name.
 function propsTypeBody(): string {
   const lines: string[] = [];
-  if (comp.propApi) lines.push(`  ${comp.propApi};`);
+  // Recomputed from comp.axes rather than read from comp.propApi: the stored string is
+  // baked at build-ir time, so an IR built by an older build-ir would pin BOTH an
+  // unsanitised axis identifier and a stale value union, while the dispatcher's switch
+  // cases below are computed live from mapValue — the two would silently disagree.
+  const propApi = axisNames.length ? proposePropApi({ axes, variants: [] }) : "";
+  if (propApi) {
+    // Traceability: the emitted identifier is not always the Figma axis name (an axis may
+    // be called "item count", or "in"), and a single-axis set is exposed as `variant`
+    // regardless of its axis name — record the mapping so the generated component can be
+    // read against the design it came from.
+    const renamed = axisNames
+      .filter((a) => axisProp.get(a) !== a)
+      .map((a) => `${a} → ${axisProp.get(a)}`);
+    const axisDoc =
+      axisNames.length === 1
+        ? `Figma axis: ${axisNames[0]} → variant`
+        : renamed.length
+          ? `Figma axes: ${renamed.join(", ")}`
+          : "";
+    if (axisDoc) lines.push(`  /** ${commentSafe(axisDoc)} */`);
+    lines.push(`  ${propApi};`);
+  }
   for (const l of logicals) {
     const fig = l.figNames.join(" + ");
-    lines.push(`  /** Figma: ${fig} */`);
+    lines.push(`  /** Figma: ${commentSafe(fig)} */`);
     lines.push(`  ${l.name}?: ${l.tsType};`);
   }
   // Per-instance ROOT style override, merged onto the component's root node.
@@ -1520,7 +1554,7 @@ function indexFile(): string {
       ? ""
       : axisNames.length === 1
         ? "variant"
-        : axisNames.map(kebab).join(", ");
+        : axisNames.map((a) => axisProp.get(a)!).join(", ");
   const reviewBlock = allTodos.length
     ? "\n// === REVIEW (all open TODOs, attributed to the variant) ===\n" +
       allTodos.map((t) => `// TODO: ${t}`).join("\n") +

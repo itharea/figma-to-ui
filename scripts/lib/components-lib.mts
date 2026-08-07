@@ -6,7 +6,7 @@
 // the #9747ff dashed-stroke editor hint, which is only a labeled fallback (the
 // purple stroke is a render hint, not a format guarantee — determinism contract).
 import { load, key, colorStr } from "./figma-index.mts";
-import { kebab, camel } from "./naming.mts";
+import { kebab, propIdent, axisPropNames } from "./naming.mts";
 
 export type ComponentSet = {
   guid: string;
@@ -145,14 +145,20 @@ export const mapValue = (v: string) => VALUE_SYNONYMS[v] ?? kebab(v);
 const union = (values: string[]) => values.map((v) => `'${mapValue(v)}'`).join(" | ");
 
 // Derive a TS prop type. Single-axis → the prop is ALWAYS named `variant`
-// (regardless of the axis's own name). Multi-axis → one prop per axis.
+// (regardless of the axis's own name). Multi-axis → one prop per axis, under the
+// SANITISED axis identifier: an axis is free to be called "item count" or "in", and
+// kebab() used to emit those verbatim into a type literal AND a destructuring pattern
+// (`const { type, item-count } = props`), which does not parse. axisPropNames is the
+// single source of that mapping — codegen derives the identical map for the
+// destructure, the dispatcher key and the attrs a parent passes.
 export function proposePropApi(matrix: ReturnType<typeof parseVariantMatrix>): string {
   const axisNames = Object.keys(matrix.axes);
   if (axisNames.length === 0) return "";
   if (axisNames.length === 1) {
     return `variant: ${union(matrix.axes[axisNames[0]])}`;
   }
-  return axisNames.map((axis) => `${kebab(axis)}: ${union(matrix.axes[axis])}`).join("; ");
+  const idents = axisPropNames(axisNames);
+  return axisNames.map((axis) => `${idents.get(axis)}: ${union(matrix.axes[axis])}`).join("; ");
 }
 
 // --- non-variant component property API ----------------
@@ -173,7 +179,7 @@ export function proposePropApi(matrix: ReturnType<typeof parseVariantMatrix>): s
 // — never match ref.defID against a set.def.id directly (different namespace).
 
 export type ComponentProp = {
-  name: string; // normalized camelCase
+  name: string; // normalized camelCase, reserved-word-safe (propIdent)
   rawName: string; // raw def name (e.g. "Başlık")
   kind: "text" | "boolean" | "instanceSwap";
   // defKey = the SET-def id key (sessionID:localID). The STABLE identity of a prop:
@@ -233,7 +239,9 @@ export function extractComponentProps(
     if (!kind) continue; // skip VARIANT (modeled by the matrix) + unknowns
     const rawName = typeof d.name === "string" ? d.name : key(d.id);
     props.set(key(d.id), {
-      name: camel(rawName),
+      // propIdent, not camel: a def is free to be named "in" or "class" and the name is
+      // emitted bare into a destructuring pattern downstream.
+      name: propIdent(rawName),
       rawName,
       kind,
       defKey: key(d.id),
@@ -412,11 +420,15 @@ export function deriveLogicals(c: { props?: ComponentProp[] } | any): {
   const logicals: Logical[] = [];
   const logicalByDefKey = new Map<string, Logical>();
   const usedNames = new Set<string>();
-  // de-dupe an emitted prop name deterministically (collision → name2, name3, …).
+  // Sanitise, then de-dupe deterministically (collision → name2, name3, …). The sanitise
+  // is repeated here rather than trusted from `props[].name` because deriveLogicals also
+  // runs against catalog records read off disk (an IR built by an older build-ir, or the
+  // show<X> name synthesised just below), and it is idempotent.
   const uniqueName = (base: string): string => {
-    let n = base || "prop";
+    const safe = propIdent(base);
+    let n = safe;
     let i = 2;
-    while (usedNames.has(n)) n = `${base}${i++}`;
+    while (usedNames.has(n)) n = `${safe}${i++}`;
     usedNames.add(n);
     return n;
   };
