@@ -72,6 +72,8 @@ import {
   propIdent,
   axisPropNames,
   isSafeIdent,
+  iconIdent,
+  ownedIconName,
   RESERVED_WORDS,
 } from "./lib/naming.mts";
 
@@ -3812,6 +3814,186 @@ if (fs.existsSync(decodePath)) {
       "screen sizing: no hugging/filling node freezes both axes",
       frozen.map((n) => n.name),
       [],
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── owned icons: a bare screen VECTOR reaches the same icon set as a component's ──
+//
+// codegen owns the glyphs inside a component SCAFFOLD, and it is invoked per component SET —
+// it never walks a screen. A screen nonetheless draws VECTOR nodes that sit in no component,
+// and `agents/assemble-screen.md` now states that those go into the SAME owned icon set, via
+// `export-svg.mts --component`. That rule is only executable if (a) such nodes actually reach
+// the emitted screen IR carrying their resolved paint, (b) the exporter turns one into the
+// same kind of component codegen emits, under the SAME name, and (c) it recognises a glyph
+// already owned instead of writing a second copy. Assert all three against the real fixture.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-owned-icons-"));
+  try {
+    // --- the name is ONE function, shared by both writers into the icons/ dir ---
+    eq(
+      "icon name: a layer path keeps only its last segment",
+      iconIdent("icons/Tab/House"),
+      "House",
+    );
+    eq("icon name: punctuation folds to PascalCase", iconIdent("arrow-right 2"), "ArrowRight2");
+    // A glyph is routinely named for a number ("941" — the iOS status-bar time) or nothing at
+    // all, and the stem is emitted as an exported identifier, so neither may lead the name.
+    eq("icon name: a digit-leading stem is prefixed", iconIdent("941"), "Glyph941");
+    eq("icon name: an unnamed glyph still names a component", iconIdent(""), "Glyph");
+    eq(
+      "icon name: file/export name is stem + identity hash",
+      ownedIconName("Shape", "0badf00d"),
+      "Shape_0badf00dIcon",
+    );
+
+    const irDir = path.join(tmp, "ir");
+    const build = spawnSync(
+      process.argv[0],
+      [path.join(here, "cli", "build-ir.mts"), fixture, "--scope", "all", "--out", irDir],
+      { encoding: "utf8" },
+    );
+    check("owned icons: build-ir exits 0", build.status === 0, (build.stderr ?? "").slice(-400));
+
+    // --- (a) bare vectors REACH the screen IR, with their node-level paint ---
+    // "Bare" = outside any instance, so codegen's "the scaffold already wired it" reasoning
+    // cannot apply. `color`/`stroke` are node-LEVEL fields (not inside `style`), which is
+    // where the `var` token binding lives — the prompt names them for this reason.
+    const manifest = JSON.parse(fs.readFileSync(path.join(irDir, "manifest.json"), "utf8"));
+    const bare: IRNode[] = [];
+    const allNodes: IRNode[] = [];
+    for (const rel of manifest.artifacts?.screens ?? []) {
+      const root: IRNode = JSON.parse(fs.readFileSync(path.join(irDir, rel), "utf8"));
+      (function walk(n: IRNode, inInstance: boolean) {
+        allNodes.push(n);
+        if (n.type === "vector" && !inInstance) bare.push(n);
+        for (const c of n.children ?? []) walk(c, inInstance || n.type === "instance");
+      })(root, false);
+    }
+    check("owned icons: the screens carry bare VECTOR nodes", bare.length >= 2, `${bare.length}`);
+    eq(
+      "owned icons: every bare vector states a resolved paint",
+      bare.filter((n) => !n.color?.hex && !n.stroke?.hex).map((n) => n.name),
+      [],
+    );
+
+    // --- (b) the exporter emits a codegen-shaped component under the codegen name ---
+    const iconsDir = path.join(tmp, "icons");
+    const target = bare[0];
+    // Every read of the icon set is defensive on purpose. Without `--component` this path is
+    // not a directory at all (the older CLI reads the argument as an out.svg and writes a file
+    // there), and an unguarded readdir turns the negative control into a CRASH that aborts the
+    // whole suite instead of a set of red assertions with a count.
+    const lsIcons = (): string[] => {
+      try {
+        return fs.readdirSync(iconsDir).sort();
+      } catch {
+        return [];
+      }
+    };
+    const readIcon = (f: string | undefined): string => {
+      try {
+        return f ? fs.readFileSync(path.join(iconsDir, f), "utf8") : "";
+      } catch {
+        return "";
+      }
+    };
+    const runExport = (guid: string, colors: string[]) =>
+      spawnSync(
+        process.argv[0],
+        [
+          path.join(here, "cli", "export-svg.mts"),
+          fixture,
+          guid,
+          "--component",
+          iconsDir,
+          "--framework",
+          "web",
+          ...colors.flatMap((c) => ["--color", c]),
+        ],
+        { encoding: "utf8" },
+      );
+    const mono = runExport(target.guid, [target.color!.hex!]);
+    check("owned icons: --component exits 0", mono.status === 0, (mono.stderr ?? "").slice(-400));
+    // The name is derivable, not incidental: the same stem + identity hash codegen would have
+    // built for this node. If the two namers ever diverge, the icons/ dir gains a second copy
+    // of every shared glyph and nothing else notices.
+    const geo = extractGeometry(load(fixture), target.guid);
+    const wantName = ownedIconName(
+      target.name,
+      planIcon(geo, [{ hex: target.color!.hex! }]).idHash,
+    );
+    eq("owned icons: written under the shared codegen name", lsIcons(), [`${wantName}.tsx`]);
+    const src = readIcon(`${wantName}.tsx`);
+    check(
+      "owned icons: ONE resolved paint ⇒ mono, colour is a REQUIRED prop",
+      src.includes(`export function ${wantName}(`) &&
+        src.includes("color: string") &&
+        src.includes('fill="currentColor"'),
+      src.slice(0, 200),
+    );
+
+    // --- (c) a glyph already owned is REUSED, never written twice ---
+    const again = runExport(target.guid, [target.color!.hex!]);
+    check("owned icons: re-running is a no-op", again.stdout.includes("reused"), again.stdout);
+    eq("owned icons: no second file for the same glyph", lsIcons().length, 1);
+    // …including through a DIFFERENT layer name. Reuse is keyed on the identity hash alone,
+    // because the same drawing is one glyph whatever the layer it was reached through is
+    // called — keying on the whole filename would put two copies of it in the owned set. The
+    // wrapping frame of a lone glyph is the everyday version of this: exporting the outermost
+    // vector-only node (what the prompt asks for) yields the same drawing under the frame's
+    // name, and codegen may already own it under the vector's.
+    const geomOf = (n: IRNode) => {
+      try {
+        return extractGeometry(load(fixture), n.guid).geomHash;
+      } catch {
+        return null;
+      }
+    };
+    const twin = allNodes.find(
+      (n) => n.guid !== target.guid && n.name !== target.name && geomOf(n) === geo.geomHash,
+    );
+    check("owned icons: the fixture reaches one drawing under two names", !!twin, `${twin?.name}`);
+    const reuse = runExport(twin?.guid ?? target.guid, [target.color!.hex!]);
+    check(
+      "owned icons: the same drawing under another layer name reuses the file",
+      reuse.stdout.includes("reused") && lsIcons().length === 1,
+      reuse.stdout,
+    );
+
+    // --- the other direction: a second paint is an OUTLINE, not a recolouring ---
+    // A filled-and-outlined glyph carries two paints (IR `color` + `stroke`). Counting one
+    // would make it mono and flatten the outline into the fill — the identity must differ.
+    const baked = runExport(target.guid, [target.color!.hex!, "#000000"]);
+    check("owned icons: a two-paint glyph exports too", baked.status === 0, baked.stderr);
+    const files = lsIcons();
+    eq("owned icons: two paints ⇒ its own component", files.length, 2);
+    const bakedSrc = readIcon(files.find((f) => f !== `${wantName}.tsx`));
+    check(
+      "owned icons: a baked glyph exposes no colour prop to flatten it with",
+      !!bakedSrc &&
+        !bakedSrc.includes("color: string") &&
+        !bakedSrc.includes('fill="currentColor"'),
+      bakedSrc.slice(0, 200),
+    );
+
+    // --- and the pre-existing raw-SVG form is untouched by the new flag parsing ---
+    const svgOut = path.join(tmp, "raw.svg");
+    const raw = spawnSync(
+      process.argv[0],
+      [path.join(here, "cli", "export-svg.mts"), fixture, target.guid, svgOut],
+      { encoding: "utf8" },
+    );
+    check("owned icons: the raw .svg form still exports", raw.status === 0, raw.stderr);
+    const rawSvg = fs.existsSync(svgOut) ? fs.readFileSync(svgOut, "utf8") : "";
+    check(
+      "owned icons: the raw form keeps the master paints",
+      rawSvg.startsWith("<svg ") && rawSvg.includes("<path "),
+      rawSvg.slice(0, 120),
     );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

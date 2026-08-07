@@ -38,8 +38,13 @@ wired by codegen (imported from `../icons`) — there is no icon policy to apply
 3. Extract shared sub-structure into small reused components.
 4. Lift variant axes → props; collapse non-variant props idiomatically.
 5. Keep the icons codegen already wired (`<NameIcon size color/>`, and instance-swap
-   defaults as `{slot ?? <Default/>}`). You may rename them; never re-export, recolour, or
-   replace them with a library — the owned icon set under `../icons` is the source of truth.
+   defaults as `{slot ?? <Default/>}`); never re-export, recolour, or replace them with a
+   library — the owned icon set under `../icons` is the source of truth. Alias one locally
+   (`import { X_1a2b3c4dIcon as ChevronIcon }`) if that reads better, but leave the FILES in
+   `../icons` named as they are: `<Stem>_<hash>Icon` is content-addressed, and that hash is
+   how the toolkit recognises a glyph it already owns. The screen-assembly step exports the
+   screen's bare vectors into this same directory and reuses by that hash — rename a file and
+   the next export writes a second copy of the same drawing.
 
 ## Elevation IS NOT (hard invariants — any violation is a failure)
 
@@ -49,6 +54,11 @@ wired by codegen (imported from `../icons`) — there is no icon policy to apply
   A `'fit-content'` width/height, and an axis the scaffold omits entirely, ARE resolved
   values — the designer's hug and fill. Never substitute a measured pixel count for one.
 - Do NOT re-derive or guess; every literal must trace to a scaffold style block.
+- Do NOT drop the scaffold's ROOT STYLE-OVERRIDE prop (the `style`/`rootStyle` prop the
+  component merges onto its root element). It is not decoration: it is the only channel a
+  caller has for a per-instance root override the props do not express, and the
+  screen-assembly step passes overrides through it. Rename it if you must; removing it drops
+  those overrides from every screen that uses this component.
 - Do NOT drop/merge-away or visually alter any variant; do NOT invent copy; do NOT
   "improve" the design.
 
