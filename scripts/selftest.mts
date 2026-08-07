@@ -7,7 +7,7 @@
 // is reachable (argv[2], else /tmp/figparse/message_new.json) and skip cleanly
 // otherwise. Exits non-zero on any failure. Not imported by anything.
 import * as fs from "fs";
-import { load, key } from "./lib/figma-index.mts";
+import { load, key, type Mat } from "./lib/figma-index.mts";
 import {
   letterSpacingToPx,
   letterSpacingStr,
@@ -17,7 +17,7 @@ import {
   disambiguateJustify,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
-import { cornerRadiusOf } from "./lib/screens-lib.mts";
+import { buildScreen, cornerRadiusOf, imagePlacement, type IRFill } from "./lib/screens-lib.mts";
 import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
 import {
   cssVarName,
@@ -336,6 +336,121 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   // Uniform cornerRadius fallback, and the empty case.
   eq("corner uniform fallback → number", cornerRadiusOf({ cornerRadius: 12 }), 12);
   eq("corner none → undefined", cornerRadiusOf({}), undefined);
+}
+
+// ── screens-lib: image fill placement (imageScaleMode → background-size) ─────
+{
+  const img = (extra: Partial<IRFill> = {}): IRFill => ({
+    type: "image",
+    imageHash: "ab",
+    ...extra,
+  });
+  const css = (f: IRFill) => {
+    const p = imagePlacement(f);
+    return [p.size, p.repeat, p.resizeMode];
+  };
+  // The four modes are NOT interchangeable: emitting them all as `cover` scales a
+  // STRETCH raster by the larger ratio and crops the overflow by a different amount
+  // per source aspect (a 20-variant photo set: 14 STRETCH + 4 FILL visible paints).
+  eq("image FILL → cover", css(img({ scaleMode: "FILL" })), ["cover", "no-repeat", "cover"]);
+  eq("image FIT → contain", css(img({ scaleMode: "FIT" })), ["contain", "no-repeat", "contain"]);
+  eq("image STRETCH → 100% 100%", css(img({ scaleMode: "STRETCH" })), [
+    "100% 100%",
+    "no-repeat",
+    "stretch",
+  ]);
+  eq("image TILE → repeat + intrinsic size", css(img({ scaleMode: "TILE" })), [
+    "auto",
+    "repeat",
+    "repeat",
+  ]);
+  eq(
+    "image TILE anchors top-left",
+    imagePlacement(img({ scaleMode: "TILE" })).position,
+    "top left",
+  );
+  // Regression guard: the previously-correct inputs must not move. An ABSENT mode keeps
+  // the historical `cover` (Figma's own default for a new image paint) and stays silent.
+  eq("image no mode → cover (unchanged)", css(img()), ["cover", "no-repeat", "cover"]);
+  eq("image no mode → no TODO note", imagePlacement(img()).note, undefined);
+  eq("image FILL → no TODO note", imagePlacement(img({ scaleMode: "FILL" })).note, undefined);
+  eq("image STRETCH → no TODO note", imagePlacement(img({ scaleMode: "STRETCH" })).note, undefined);
+  // The three cases CSS cannot express must come back flagged, never silently wrong.
+  // STRETCH + a non-null imageTransform is Figma's "Crop" (a 2×3 placement matrix), so
+  // `100% 100%` would distort it — approximated as cover and reported.
+  const crop = imagePlacement(
+    img({
+      scaleMode: "STRETCH",
+      imageTransform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    }),
+  );
+  eq("image STRETCH+crop matrix → cover", crop.size, "cover");
+  check("image STRETCH+crop matrix → flagged", /crop matrix/.test(crop.note ?? ""), crop.note);
+  const tiled = imagePlacement(img({ scaleMode: "TILE", scalingFactor: 0.5 }));
+  eq("image TILE factor ≠ 1 → size still auto", tiled.size, "auto");
+  check("image TILE factor ≠ 1 → flagged", /scalingFactor 0\.5/.test(tiled.note ?? ""), tiled.note);
+  eq(
+    "image TILE factor 1 → no note",
+    imagePlacement(img({ scaleMode: "TILE", scalingFactor: 1 })).note,
+    undefined,
+  );
+  const unknown = imagePlacement(img({ scaleMode: "SOMETHING_NEW" }));
+  eq("image unknown mode → cover default", unknown.size, "cover");
+  check(
+    "image unknown mode → flagged",
+    /unknown imageScaleMode/.test(unknown.note ?? ""),
+    unknown.note,
+  );
+}
+
+// ── screens-lib: stacked image paints — the VISIBLE one wins ────────────────
+{
+  // Nodes do carry stacked image paints whose first entry is hidden. style.fills[] is a
+  // VISIBLE-paint list, so every emitter's "first image fill" is the first VISIBLE one —
+  // taking fillPaints[0] off the raw node would extract the wrong raster (and the wrong
+  // scale mode with it).
+  const IDENT: Mat = [1, 0, 0, 1, 0, 0];
+  const rect = (fillPaints: any[]): any => ({
+    guid: "1:1",
+    path: "Root",
+    name: "photo",
+    type: "RECTANGLE",
+    size: { x: 100, y: 60 },
+    transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    fillPaints,
+    children: [],
+  });
+  const stacked = buildScreen(
+    rect([
+      { type: "IMAGE", visible: false, image: { hash: "aaaa" }, imageScaleMode: "FILL" },
+      { type: "IMAGE", image: { hash: "bbbb" }, imageScaleMode: "STRETCH" },
+    ]),
+    IDENT,
+  );
+  eq("stacked paints: hidden fill dropped", stacked.style?.fills?.length, 1);
+  eq("stacked paints: the VISIBLE raster wins", stacked.style?.fills?.[0].imageHash, "bbbb");
+  eq("stacked paints: the VISIBLE mode wins", stacked.style?.fills?.[0].scaleMode, "STRETCH");
+  // Placement fields are pass-throughs, emitted only where they mean something:
+  // scalingFactor for TILE, imageTransform only when non-null.
+  const tile = buildScreen(
+    rect([{ type: "IMAGE", image: { hash: "cccc" }, imageScaleMode: "TILE", scalingFactor: 0.25 }]),
+    IDENT,
+  );
+  eq("IMAGE paint → placement carried into the IR", tile.style?.fills?.[0], {
+    type: "image",
+    imageHash: "cccc",
+    scaleMode: "TILE",
+    scalingFactor: 0.25,
+  });
+  const plain = buildScreen(
+    rect([{ type: "IMAGE", image: { hash: "dddd" }, imageScaleMode: "FILL", scalingFactor: 0.25 }]),
+    IDENT,
+  );
+  eq("non-TILE paint drops the meaningless scalingFactor", plain.style?.fills?.[0], {
+    type: "image",
+    imageHash: "dddd",
+    scaleMode: "FILL",
+  });
 }
 
 // ── resolve-lib: hand-built index guards (a real .fig cannot author these) ───
