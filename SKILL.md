@@ -203,6 +203,11 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
   Props still read against the design. Variant _values_, which become the component's public
   value union, are transliterated to ASCII rather than stripped, so a non-English file keeps
   readable option values.
+- **The component's own name is sanitised the same way.** The exported symbol is the PascalCase
+  of the set's name, so a set whose name cannot _start_ an identifier — anything beginning with a
+  digit — takes a `Comp` prefix rather than emitting an `export function` that does not parse.
+  Names that already begin with a letter are unchanged, and the set's Figma name is emitted as a
+  doc comment on the export.
 
 The scaffold is **faithful but verbose — raw material, not the finished component.** One file per
 variant on purpose: Figma variants often have different frame structures; collapsing them to CSS

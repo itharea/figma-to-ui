@@ -3032,6 +3032,113 @@ const bind = (node: string, field: string) => [{ node, field }];
   }
 }
 
+// ── naming: component identifiers cannot start a digit (#68) ────────────────
+// compIdent PascalCased without ever guarding the FIRST character, so a set named
+// "3D Card" emitted `export function 3DCard(props: 3DCardProps)` — a SyntaxError, i.e. the
+// whole generated folder failed to parse. Same defect class propIdent was given a guard for
+// in #49; the sweep below is what keeps the two helpers from diverging again.
+eq("compIdent: leading digit prefixed", compIdent("3D Card"), "Comp3DCard");
+eq("compIdent: digit after punctuation too", compIdent("2-up Grid"), "Comp2UpGrid");
+eq("compIdent: all-digit name", compIdent("404 Page"), "Comp404Page");
+// The prefix is a guard, not a rename: a name that already starts an identifier is
+// untouched, byte for byte, and the empty fallback keeps its own spelling.
+eq("compIdent: already-safe name unchanged", compIdent("Product Card"), "ProductCard");
+eq("compIdent: idempotent", compIdent(compIdent("3D Card")), "Comp3DCard");
+eq("compIdent: transliteration still precedes the guard", compIdent("3 öğütücü"), "Comp3Ogutucu");
+{
+  // The same end-to-end proof propIdent carries: whatever a Figma set is named, the emitted
+  // component identifier must be bindable — it is the `export function` name, the `<Comp/>`
+  // JSX tag, the named import a PARENT component references it by, and the `${Comp}Props`
+  // type. A reserved word cannot occur (PascalCase upper-cases the first letter of every
+  // word) but is swept anyway, so a future change to the casing rule is caught here.
+  const names = [
+    ...RESERVED_WORDS,
+    "3D Card",
+    "2-up Grid",
+    "404 Page",
+    "941",
+    "Product Card",
+    "",
+    "—",
+    "  ",
+    "a/b",
+    "öğütücü seçimi",
+    "iade talebi alındı",
+  ];
+  const bad = names.filter((n) => !isSafeIdent(compIdent(n)));
+  check("compIdent: arbitrary set names → bindable identifiers", bad.length === 0, bad.join(", "));
+}
+{
+  // …and the end-to-end half, because the identifier is emitted from four separate call
+  // sites (the `export function`, the `${Comp}Props` type, each variant component, and the
+  // named import a PARENT references it by) which must agree character-for-character. Drives
+  // the real CLI over a synthetic IR whose set is named "3D Card".
+  const codegenPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli", "codegen.mts");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-compident-"));
+  try {
+    const irDir = path.join(tmp, "ir");
+    fs.mkdirSync(path.join(irDir, "components"), { recursive: true });
+    fs.mkdirSync(path.join(irDir, "screens"), { recursive: true });
+    const box = { x: 0, y: 0, w: 100, h: 100 };
+    fs.writeFileSync(
+      path.join(irDir, "screens", "s.json"),
+      JSON.stringify({
+        id: "n_root",
+        path: "/",
+        guid: "1:0",
+        type: "frame",
+        name: "Screen",
+        box: { x: 0, y: 0, w: 400, h: 400 },
+        children: [
+          { id: "n_a", path: "/a", guid: "1:10", type: "frame", name: "Card", box, children: [] },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "manifest.json"),
+      JSON.stringify({ artifacts: { screens: ["screens/s.json"] } }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "components", "3d-card.json"),
+      JSON.stringify({
+        name: "3D Card",
+        guid: "1:1",
+        axes: { State: ["on"] },
+        variants: [{ guidKey: "1:10", props: { State: "on" }, rawName: "State=on", bindings: [] }],
+      }),
+    );
+    const outDir = path.join(tmp, "out");
+    const cg = spawnSync(
+      process.argv[0],
+      [codegenPath, irDir, "3D Card", "--framework", "web", "--out", outDir],
+      { encoding: "utf8" },
+    );
+    check("compIdent e2e: codegen exits 0", cg.status === 0, (cg.stderr ?? "").slice(-400));
+    const index = fs.readFileSync(path.join(outDir, "3d-card", "index.tsx"), "utf8");
+    const types = fs.readFileSync(path.join(outDir, "3d-card", "types.ts"), "utf8");
+    const exported = /export function (\w+)\(props: (\w+)Props\)/.exec(index);
+    check(
+      "compIdent e2e: the exported component is a legal identifier",
+      !!exported && isSafeIdent(exported[1]),
+      index.slice(0, 400),
+    );
+    eq("compIdent e2e: export and Props type agree", exported?.[1], exported?.[2]);
+    check(
+      "compIdent e2e: the Props type is declared under the same name",
+      types.includes(`export type ${exported?.[1]}Props = {`),
+      types.slice(0, 400),
+    );
+    // Traceability: the Figma name is lost by the munging, so the doc comment has to carry it.
+    check(
+      "compIdent e2e: the original Figma name rides along in a doc comment",
+      /\/\*\* Figma component set: "3D Card"\. \*\//.test(index),
+      index.slice(0, 600),
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // ── live fixtures (skip cleanly when no decode is reachable) ─────────────────
 const decodePath = process.argv[2] || "/tmp/figparse/message_new.json";
 if (fs.existsSync(decodePath)) {
