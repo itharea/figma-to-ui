@@ -163,8 +163,18 @@ number there would pin it.
   | `textAlignVertical` (`TOP`/`CENTER`/`BOTTOM`)                | `text.alignVertical` | no single CSS prop — center via flex; TOP/absent→omitted                                                                     |
   | `leadingTrim` (`CAP_HEIGHT`/`NONE`)                          | `text.leadingTrim`   | optional; NONE/absent→omitted                                                                                                |
 
+- **Text decoration** — `textDecoration` (`NONE`/`UNDERLINE`/`STRIKETHROUGH`) → IR
+  `font.decoration` (`underline`/`line-through` — the keyword CSS `text-decoration`
+  and RN `textDecorationLine` share) plus `font.decorationSource`. Omitted when
+  undecorated: the raw field is omit-when-default, so absence is a real "none".
+  Resolved node field → character runs (majority) → applied text style; a decoration
+  is most often authored on the **style**, and the applying node declares nothing.
 - Mixed-style runs live in `textData.styleOverrideTable` — rare in app UI; flag
   if styling looks inconsistent within one string (it is invisible to the tools).
+  Each entry is a full `NodeChange`, so a run carries its own `fontSize`/`fontName`/
+  `textDecoration` — or its own `styleIdForText`. `textData.characterStyleIDs` is
+  parallel to `characters` and names the run styling each one (an id naming no entry
+  means the node's own style), which is the only correct way to weight a run.
 
 **Four-source reconciliation (for every text value).** Cross-check four sources;
 on conflict prefer in this order:
@@ -398,7 +408,8 @@ wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
   absolute from the page origin.
 - **`text?`** `{value, placeholder, …}` and **`font?`** — reconciled
   `{family, appFamily, weight, size, sizeSource, sizeToken?, sizeMatch?,
-styleName?, vars?, lineHeightPx, letterSpacingPx, conflicts[]}`. **Trust the
+styleName?, vars?, lineHeightPx, letterSpacingPx, decoration?, decorationSource?,
+conflicts[]}`. **Trust the
   reconciled `font.size` + `sizeSource`, not the raw `fontSize`.** `vars` carries
   per-property variable bindings (family/weight/size/lineHeight/letterSpacing) so
   codegen references the theme, not literals.
@@ -427,6 +438,12 @@ bound colors stay `"bound"`). `issues.json`/`intent.json` are informational revi
       (CSS `em` scales, RN bakes px). Never read the raw value as px.
 - [ ] `styleOverrideTable` is usually rare but **invisible to the tools** when
       present — node-level font can be wrong; flag non-empty tables.
+- [ ] **Enum text properties are omit-when-default**, so a missing one is a real
+      value, not a gap — but a property nothing READS is indistinguishable from a
+      property that is always default. `textDecoration` went unread for the whole
+      life of the skill and underlined labels shipped plain, with the word
+      "Underlined" in the style NAME as the only surviving trace. A layer name is a
+      naming convention, never data.
 - [ ] Un-overridden instance text = **placeholder** — flag it; confirm copy, don't
       ship `Test`/`Placeholder`/master defaults (`raw.mts resolve` /
       `raw.mts dump --resolve` tag these `[MASTER DEFAULT ⚠ likely placeholder]`).

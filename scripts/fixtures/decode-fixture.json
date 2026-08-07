@@ -270,6 +270,7 @@
       "lineHeight": { "value": 16, "units": "PIXELS" },
       "letterSpacing": { "value": 0, "units": "PIXELS" },
       "textCase": "UPPER",
+      "textDecoration": "UNDERLINE",
       "variableConsumptionMap": {
         "entries": [
           {

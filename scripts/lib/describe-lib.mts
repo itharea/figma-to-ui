@@ -73,6 +73,8 @@ export function describeNode(n: any, opts: DescribeOpts = {}): string {
   if (n.type === "TEXT") {
     if (n.textAutoResize) bits.push(`autoResize=${n.textAutoResize}`);
     if (n.textCase && n.textCase !== "ORIGINAL") bits.push(`case=${n.textCase}`);
+    if (n.textDecoration && n.textDecoration !== "NONE")
+      bits.push(`decoration=${n.textDecoration}`);
     if (n.textAlignVertical && n.textAlignVertical !== "TOP")
       bits.push(`valign=${n.textAlignVertical}`);
     if (n.textTruncation && n.textTruncation !== "DISABLED")

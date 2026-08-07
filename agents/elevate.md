@@ -44,7 +44,7 @@ wired by codegen (imported from `../icons`) — there is no icon policy to apply
 ## Elevation IS NOT (hard invariants — any violation is a failure)
 
 - Do NOT change any resolved value: width, height, per-side padding, gap, radius,
-  colour/token, font family/size/lineHeight/letterSpacing/weight/case, per-side border
+  colour/token, font family/size/lineHeight/letterSpacing/weight/case/decoration, per-side border
   widths & colours, effects, absolute position, opacity, or the variant→structure map.
   A `'fit-content'` width/height, and an axis the scaffold omits entirely, ARE resolved
   values — the designer's hug and fill. Never substitute a measured pixel count for one.

@@ -103,6 +103,11 @@ export type IRTypography = {
   lineHeightPx: number | null;
   "letterSpacingPx@size": number;
   textCase: string | null; // raw fig textCase enum (UPPER/LOWER/TITLE/…) or null
+  // raw fig textDecoration enum (UNDERLINE/STRIKETHROUGH) or null. Carried for the same
+  // reason as textCase: a text style is where a decoration is usually AUTHORED (the
+  // node that applies it declares nothing), so a style that drops it leaves the
+  // consuming nodes with no data at all and only the style NAME hinting at an underline.
+  textDecoration: string | null;
   vars: TypeVars; // per-property variable bindings (design tokens), names or null
   source: "text-style" | "grouped-variables";
   guid?: string;
@@ -180,6 +185,7 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
         lineHeightPx: lineHeightPx(n.lineHeight, size ?? 0),
         "letterSpacingPx@size": letterSpacingToPx(n.letterSpacing, size ?? 0),
         textCase: typeof n.textCase === "string" ? n.textCase : null,
+        textDecoration: typeof n.textDecoration === "string" ? n.textDecoration : null,
         vars: textVarBindings(n, varNames),
         source: "text-style",
         guid: key(n.guid),
@@ -218,6 +224,7 @@ export function assembleTypography(index: ReturnType<typeof load>): IRTypography
         ? letterSpacingToPx({ value: e.ls, units: "PIXELS" }, e.size)
         : 0,
     textCase: null,
+    textDecoration: null, // grouped FLOAT variables carry no text-style enums
     vars: { family: null, weight: null, size: null, lineHeight: null, letterSpacing: null },
     source: "grouped-variables",
   }));

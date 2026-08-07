@@ -802,9 +802,21 @@ function textStyleBody(n: IRNode, push: (m: string) => void): string {
       );
       push(`font weight "${f.weight}" unmapped — extend fontWeightValue()`);
     }
+    // Decoration: CSS spells the property `text-decoration`, React Native has no
+    // shorthand at all and wants `textDecorationLine`. Only the NAME differs — the IR
+    // value ("underline"/"line-through") is already legal in both, which is exactly why
+    // it is stored that way (see reconcile-lib textDecorationToIR).
+    if (f.decoration)
+      lines.push(`${web ? "textDecoration" : "textDecorationLine"}: '${f.decoration}',`);
+    // The box-vs-font conflict is the only one whose declared→chosen numbers read as a
+    // font SIZE; every other field (style runs, mixed decorations) carries its own
+    // sentence in `reason`, and forcing it through the size template produced a TODO
+    // telling the reader to "confirm size" about something that was never a size.
     for (const cf of f.conflicts ?? [])
       push(
-        `font ${cf.field} ${cf.declared}→~${cf.chosen} reconciliation conflict (box.y=${cf.boxY} vs lh=${cf.lhPx}) — confirm size`,
+        cf.field === "fontSize"
+          ? `font ${cf.field} ${cf.declared}→~${cf.chosen} reconciliation conflict (box.y=${cf.boxY} vs lh=${cf.lhPx}) — confirm size`
+          : `font ${cf.field}: ${cf.reason}`,
       );
   }
   const cref = colorRef(n.color as any, `${n.name} text`, push);

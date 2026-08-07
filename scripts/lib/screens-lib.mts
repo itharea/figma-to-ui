@@ -21,7 +21,11 @@ import {
   letterSpacingToPx,
   lineHeightPx,
   classifyPlaceholderText,
+  textDecorationToIR,
+  majorityDecoration,
   type Conflict,
+  type DecorationRun,
+  type TextDecoration,
 } from "./reconcile-lib.mts";
 import type { ResolvedNode } from "./resolve-lib.mts";
 import type { IRTypography, TypeVars } from "./ir-lib.mts";
@@ -78,6 +82,22 @@ export type IRFont = {
   lineHeightSource: "fontSize" | "derived" | "style";
   letterSpacingPx: number;
   letterSpacingRaw: { value: number; units: string };
+  // Underline / strike-through, as the CSS+RN keyword (see reconcile-lib
+  // textDecorationToIR). OPTIONAL and omitted when the text is undecorated — unlike its
+  // required neighbours above, because the raw `textDecoration` is omit-when-default in
+  // the bytes, so absence here is the same real "none" it is there, and a `null` on
+  // every text node in every screen file would buy nothing.
+  //
+  // `decorationSource` rides along exactly like `sizeSource`/`lineHeightSource`, and is
+  // present exactly when `decoration` is:
+  //   "textDecoration" = the node's own declared field (incl. an instance override),
+  //   "run"            = the majority of the node's character runs (styleOverrideTable),
+  //   "style"          = the applied text style (styleIdForText).
+  // There is deliberately no "derived": `derivedTextData.decorations[]` carries only the
+  // painted rects + a styleID, so the render proves THAT something is decorated and not
+  // WHICH — it cannot stand in as a value source the way it does for family/size.
+  decoration?: TextDecoration;
+  decorationSource?: "textDecoration" | "run" | "style";
   conflicts: Conflict[];
 };
 // `var`/`varGuid`: the design-system token a paint is BOUND to via a Figma variable
@@ -777,13 +797,34 @@ function textAlignVerticalToIR(v: any): string | undefined {
   return v.toLowerCase();
 }
 
-// The guidKey ("sessionID:localID") of the text style a node applies via
-// `styleIdForText`, or null when the node carries no shared text style. Used to look
-// the style up in the typography token map (the CERTAIN designer-intent source).
-function styleRefKey(n: ResolvedNode): string | null {
-  const g = (n as any).styleIdForText?.guid;
+// The guidKey ("sessionID:localID") of the text style applied via `styleIdForText`, or
+// null when there is no shared text style. Used to look the style up in the typography
+// token map (the CERTAIN designer-intent source).
+//
+// Takes any object, not just a node: the fig schema types
+// `textData.styleOverrideTable[]` as an array of NodeChange, so ONE character run
+// addresses a text style through the very same field a node does. (assetRef-keyed
+// references resolve here because figma-index.load() normalises every styleIdForText
+// onto a local guid before this runs.)
+function styleRefKey(n: unknown): string | null {
+  const g = (n as any)?.styleIdForText?.guid;
   if (!g || g.sessionID === undefined || g.localID === undefined) return null;
   return `${g.sessionID}:${g.localID}`;
+}
+
+// The decoration declared by the text style a node — or one character run — applies.
+// Returns `undefined` when the object references no style that resolves (the caller
+// must then inherit), and `null` when it does and that style is undecorated. The two
+// cases are NOT interchangeable: "no opinion" falls through the precedence chain,
+// "explicitly undecorated" stops it.
+function styleDecoration(
+  o: unknown,
+  typeStyles: Map<string, IRTypography>,
+): TextDecoration | null | undefined {
+  const k = styleRefKey(o);
+  if (!k) return undefined;
+  const s = typeStyles.get(k);
+  return s ? textDecorationToIR(s.textDecoration) : undefined;
 }
 
 // Reconcile one resolved TEXT node into the IR `font`/`text`/`color` provenance
@@ -878,6 +919,59 @@ function reconcileText(
     });
   }
 
+  // Text decoration. Nothing read `textDecoration` anywhere in the skill before this, so
+  // an underlined label reached codegen as plain text and the only surviving signal was
+  // the word "Underlined" inside the applied style's NAME — a naming convention, not
+  // data. Resolved through the same shape of chain as the other typography fields:
+  //   the node's own field → its character runs (majority) → the applied text style.
+  // The node field is the DEFAULT for characters no run covers, which is why runs that
+  // do cover the string win over it: that is precisely what a character-style override
+  // means. A run is read for BOTH an inline `textDecoration` and its own
+  // `styleIdForText` — a run entry is a NodeChange and real exports write either.
+  const nodeDecoration =
+    (n as any).textDecoration !== undefined
+      ? textDecorationToIR((n as any).textDecoration)
+      : undefined;
+  const appliedDecoration = styleDecoration(n, typeStyles);
+  let decoration: TextDecoration | null = null;
+  let decorationSource: IRFont["decorationSource"];
+  if (nodeDecoration !== undefined) {
+    decoration = nodeDecoration;
+    decorationSource = "textDecoration";
+  } else if (appliedDecoration !== undefined) {
+    decoration = appliedDecoration;
+    decorationSource = "style";
+  }
+  const runTable: any[] = (n as any).textData?.styleOverrideTable ?? [];
+  if (runTable.length) {
+    const runs: DecorationRun[] = runTable.map((r: any) => ({
+      id: typeof r?.styleID === "number" ? r.styleID : -1,
+      decoration:
+        r?.textDecoration !== undefined
+          ? textDecorationToIR(r.textDecoration)
+          : styleDecoration(r, typeStyles),
+    }));
+    const tally = majorityDecoration((n as any).textData?.characterStyleIDs, runs, decoration);
+    if (tally.decoration !== decoration) {
+      decoration = tally.decoration;
+      decorationSource = "run";
+    }
+    // Mixed runs go through the EXISTING conflicts mechanism rather than a new channel,
+    // so build-ir's issues.json and codegen's TODOs pick them up for free. `declared`
+    // and `chosen` are numeric on Conflict, so they carry only the SHAPE of the
+    // disagreement (N distinct decorations collapsed to the 1 a node can render); the
+    // readable tally lives in `reason`.
+    if (tally.mixed)
+      conflicts.push({
+        field: "textDecoration",
+        declared: tally.detail.split(", ").length,
+        chosen: 1,
+        boxY: (n as any).size?.y ?? 0,
+        lhPx: lhPx ?? 0,
+        reason: `mixed decorations across ${runTable.length} style run(s) (${tally.detail}) — chose "${decoration ?? "none"}" by majority`,
+      });
+  }
+
   const font: IRFont = {
     family,
     appFamily: appFamilyOf(family),
@@ -896,6 +990,8 @@ function reconcileText(
       value: lsRaw.value ?? 0,
       units: lsRaw.units ?? "PIXELS",
     },
+    // Omitted entirely when undecorated — the common case stays byte-identical.
+    ...(decoration != null ? { decoration, decorationSource } : {}),
     conflicts,
   };
 
@@ -1071,6 +1167,10 @@ export function provenanceViolations(node: IRNode, acc: string[] = []): string[]
     if (node.font.sizeSource == null) acc.push(`${node.id}: font.sizeSource missing`);
     if (node.font.lineHeightSource == null) acc.push(`${node.id}: font.lineHeightSource missing`);
     if (!("sizeMatch" in node.font)) acc.push(`${node.id}: font.sizeMatch missing`);
+    // decoration is optional, but a decoration WITHOUT its source is unreviewable —
+    // the reader cannot tell a designer's applied style from a per-run majority guess.
+    if (node.font.decoration != null && node.font.decorationSource == null)
+      acc.push(`${node.id}: font.decorationSource missing`);
     if (!Array.isArray(node.font.conflicts)) acc.push(`${node.id}: font.conflicts missing`);
   }
   if (node.text) {
