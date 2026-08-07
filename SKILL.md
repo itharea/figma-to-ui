@@ -130,7 +130,9 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
 - **`--svg msg-<name>.json` makes icons an internal, deterministic step.** Codegen exports each
   vector's geometry into a **deduplicated owned icon component** under `<out>/icons/` (the
   `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value — a
-  mono icon gets `currentColor` + the resolved token, so it recolours correctly. Instance-swap
+  mono icon gets `currentColor` + the resolved token, so it recolours correctly. A glyph that is
+  **both filled and outlined** counts as two paints (IR `color` + `stroke`) — it is not mono, so
+  both colours are baked and the outline survives instead of being flattened. Instance-swap
   slots render `{icon ?? <DefaultGlyph/>}`. No `export-svg` placeholder boxes, no manual re-map.
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
   `--svg` explicitly.)
@@ -215,7 +217,8 @@ write `$WORK/groups-assemble.json` with `kind: "assemble"`).
 screen IR path, and out file), the shared elevated components dir, and the theme note. It walks
 `ir-<name>/screens/<page>/<screen>.json`, renders every component **instance through the elevated
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
-rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `absX/absY` for absolute children). It
+rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `color` **and** `stroke` — a node can
+be filled and outlined at once — plus `absX/absY` for absolute children). It
 binds variable-backed values to the theme and changes no resolved value.
 
 **Brownfield?** Build with `build-ir … --theme <path>` and map fig values to repo tokens **by value,

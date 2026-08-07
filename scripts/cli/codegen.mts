@@ -416,6 +416,30 @@ function collectVectorFills(n: IRNode): { hex: string; var: string | null }[] {
   return out;
 }
 
+// Every DISTINCT paint a vector subtree draws with — its fills PLUS its strokes. A
+// glyph can be filled AND outlined (a near-white heart with a dark outline), and
+// svg-lib renders the pre-outlined strokeGeometry as a second baked fill, so counting
+// fills alone calls such a glyph "mono" and recolours its outline to the fill —
+// exactly the colour the design chose it NOT to be. `IRNode.stroke` is the node-level
+// outline companion to `color`; both are resolved (variable-bound) values.
+// Order-preserved, deduped by hex|var across the two paint kinds.
+function collectVectorPaints(n: IRNode): { hex: string; var: string | null }[] {
+  const out = collectVectorFills(n);
+  const seen = new Set(out.map((p) => `${p.hex}|${p.var ?? ""}`));
+  (function walk(m: IRNode) {
+    const s = m.stroke;
+    if (s?.hex) {
+      const k = `${s.hex}|${s.var ?? ""}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push({ hex: s.hex, var: s.var ?? null });
+      }
+    }
+    for (const c of m.children ?? []) walk(c);
+  })(n);
+  return out;
+}
+
 // One node's style object body (container/box fields). web|rn share most fields.
 // `only` (optional) restricts emission to the listed override field names (a subset
 // of FIELD_KEYS): codegen passes it to build a per-instance ROOT style OVERRIDE for a
@@ -1181,7 +1205,7 @@ function renderVariant(v: any): VariantRender {
     let defaultEl = "null";
     if (defSym) {
       const defNode = findNodeByGuid(defSym);
-      const defFills = defNode ? collectVectorFills(defNode) : [];
+      const defFills = defNode ? collectVectorPaints(defNode) : [];
       const icon = ownIcon(
         { guid: defSym, name: defNode?.name },
         defFills.length ? defFills.length === 1 : undefined,
@@ -1225,10 +1249,12 @@ function renderVariant(v: any): VariantRender {
     // (override-aware) resolved fills — a mono icon gets currentColor + the resolved token
     // (fixes the baked-master-fill defect). The sized wrapper still flex-centres the glyph;
     // absolute placement / root-style merge ride on it exactly as before.
-    const fills = collectVectorFills(n);
-    // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
+    const fills = collectVectorPaints(n);
+    // Icon colour: a single resolved paint (override-aware) wins; else the instance's raw
     // fill/stroke colour override (the common case — icons are recoloured via an override
     // the IR drops). null ⇒ the icon keeps its currentColor default and inherits context.
+    // A filled-AND-outlined glyph has two paints ⇒ NOT mono ⇒ svg-lib bakes both, so the
+    // outline survives instead of being flattened into the fill colour.
     const iconColor =
       fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
     const monoHint = fills.length ? fills.length === 1 : iconColor ? true : undefined;
@@ -1265,7 +1291,7 @@ function renderVariant(v: any): VariantRender {
     // (b) no geometry source (no --svg/--out) → keep the export-svg placeholder so the user
     //     knows to pass it.
     const fillNote = fills.length
-      ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
+      ? ` paints:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
       : "";
     const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
     push(

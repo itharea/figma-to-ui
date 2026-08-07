@@ -7,7 +7,7 @@
 // is reachable (argv[2], else /tmp/figparse/message_new.json) and skip cleanly
 // otherwise. Exits non-zero on any failure. Not imported by anything.
 import * as fs from "fs";
-import { load, key } from "./lib/figma-index.mts";
+import { load, key, I } from "./lib/figma-index.mts";
 import {
   letterSpacingToPx,
   letterSpacingStr,
@@ -17,7 +17,12 @@ import {
   disambiguateJustify,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
-import { cornerRadiusOf } from "./lib/screens-lib.mts";
+import {
+  cornerRadiusOf,
+  buildScreen,
+  provenanceViolations,
+  type VarIndex,
+} from "./lib/screens-lib.mts";
 import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
 import {
   cssVarName,
@@ -336,6 +341,92 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   // Uniform cornerRadius fallback, and the empty case.
   eq("corner uniform fallback → number", cornerRadiusOf({ cornerRadius: 12 }), 12);
   eq("corner none → undefined", cornerRadiusOf({}), undefined);
+}
+
+// ── screens-lib: fill and stroke are independent node paints (both survive) ──
+{
+  // A node's fill and its stroke live in two SEPARATE paint arrays; collapsing the
+  // node to one colour drops whichever loses, and the survivor looks plausible.
+  // `bound` binds the paint to a variable, so `hex` must come from the variable's
+  // RESOLVED value — never the (deliberately wrong here) cached literal.
+  const paint = (v: number, bound?: [number, number]) => ({
+    type: "SOLID",
+    visible: true,
+    color: { r: v, g: v, b: v, a: 1 },
+    ...(bound
+      ? {
+          colorVar: {
+            value: { alias: { guid: { sessionID: bound[0], localID: bound[1] } } },
+            dataType: "ALIAS",
+            resolvedDataType: "COLOR",
+          },
+        }
+      : {}),
+  });
+  const ir = (fields: any, varIndex: VarIndex = new Map()) =>
+    buildScreen(
+      {
+        guid: "1:10",
+        path: "1:10",
+        type: "VECTOR",
+        name: "glyph",
+        size: { x: 24, y: 24 },
+        children: [],
+        ...fields,
+      },
+      I,
+      {},
+      varIndex,
+    );
+
+  // regression guard: a fill-only node is untouched — same `color`, no `stroke` key.
+  const fillOnly = ir({ fillPaints: [paint(1)] });
+  eq("paints: fill-only node keeps its color", fillOnly.color?.hex, "#ffffff");
+  eq("paints: fill-only node emits no stroke", fillOnly.stroke, undefined);
+
+  // stroke-only (an outline glyph): the stroke is the node's only colour.
+  const strokeOnly = ir({ strokePaints: [paint(0.5)], strokeWeight: 2 });
+  eq("paints: stroke-only node emits no color", strokeOnly.color, undefined);
+  eq("paints: stroke-only node carries the stroke hex", strokeOnly.stroke?.hex, "#808080");
+
+  // the defect: filled AND outlined, each bound to its OWN token. Both must survive
+  // with their own hex and var — the fill must not stand in for the stroke.
+  const varIndex: VarIndex = new Map([
+    ["9:1", { name: "Color/surface/base", value: "#ffffff" }],
+    ["9:2", { name: "Color/border/strong", value: "#333333" }],
+  ]);
+  const both = ir(
+    {
+      fillPaints: [paint(0, [9, 1])], // cached literals are stale; the vars win
+      strokePaints: [paint(0, [9, 2])],
+      strokeWeight: 2,
+      strokeAlign: "CENTER",
+    },
+    varIndex,
+  );
+  eq(
+    "paints: filled+outlined keeps the fill",
+    [both.color?.hex, both.color?.var],
+    ["#ffffff", "Color/surface/base"],
+  );
+  eq(
+    "paints: filled+outlined keeps the stroke",
+    [both.stroke?.hex, both.stroke?.var],
+    ["#333333", "Color/border/strong"],
+  );
+  eq("paints: a bound stroke is match:bound", both.stroke?.match, "bound");
+  eq("paints: stroke provenance keys match color's", provenanceViolations(both), []);
+  // weight is NOT duplicated onto the node — a 2px outline vs a hairline is read off
+  // style.strokes[], which is built from the same paint array and always accompanies it.
+  eq("paints: stroke weight readable from style.strokes", both.style?.strokes?.[0]?.weight, 2);
+
+  // visibility: an invisible stroke paint is ignored, and a visible one stacked
+  // behind it still wins (paint arrays are stacks, not single slots).
+  const hidden = ir({ fillPaints: [paint(1)], strokePaints: [{ ...paint(0), visible: false }] });
+  eq("paints: invisible stroke paint is ignored", hidden.stroke, undefined);
+  eq("paints: invisible stroke does not disturb the fill", hidden.color?.hex, "#ffffff");
+  const stacked = ir({ strokePaints: [{ ...paint(0), visible: false }, paint(0.5)] });
+  eq("paints: first VISIBLE stroke paint wins", stacked.stroke?.hex, "#808080");
 }
 
 // ── resolve-lib: hand-built index guards (a real .fig cannot author these) ───
@@ -736,6 +827,36 @@ const bind = (node: string, field: string) => [{ node, field }];
     "svg: rn mono icon = react-native-svg + fill={color}",
     /react-native-svg/.test(rnMono) && /fill=\{color\}/.test(rnMono),
     rnMono.slice(0, 160),
+  );
+
+  // A glyph that is BOTH filled and outlined: the pre-outlined strokeGeometry is a
+  // second baked paint, so the extraction yields two distinct fills and the emitted
+  // component must keep BOTH. Driving it mono (the old fills-only paint count) would
+  // recolour the outline to the fill via currentColor and lose the outline entirely.
+  const outlined: any = {
+    guid: { sessionID: 1, localID: 1 },
+    type: "VECTOR",
+    visible: true,
+    opacity: 1,
+    size: { x: 24, y: 24 },
+    fillGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+    fillPaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 1, g: 1, b: 1, a: 1 } }],
+    strokeGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+    strokePaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0.2, g: 0.2, b: 0.2 } }],
+    strokeWeight: 2,
+  };
+  const geoBoth = extractGeometry(
+    { msg: { blobs: [blob] }, byKey: new Map([["1:1", outlined]]), children: new Map() } as any,
+    "1:1",
+  );
+  eq("svg: filled+outlined glyph has two distinct paints", geoBoth.fills, ["#ffffff", "#333333"]);
+  const webMulti = emitIconComponent("OutlinedIcon", geoBoth, { web: true, mono: false });
+  check(
+    "svg: filled+outlined icon bakes BOTH paints (no currentColor flattening)",
+    /fill="#ffffff"/.test(webMulti) &&
+      /fill="#333333"/.test(webMulti) &&
+      !/currentColor/.test(webMulti),
+    webMulti.slice(0, 400),
   );
 }
 

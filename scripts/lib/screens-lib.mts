@@ -11,8 +11,8 @@
 // (geometry-16 over declared-28, placeholder classification) — it sets `source`/
 // `*Source` and populates `conflicts[]`, and is NEVER presented as ground truth.
 // Token slots
-// (`color.{token,match}`, `font.{sizeToken,sizeMatch}`) stay null here; Phase 8's
-// --theme fills them.
+// (`color.{token,match}`, `stroke.{token,match}`, `font.{sizeToken,sizeMatch}`) stay
+// null here; Phase 8's --theme fills them.
 import * as crypto from "crypto";
 import { colorStr, key, mul, nodeMat, type Mat } from "./figma-index.mts";
 import {
@@ -80,10 +80,13 @@ export type IRFont = {
   letterSpacingRaw: { value: number; units: string };
   conflicts: Conflict[];
 };
-// `var`/`varGuid`: the design-system token a fill is BOUND to via a Figma variable
+// `var`/`varGuid`: the design-system token a paint is BOUND to via a Figma variable
 // alias (paint.colorVar). This is GROUND TRUTH from the bytes (not value-matching):
 // when set, `match` is "bound". `token`/`match` value-matching (Phase 8 --theme)
 // stays for UNBOUND literals only. `hex` is always the resolved concrete value.
+// The SAME shape carries the node's fill (IRNode.color) and its stroke
+// (IRNode.stroke) — they are two independent paint arrays in the bytes and a node
+// may populate both, so neither may stand in for the other.
 export type IRColor = {
   hex: string | null;
   token: string | null;
@@ -256,6 +259,16 @@ export type IRNode = {
   text?: IRTextField;
   font?: IRFont;
   color?: IRColor;
+  // The node's OUTLINE, in the same IRColor shape as `color` — a companion, never a
+  // replacement. Figma stores fill and stroke in two independent paint arrays and a
+  // node may carry BOTH (a near-white glyph with a dark outline so it reads on
+  // photography); collapsing the node to one colour silently drops the outline, and
+  // the surviving fill looks plausible enough to pass review. Emitted only when the
+  // node has a visible solid stroke paint. The stroke's WEIGHT/align/cap/join/dash are
+  // NOT duplicated here — `style.strokes[]` is built from the same paint array and is
+  // always present whenever this is, so read `style.strokes[0].weight` (or
+  // `style.borderWidths`) to tell a 2px outline from a hairline.
+  stroke?: IRColor;
   box: IRBox;
   style?: IRStyle;
   layout?: IRLayout;
@@ -311,15 +324,40 @@ function firstSolidFill(node: any): any | null {
   return null;
 }
 
-// Build the IRColor for a node from its first visible solid fill, via the shared
-// resolvePaintColor resolver. When that fill is BOUND to a variable
-// (paint.colorVar ALIAS resolving in `varIndex`), `hex` is the bound variable's
-// RESOLVED value (GROUND TRUTH — never the stale cached literal), var/varGuid are
-// set and match="bound". A literal fill keeps `hex`=colorStr(paint.color), var/
-// varGuid null and match null (Phase 8 --theme value-matching fills token/match
-// for literals).
+// Build the IRColor for a node from its first visible solid FILL (see paintToIRColor
+// for the resolution + provenance rules).
 function buildColor(node: any, varIndex: VarIndex): IRColor {
-  const p = firstSolidFill(node);
+  return paintToIRColor(firstSolidFill(node), varIndex);
+}
+
+// First visible solid STROKE paint (the node's own outline paint) — firstSolidFill's
+// twin over `strokePaints`. The two arrays are independent in the bytes: a node can
+// be filled, outlined, or both, so the stroke must be read on its own and never
+// inferred from the fill.
+function firstSolidStroke(node: any): any | null {
+  const strokes: any[] = node.strokePaints ?? [];
+  for (const p of strokes) {
+    if (p?.visible === false) continue;
+    if (p?.type === "SOLID" && p.color) return p;
+  }
+  return null;
+}
+
+// Build the IRColor for a node's OUTLINE from its first visible solid stroke paint.
+// Same resolver, same provenance rules as buildColor — a stroke bound to a variable
+// is just as much a design token as a fill, and `style.strokes[]` already proves it
+// resolves; this only lifts it to the node level where consumers read colour.
+function buildStroke(node: any, varIndex: VarIndex): IRColor {
+  return paintToIRColor(firstSolidStroke(node), varIndex);
+}
+
+// One paint → the node-level IRColor, via the shared resolvePaintColor. When the
+// paint is BOUND to a variable (paint.colorVar ALIAS resolving in `varIndex`), `hex`
+// is the bound variable's RESOLVED value (GROUND TRUTH — never the stale cached
+// literal), var/varGuid are set and match="bound". A literal paint keeps
+// `hex`=colorStr(paint.color), var/varGuid null and match null (Phase 8 --theme
+// value-matching fills token/match for literals). No paint → an all-null IRColor.
+function paintToIRColor(p: any | null, varIndex: VarIndex): IRColor {
   if (!p) return { hex: null, token: null, match: null, var: null, varGuid: null };
   const c = resolvePaintColor(p, varIndex);
   return {
@@ -839,6 +877,14 @@ function toIR(
     if (color.hex) node.color = color;
   }
 
+  // The node's outline, resolved INDEPENDENTLY of its fill and attached ALONGSIDE
+  // `color` (never instead of it) — runs on every node type, TEXT included, so a
+  // filled-and-outlined glyph round-trips both paints instead of reporting a
+  // plausible-looking fill and dropping the stroke. Omitted when the node has no
+  // visible solid stroke paint, so lean files stay lean.
+  const stroke = buildStroke(n as any, varIndex);
+  if (stroke.hex) node.stroke = stroke;
+
   // Full box-styling + auto-layout (B-style-layout / spec #2) on EVERY node type
   // (TEXT included — a text node can carry effects/opacity). Blocks are omitted
   // when absent so files stay lean.
@@ -906,11 +952,16 @@ export function provenanceViolations(node: IRNode, acc: string[] = []): string[]
   if (node.text) {
     if (node.text.source == null) acc.push(`${node.id}: text.source missing`);
   }
-  if (node.color) {
-    if (!("match" in node.color)) acc.push(`${node.id}: color.match missing`);
-    if (!("token" in node.color)) acc.push(`${node.id}: color.token missing`);
-    if (!("var" in node.color)) acc.push(`${node.id}: color.var missing`);
-    if (!("varGuid" in node.color)) acc.push(`${node.id}: color.varGuid missing`);
+  // `color` and `stroke` are the same shape and carry the same provenance keys.
+  for (const [field, c] of [
+    ["color", node.color],
+    ["stroke", node.stroke],
+  ] as const) {
+    if (!c) continue;
+    if (!("match" in c)) acc.push(`${node.id}: ${field}.match missing`);
+    if (!("token" in c)) acc.push(`${node.id}: ${field}.token missing`);
+    if (!("var" in c)) acc.push(`${node.id}: ${field}.var missing`);
+    if (!("varGuid" in c)) acc.push(`${node.id}: ${field}.varGuid missing`);
   }
   for (const c of node.children) provenanceViolations(c, acc);
   return acc;
