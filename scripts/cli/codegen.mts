@@ -31,7 +31,13 @@ import { disambiguateJustify } from "../lib/reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
-import { extractGeometry, emitIconComponent, planIcon, type IconColor } from "../lib/svg-lib.mts";
+import {
+  extractGeometry,
+  emitIconComponent,
+  planIcon,
+  isVariantSheet,
+  type IconColor,
+} from "../lib/svg-lib.mts";
 import { slugify, compIdent, kebab } from "../lib/naming.mts";
 
 const argv = process.argv.slice(2);
@@ -1128,7 +1134,15 @@ function renderVariant(v: any): VariantRender {
     // logo) OR a vector-only icon INSTANCE. NOT one sub-icon per child: the previous per-vector
     // split left the pieces mis-positioned by their wrappers. A frame with an instance/slot
     // child is a container (keeps its bg + slot), so it is deliberately excluded here.
-    if (isCompositeVectorGlyph(n) || (n.type === "instance" && isVectorOnly(n)))
+    // EXCEPT a variant SHEET: children that are component DEFINITIONS are N drawings laid
+    // out side by side, so "one composed icon" would flatten the whole set into a single
+    // giant glyph. Split it — one icon per SYMBOL — before the composite test can fire.
+    if (isCompositeVectorGlyph(n)) {
+      if (isVariantSheet(n))
+        return emitVariantSheet({ n, depth, binds, pad, sk, styleAttr, prefixBody, kidsAll });
+      return emitVectorGlyph({ n, depth, binds, pad, sk, styleAttr, prefixBody, kidsAll });
+    }
+    if (n.type === "instance" && isVectorOnly(n))
       return emitVectorGlyph({ n, depth, binds, pad, sk, styleAttr, prefixBody, kidsAll });
 
     // container / leaf box. Recurse into children.
@@ -1244,6 +1258,30 @@ function renderVariant(v: any): VariantRender {
       );
     }
     const el = `${pad}<${Box} ${styleAttr}>{${slotLg.name} ?? ${defaultEl}}</${Box}>`;
+    return wrapConditional(el, binds, depth, n);
+  }
+
+  // A variant SHEET of pure artwork (svg-lib.isVariantSheet) → ONE OWNED ICON PER SYMBOL,
+  // not one drawing of the whole set. Each symbol goes back through emit(), so it gets its
+  // own extractGeometry, its own resolved colour and its own placement inside the sheet —
+  // exactly what a detected variant would have got. The sheet frame itself contributes only
+  // its box: it is authoring furniture (Figma marks a component set with a dashed rect), and
+  // its own paints belong to no variant. Dispatched from emit().
+  function emitVariantSheet(ctx: NodeCtx): string {
+    const { n, depth, binds, pad, sk, styleAttr, prefixBody, kidsAll } = ctx;
+    push(
+      `component set "${n.name}" (${n.guid}) exposes ${kidsAll.length} symbol(s) but no variant axes — ` +
+        `emitted one icon per symbol (the set frame's own paints are not rendered); name the ` +
+        `variants "prop=value" in Figma to get a real variant API`,
+    );
+    const box = [n.box?.w ? `width: ${n.box.w},` : "", n.box?.h ? `height: ${n.box.h},` : ""]
+      .filter(Boolean)
+      .join("\n");
+    styles.push({ key: sk, body: prefixBody(box) });
+    const inner = emitChildren(n, kidsAll, depth);
+    const el = inner
+      ? `${pad}<${Box} ${styleAttr}>\n${inner}\n${pad}</${Box}>`
+      : `${pad}<${Box} ${styleAttr} />`;
     return wrapConditional(el, binds, depth, n);
   }
 

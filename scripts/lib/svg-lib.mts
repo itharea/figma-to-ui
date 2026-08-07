@@ -428,6 +428,32 @@ export function extractGeometry(index: SvgIndex, guidKey: string): SvgGeometry {
   return { width, height, viewBox: `${vx} ${vy} ${vw} ${vh}`, paths: out, fills, geomHash };
 }
 
+// The minimum any node tree must expose to be classified below — satisfied by both a raw
+// decoded node (`type: "SYMBOL"`) and an IR node (`type: "symbol"`), hence the case fold.
+export type GlyphNode = {
+  type?: string | null;
+  visible?: boolean | null;
+  children?: GlyphNode[] | null;
+};
+
+// A variant SHEET: a node whose visible children are ALL component DEFINITIONS. Figma
+// stores each variant of a component set as its own SYMBOL under the set frame, so such a
+// frame is a set laid out for authoring — N separate drawings side by side, never one.
+//
+// It matters because a set whose variants are not named `prop=value` yields no variant axes
+// (only the weaker `stroke-hint` frame detection fires), and codegen then renders the WHOLE
+// set frame as its single pseudo-variant. Handed to extractGeometry that produces one
+// enormous drawing of every variant at once — observed as a single 390×896 / 828 KB icon
+// for a five-banner illustration set — instead of one icon per variant. Callers must split
+// on this and run extractGeometry per SYMBOL child.
+//
+// Two or more: a lone SYMBOL inside a wrapper frame is still one drawing, and splitting it
+// would only add an indirection.
+export function isVariantSheet(n: GlyphNode): boolean {
+  const kids = (n.children ?? []).filter((c) => c && c.visible !== false);
+  return kids.length >= 2 && kids.every((c) => (c.type ?? "").toLowerCase() === "symbol");
+}
+
 // Serialize a single <path> (or <Path> for react-native-svg). React-style camelCase
 // attrs (fillRule/fillOpacity) so the same string drops into a .tsx component; the raw
 // SVG file path (export-svg CLI) lower-cases them via `dom: true`.

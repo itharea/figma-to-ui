@@ -32,7 +32,13 @@ import {
 import { spawnSync } from "child_process";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { extractGeometry, toSvgString, emitIconComponent, planIcon } from "./lib/svg-lib.mts";
+import {
+  extractGeometry,
+  toSvgString,
+  emitIconComponent,
+  planIcon,
+  isVariantSheet,
+} from "./lib/svg-lib.mts";
 import { deriveLogicals } from "./lib/components-lib.mts";
 import { slugify, uniqueSlug, kebab, camel, compIdent } from "./lib/naming.mts";
 
@@ -871,6 +877,108 @@ const bind = (node: string, field: string) => [{ node, field }];
     "svg: resolved/master colour count mismatch ⇒ no guessed remap",
     mismatch.palette === null && !mismatch.mono,
     JSON.stringify(mismatch),
+  );
+}
+
+// ── svg-lib: a variant SHEET is N drawings — one icon per SYMBOL, never one ──
+{
+  // A set frame with two SYMBOL variants, each drawing its own line. Rendered as one
+  // composite glyph it becomes a single drawing of the whole sheet; it must be split.
+  const blobs = [0, 1].map((i) => {
+    const bytes: number[] = [];
+    const f = (v: number) => {
+      const b = Buffer.alloc(4);
+      b.writeFloatLE(v);
+      bytes.push(b[0], b[1], b[2], b[3]);
+    };
+    bytes.push(1);
+    f(0);
+    f(0); // M0 0
+    bytes.push(2);
+    f(6 + i * 4);
+    f(0); // L6/L10 0 — distinct shapes
+    bytes.push(0); // Z
+    return { bytes };
+  });
+  const vector = (i: number) => ({
+    guid: { sessionID: 1, localID: 10 + i },
+    type: "VECTOR",
+    visible: true,
+    opacity: 1,
+    size: { x: 16, y: 16 },
+    fillGeometry: [{ commandsBlob: i, windingRule: "NONZERO" }],
+    fillPaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0, g: 0, b: 0, a: 1 } }],
+  });
+  const symbol = (i: number) => ({
+    guid: { sessionID: 1, localID: 2 + i },
+    type: "SYMBOL",
+    visible: true,
+    name: `banner-${i + 1}`,
+    size: { x: 16, y: 16 },
+    transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: i * 20 },
+  });
+  const sheet: any = {
+    guid: { sessionID: 1, localID: 1 },
+    type: "FRAME",
+    visible: true,
+    size: { x: 16, y: 36 },
+  };
+  const syms = [symbol(0), symbol(1)];
+  const vecs = [vector(0), vector(1)];
+  const index = {
+    msg: { blobs },
+    byKey: new Map<string, any>([
+      ["1:1", sheet],
+      ...syms.map((s) => [key(s.guid), s] as [string, any]),
+      ...vecs.map((v) => [key(v.guid), v] as [string, any]),
+    ]),
+    children: new Map<string, any[]>([
+      ["1:1", syms],
+      [key(syms[0].guid), [vecs[0]]],
+      [key(syms[1].guid), [vecs[1]]],
+    ]),
+  } as any;
+
+  // raw casing (SYMBOL) and IR casing (symbol) must both classify.
+  check(
+    "svg: a frame of raw SYMBOL children is a variant sheet",
+    isVariantSheet({ ...sheet, children: syms }),
+  );
+  check(
+    "svg: an IR frame of symbol children is a variant sheet",
+    isVariantSheet({ type: "frame", children: [{ type: "symbol" }, { type: "symbol" }] }),
+  );
+  check(
+    "svg: a frame of VECTOR children is NOT a sheet (still one composite glyph)",
+    !isVariantSheet({ type: "frame", children: [{ type: "vector" }, { type: "vector" }] }),
+  );
+  check(
+    "svg: a lone SYMBOL in a wrapper is NOT a sheet (still one drawing)",
+    !isVariantSheet({ type: "frame", children: [{ type: "symbol" }] }),
+  );
+  check(
+    "svg: an invisible symbol does not count toward a sheet",
+    !isVariantSheet({
+      type: "frame",
+      children: [{ type: "symbol" }, { type: "symbol", visible: false }],
+    }),
+  );
+
+  // Extracting the SHEET yields the whole set as one drawing (what codegen must not emit)…
+  eq(
+    "svg: sheet extracted whole = one combined drawing",
+    extractGeometry(index, "1:1").paths.length,
+    2,
+  );
+  // …while extracting per SYMBOL child yields one icon each, with its own geometry.
+  const a = extractGeometry(index, key(syms[0].guid));
+  const b = extractGeometry(index, key(syms[1].guid));
+  eq("svg: per-symbol extraction = one path each (a)", a.paths.length, 1);
+  eq("svg: per-symbol extraction = one path each (b)", b.paths.length, 1);
+  check(
+    "svg: per-symbol icons are distinct components",
+    a.geomHash !== b.geomHash && planIcon(a, []).dedupKey !== planIcon(b, []).dedupKey,
+    `${a.geomHash} vs ${b.geomHash}`,
   );
 }
 

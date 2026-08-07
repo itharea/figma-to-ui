@@ -136,7 +136,10 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
   — same shape in two different ramps ⇒ two icons, not one. Instance-swap
   slots render `{icon ?? <DefaultGlyph/>}`. No `export-svg` placeholder boxes, no manual re-map.
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
-  `--svg` explicitly.)
+  `--svg` explicitly.) A set whose variants carry no `prop=value` names has no variant axes, so
+  the whole set frame is its one pseudo-variant; codegen still emits **one icon per symbol**
+  there (never one drawing of the entire sheet) and flags it — name the variants in Figma to get
+  a real variant API.
 - **`--images $WORK/ex/images`** extracts raster fills into `<slug>/assets/` and wires real
   references (web `backgroundImage` / rn `<Image>`).
 
