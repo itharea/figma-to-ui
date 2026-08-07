@@ -34,6 +34,7 @@ import {
   overlapArea,
   hasSignificantNonAdjacentOverlap,
   sizingLines,
+  verifyStackDefaults,
 } from "./lib/layout-lib.mts";
 import { assembleTypography } from "./lib/ir-lib.mts";
 import {
@@ -2606,6 +2607,429 @@ const bind = (node: string, field: string) => [{ node, field }];
     { sessionID: 1, localID: 1 },
   );
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── decode fixture: the whole pipeline, end to end, over ONE committed artefact ─
+//
+// Everything above this line tests a lib in isolation with hand-built objects. That is
+// what let a dozen defects live in READING THE BYTES while the suite stayed green: each
+// stage was correct against the input the test handed it, and no test ever ran a decode
+// through `load → build-ir → codegen/theme-gen` to find out whether the stages agree.
+//
+// scripts/fixtures/decode-fixture.json is a synthetic, committed, decode-SHAPED message —
+// no .fig, no local artifact, nothing gitignored — small enough to read and chosen so one
+// artefact carries every case that is invisible to a screenshot or a typecheck:
+//
+//   assetRef-addressed bindings   every variable/style reference uses {assetRef:{key}}, the
+//                                 shape a self-subscribing library file writes (one text
+//                                 style uses {guid} instead, as the control)
+//   omitted sizing fields         stackPrimarySizing/stackCounterSizing absent on most
+//                                 frames, and the geometry made to match the hug reading
+//   component properties          a TEXT prop assigned on an instance + a VISIBLE:false one
+//   parameterConsumptionMap       one text style binds its 5 typography variables there,
+//                                 the other in variableConsumptionMap
+//   mask-wrapped SVG art          a full-bounds black clip rect inside a mask group
+//   mixed imageScaleMode          FILL / STRETCH / TILE on three sibling rasters, plus a
+//                                 hidden paint stacked under one of them
+//   identifier hazards            a variant axis named "item count", another named "in",
+//                                 and a component property named "class"
+//
+// The assertions below are deliberately INTEGRATION-level: what the artefacts on disk say
+// after the real CLIs ran. The per-stage unit assertions above already pin the mechanics.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-fixture-"));
+  const run = (script: string, args: string[]) =>
+    spawnSync(process.argv[0], [path.join(here, "cli", script), ...args], { encoding: "utf8" });
+  try {
+    // --- stage 0: load() — the chokepoint every CLI goes through -------------
+    const idx = load(fixture);
+    eq("fixture: every published asset is keyed", idx.assetRefs.keyedAssets, 12);
+    check(
+      "fixture: assetRef bindings were re-addressed onto local guids",
+      idx.assetRefs.rewrites > 0,
+      `rewrites ${idx.assetRefs.rewrites}`,
+    );
+    eq("fixture: no assetRef key dangles", Object.keys(idx.assetRefs.unresolved), []);
+
+    // --- stage 1: build-ir ----------------------------------------------------
+    const irDir = path.join(tmp, "ir");
+    const build = run("build-ir.mts", [fixture, "--scope", "all", "--out", irDir]);
+    check("fixture: build-ir exits 0", build.status === 0, (build.stderr ?? "").slice(-400));
+    const read = (rel: string) => JSON.parse(fs.readFileSync(path.join(irDir, rel), "utf8"));
+    const manifest = read("manifest.json");
+    eq("fixture: both variable modes reach the manifest", manifest.modes, ["Light", "Dark"]);
+    eq("fixture: the collection default is the active mode", manifest.activeMode, "Light");
+    eq("fixture: three screen roots compiled", manifest.counts.screens, 3);
+    eq("fixture: one component set, three variants", manifest.counts.variants, 3);
+    // issues.json carries the provenance violations too — a non-empty list is a build bug.
+    eq("fixture: build is issue-free", manifest.counts.issues, 0);
+
+    // Variables: the SET was addressed by assetRef too, so a mode NAME in the token file is
+    // proof the whole chain (paint → variable → set → mode) re-addressed, not just the leaf.
+    const colors = read("tokens/colors.json");
+    eq("fixture: both colour variables emitted", colors.length, 2);
+    eq(
+      "fixture: modes resolve to NAMES via the assetRef-addressed set",
+      Object.keys(colors[0].modes),
+      ["Light", "Dark"],
+    );
+
+    // Typography: the two styles bind the same five properties through DIFFERENT maps.
+    const typography = read("tokens/typography.json");
+    for (const t of typography)
+      eq(
+        `fixture: text style "${t.name}" reports all 5 variable bindings`,
+        Object.values(t.vars).filter((v) => v != null).length,
+        5,
+      );
+
+    // --- stage 2: the resolved screen ----------------------------------------
+    const card = read("screens/fixture-page/card.json");
+    const find = (n: any, name: string): any =>
+      n.name === name ? n : (n.children ?? []).reduce((a: any, c: any) => a ?? find(c, name), null);
+
+    // sizing: absent on both raw fields ⇒ hug primary / fixed counter, and the measured
+    // 96px height is exactly what the geometric verifier below independently re-derives.
+    eq("fixture: absent sizing fields resolve per-axis", card.layout, {
+      mode: "column",
+      primarySizing: "hug",
+      counterSizing: "fixed",
+      gap: 8,
+      paddingTop: 12,
+      paddingRight: 16,
+      paddingBottom: 12,
+      paddingLeft: 16,
+    });
+    // bound paints: the cached literal on every paint in the fixture is deliberately
+    // #ff00ff, so a hex that is not magenta proves the VARIABLE won, not the stale cache.
+    eq(
+      "fixture: bound fill carries its token",
+      [card.color?.var, card.color?.hex],
+      ["Color/surface/card", "#ffffff"],
+    );
+    eq(
+      "fixture: bound stroke survives alongside the fill",
+      [card.stroke?.var, card.stroke?.hex],
+      ["Color/text/primary", "#1a1a1a"],
+    );
+
+    // component properties, read off the resolved instance: the TEXT assignment beat the
+    // master default, and the VISIBLE:false one removed its node from the tree entirely.
+    const chip = find(card, "Chip");
+    eq("fixture: instance links its variant master", chip?.component?.guid, "1:31");
+    eq("fixture: TEXT property supplies the copy", find(chip, "Label")?.text?.value, "Add note");
+    eq(
+      "fixture: prop-driven copy is not a master default",
+      find(chip, "Label")?.text?.source,
+      "override",
+    );
+    eq("fixture: VISIBLE:false property hides its node", find(chip, "Badge"), null);
+    // out-of-flow / hidden children survive (or not) as the bytes say.
+    eq("fixture: stack-absolute child is flagged", find(card, "Ribbon")?.positioning, "absolute");
+    eq("fixture: invisible child is not emitted", find(card, "Retired"), null);
+    // typography reaches the node: the applied style is the certain source, and its
+    // per-property variable bindings ride along so a consumer can reference the scale.
+    const title = find(card, "Title");
+    eq(
+      "fixture: node reports its applied text style",
+      [title?.font?.styleName, title?.font?.sizeSource],
+      ["Body/m", "style"],
+    );
+    eq(
+      "fixture: typography variables reach the node",
+      title?.font?.vars?.size,
+      "Typography/size/m",
+    );
+
+    // --- stage 3: codegen -----------------------------------------------------
+    const outDir = path.join(tmp, "out");
+    const cg = run("codegen.mts", [irDir, "Chip", "--framework", "web", "--out", outDir]);
+    check("fixture: codegen exits 0", cg.status === 0, (cg.stderr ?? "").slice(-400));
+    const emitted = (file: string) => fs.readFileSync(path.join(outDir, "chip", file), "utf8");
+
+    // identifier hazards: an axis named "item count", an axis named "in" and a property
+    // named "class" are all emitted BARE into a type literal and a destructuring pattern,
+    // so a scaffold carrying them verbatim does not parse at all. Assert on the real files.
+    const types = emitted("types.ts");
+    check(
+      "fixture: hazardous axis names are sanitised in the Props type",
+      /itemCount: 'one' \| 'many'/.test(types) &&
+        /inProp: 'default' \| 'compact' \| 'media'/.test(types),
+      types,
+    );
+    const bindingsIn = (src: string, re: RegExp): string[] => {
+      const m = re.exec(src);
+      return m
+        ? m[1]
+            .split(",")
+            .map((s) => s.trim().split("=")[0].trim())
+            .filter(Boolean)
+        : [];
+    };
+    const dispatcherProps = bindingsIn(emitted("index.tsx"), /const \{ ([^}]*) \} = props;/);
+    eq("fixture: dispatcher destructures one binding per axis", dispatcherProps, [
+      "itemCount",
+      "inProp",
+    ]);
+    const variantProps = bindingsIn(
+      emitted("one-default.tsx"),
+      /export function \w+\(\{ ([^}]*) \}: \w+Props\)/,
+    );
+    eq("fixture: variant destructures its bound properties", variantProps, [
+      "classProp",
+      "showBadge",
+      "style",
+    ]);
+    for (const name of [...dispatcherProps, ...variantProps])
+      check(`fixture: emitted binding "${name}" is a legal identifier`, isSafeIdent(name), name);
+
+    // hug/fill sizing survives into CSS: a hugging axis must be fit-content, never the
+    // measured number (which would freeze it) and never `auto` (which means fill).
+    check(
+      "fixture: a hugging frame emits fit-content, not its measured width",
+      /width: 'fit-content', \/\/ hug/.test(emitted("one-default.tsx")),
+      emitted("one-default.tsx").slice(0, 600),
+    );
+
+    // mixed imageScaleMode: three sibling rasters, three different CSS background-sizes,
+    // in source order. Emitting them all as `cover` is pixel-plausible and wrong.
+    const media = emitted("many-media.tsx");
+    eq(
+      "fixture: each paint's background-size matches its own scale mode",
+      [...media.matchAll(/backgroundSize: '([^']+)'/g)].map((m) => m[1]),
+      ["cover", "100% 100%", "auto"],
+    );
+    check(
+      "fixture: the hidden stacked paint is not the one that got emitted",
+      media.includes("a1b2c3d4e5f60002") && !media.includes("a1b2c3d4e5f60099"),
+      media.slice(0, 800),
+    );
+
+    // --- stage 4: theme-gen ---------------------------------------------------
+    // --mode ROOTS the requested mode; the others follow as .mode-* classes. Building "at"
+    // a mode that only ever lands in a class is the failure this pins.
+    const theme = run("theme-gen.mts", [
+      irDir,
+      "--framework",
+      "web",
+      "--mode",
+      "Dark",
+      "--no-census",
+    ]);
+    check("fixture: theme-gen exits 0", theme.status === 0, (theme.stderr ?? "").slice(-400));
+    const css = theme.stdout ?? "";
+    const block = (sel: string) => new RegExp(`${sel} \\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+    check(
+      "fixture: --mode Dark roots the Dark values",
+      /--color-surface-card: #1a1a1a;/.test(block(":root")),
+      block(":root"),
+    );
+    check(
+      "fixture: the unrequested mode follows as a class",
+      /--color-surface-card: #ffffff;/.test(block("\\.mode-light")),
+      block("\\.mode-light"),
+    );
+
+    // --- stage 5: vector art ---------------------------------------------------
+    // Figma's SVG importer wraps pasted art in a mask group whose only child is a
+    // full-bounds black rectangle. Painted as geometry it covers the artwork exactly, so
+    // the export looks like a black box — and the extraction still "succeeds".
+    let art!: ReturnType<typeof extractGeometry>;
+    const origError = console.error;
+    const warns: string[] = [];
+    console.error = (...a: any[]) => void warns.push(a.join(" "));
+    try {
+      art = extractGeometry(idx as any, "1:80");
+    } finally {
+      console.error = origError;
+    }
+    eq("fixture: mask subtree contributes no path", art.paths.length, 1);
+    eq("fixture: no spurious black in the extracted fills", art.fills, ["#3366ff"]);
+    eq("fixture: a full-bounds rectangular mask is dropped silently", warns, []);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── layout-lib: the geometric default-verifier (format assumption vs the bytes) ─
+//
+// `stackPrimarySizing` absent means hug, and a frame frozen at exactly its content size
+// is pixel-identical to a hugging one — so the only way to test the reading is
+// arithmetic: a hugging axis MUST measure sum(children) + gaps + padding. That makes the
+// check portable to any export (raw.mts verify-defaults), which is the point: it re-derives
+// the answer from whatever file is in front of it instead of from a fixed expectation.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const idx = load(fixture);
+  const rep = verifyStackDefaults(idx);
+
+  eq("verify-defaults: every auto-layout frame is visited", rep.autoLayoutFrames, 5);
+  eq("verify-defaults: the fixture's geometry agrees throughout", rep.violations, []);
+  eq(
+    "verify-defaults: frames under test are the ones with the field ABSENT",
+    rep.checked.filter((c) => c.declared === "absent").map((c) => c.guid),
+    ["1:31", "1:36", "1:50"],
+  );
+  eq(
+    "verify-defaults: an explicit RESIZE_TO_FIT frame is the control group",
+    rep.checked.filter((c) => c.declared === "hug").map((c) => c.guid),
+    ["1:60"],
+  );
+  // A frame that cannot be computed exactly must be REPORTED as untestable, never counted
+  // as agreeing — "no evidence" and "evidence of agreement" are different answers.
+  eq("verify-defaults: untestable frames are reported with a reason", rep.skipped, {
+    "few-in-flow-children": 1,
+  });
+  // The sum is over IN-FLOW children only: the fixture's Card also holds a stack-absolute
+  // child and an invisible one, neither of which takes space. Counting them would predict
+  // 160 rather than 96 and the whole check would cry wolf on every real file.
+  const cardCheck = rep.checked.find((c) => c.guid === "1:50")!;
+  eq("verify-defaults: out-of-flow and hidden children are excluded", cardCheck.children, 2);
+  eq(
+    "verify-defaults: padding is read on the frame's OWN primary axis",
+    [cardCheck.padStart, cardCheck.padEnd],
+    [12, 12],
+  );
+
+  // The failure mode it exists to catch: a frame frozen at its authored size while its
+  // content changed. Mutating one number must produce a NAMED violation with the numbers
+  // a reader needs, not a bare boolean.
+  {
+    const frozen = load(fixture);
+    frozen.byKey.get("1:50").size.y = 140; // the authored height of a since-shortened card
+    const bad = verifyStackDefaults(frozen);
+    eq("verify-defaults: a frozen axis is caught", bad.violations.length, 1);
+    eq("verify-defaults: the violation names the frame", bad.violations[0].guid, "1:50");
+    eq(
+      "verify-defaults: the violation reports both sides and the delta",
+      [bad.violations[0].actual, bad.violations[0].expected, bad.violations[0].delta],
+      [140, 96, 44],
+    );
+    eq("verify-defaults: agreeing frames are unaffected", bad.checked.length, rep.checked.length);
+  }
+
+  // Preconditions: each one exists because the sum does not hold there, and a false
+  // violation would make the whole check ignorable. Hand-built so each is isolated.
+  {
+    const kid = (localID: number, parent: number, extra: any = {}) => ({
+      guid: G(1, localID),
+      type: "FRAME",
+      name: `k${localID}`,
+      parentIndex: { guid: G(1, parent), position: String.fromCharCode(96 + localID) },
+      size: { x: 10, y: 10 },
+      ...extra,
+    });
+    const frame = (extra: any) => ({
+      guid: G(1, 1),
+      type: "FRAME",
+      name: "F",
+      stackMode: "HORIZONTAL",
+      size: { x: 20, y: 10 },
+      ...extra,
+    });
+    const run = (nodes: any[]) => verifyStackDefaults(makeIndex(nodes));
+    eq(
+      "verify-defaults: a FIXED frame predicts nothing and is skipped",
+      run([frame({ stackPrimarySizing: "FIXED" }), kid(2, 1), kid(3, 1)]).skipped,
+      { "declared-fixed": 1 },
+    );
+    eq(
+      "verify-defaults: a wrapping stack is not a sum",
+      run([frame({ stackWrap: "WRAP" }), kid(2, 1), kid(3, 1)]).skipped,
+      { wrapping: 1 },
+    );
+    eq(
+      "verify-defaults: a distributed justify does not use stackSpacing as the gap",
+      run([frame({ stackPrimaryAlignItems: "SPACE_BETWEEN" }), kid(2, 1), kid(3, 1)]).skipped,
+      { "distributed-justify": 1 },
+    );
+    eq(
+      "verify-defaults: a child with no size makes the frame incomputable",
+      run([frame({}), kid(2, 1), { ...kid(3, 1), size: undefined }]).skipped,
+      { "child-without-size": 1 },
+    );
+    // An export with nothing testable must come back EMPTY, not "all passed".
+    const nothing = run([frame({}), kid(2, 1)]);
+    eq("verify-defaults: no testable frames → no checks", nothing.checked, []);
+    eq("verify-defaults: no testable frames → no violations either", nothing.violations, []);
+    // Tolerance is a knob, not a hidden constant: float32 decode noise is real.
+    const noisy = [frame({ size: { x: 20.3, y: 10 } }), kid(2, 1), kid(3, 1)];
+    eq(
+      "verify-defaults: sub-pixel noise is inside the default tolerance",
+      run(noisy).violations,
+      [],
+    );
+    eq(
+      "verify-defaults: a stricter tolerance surfaces it",
+      verifyStackDefaults(makeIndex(noisy), { tolerance: 0.01 }).violations.length,
+      1,
+    );
+  }
+
+  // The subcommand: it has to REPORT, distinguishably, in all three outcomes.
+  {
+    const rawPath = path.join(here, "cli", "raw.mts");
+    const cli = (args: string[]) =>
+      spawnSync(process.argv[0], [rawPath, "verify-defaults", ...args], { encoding: "utf8" });
+
+    const ok = cli([fixture]);
+    check("verify-defaults CLI: a clean file exits 0", ok.status === 0, String(ok.status));
+    check(
+      "verify-defaults CLI: a clean file reports agreement",
+      /VERDICT: all 4 testable frame\(s\) agree/.test(ok.stdout ?? ""),
+      (ok.stdout ?? "").slice(-300),
+    );
+    check(
+      "verify-defaults CLI: untestable frames are reported separately from agreeing ones",
+      /not testable: 1 \(few-in-flow-children 1\)/.test(ok.stdout ?? ""),
+      (ok.stdout ?? "").slice(0, 600),
+    );
+
+    // A violating copy of the same file: loud, non-zero, and specific.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-verify-"));
+    try {
+      const msg = JSON.parse(fs.readFileSync(fixture, "utf8"));
+      for (const n of msg.nodeChanges) if (n.guid.localID === 50) n.size.y = 140;
+      const p = path.join(dir, "message.json");
+      fs.writeFileSync(p, JSON.stringify(msg));
+      const bad = cli([p]);
+      check(
+        "verify-defaults CLI: a violation exits non-zero",
+        bad.status === 1,
+        String(bad.status),
+      );
+      check(
+        "verify-defaults CLI: the violation is printed with its numbers",
+        /VIOLATION absent: column "Card" \[1:50\] primary 140 vs 96/.test(bad.stdout ?? ""),
+        (bad.stdout ?? "").slice(-500),
+      );
+      check(
+        "verify-defaults CLI: the verdict says do not trust the build",
+        /VERDICT: 1 of 4 testable frame\(s\) DISAGREE/.test(bad.stdout ?? ""),
+        (bad.stdout ?? "").slice(-300),
+      );
+
+      // …and a file with nothing to check must not read as a pass.
+      const empty = path.join(dir, "empty.json");
+      fs.writeFileSync(empty, JSON.stringify({ nodeChanges: [] }));
+      const none = cli([empty]);
+      check(
+        "verify-defaults CLI: an inconclusive file still exits 0",
+        none.status === 0,
+        String(none.status),
+      );
+      check(
+        "verify-defaults CLI: inconclusive is worded as neither confirm nor refute",
+        /VERDICT: no testable frames/.test(none.stdout ?? ""),
+        (none.stdout ?? "").slice(-300),
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
 }
 
 // ── live fixtures (skip cleanly when no decode is reachable) ─────────────────

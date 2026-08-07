@@ -85,6 +85,20 @@ untokenised (raw hex, frozen px, unbound type), check it:
 node cli/normalize-assetrefs.mts $WORK/msg-<name>.json   # re-addressed sites + unresolved keys
 ```
 
+Then check the file's own geometry against how its omitted layout fields are read — once, before
+you build anything from it:
+
+```sh
+node cli/raw.mts verify-defaults $WORK/msg-<name>.json   # exit 1 = the reading is wrong for this file
+```
+
+Figma omits a sizing field when it holds its default, so every absent one is a value the reader
+supplies. This re-derives the answer from _this_ export: a frame that hugs along its stack
+direction must measure `sum(children) + gaps + padding` on that axis. It agreeing is worth little
+individually and a lot in bulk; it _disagreeing_ means the scaffold will freeze every hugging
+frame at its authored size — pixel-identical today, broken the moment the copy changes. "Nothing
+was testable" is reported as its own outcome, never as a pass (see REFERENCE.md).
+
 ## Step 2 — Build the IR
 
 ```sh
@@ -305,13 +319,13 @@ All deterministic — no visual-diff/fidelity step:
 
 ## Toolkit
 
-| Stage           | Scripts                                                                                            |
-| --------------- | -------------------------------------------------------------------------------------------------- |
-| Decode & locate | `parse`, `tree`, `find`, `node`                                                                    |
-| IR spine        | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir`                                                |
-| Assets          | `export-svg`, `icons`, `svg-lib` (shared geometry core)                                            |
-| Raw query       | `cli/raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames>` |
-| Test            | `selftest.mts` (`npm test`)                                                                        |
+| Stage           | Scripts                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Decode & locate | `parse`, `tree`, `find`, `node`                                                                                     |
+| IR spine        | `build-ir`, `theme-gen`, `codegen`, `diff-ir`, `ir`                                                                 |
+| Assets          | `export-svg`, `icons`, `svg-lib` (shared geometry core)                                                             |
+| Raw query       | `cli/raw.mts <dump\|resolve\|overrides\|variables\|components\|intent\|match-tokens\|diff-frames\|verify-defaults>` |
+| Test            | `selftest.mts` (`npm test`)                                                                                         |
 
 Full usage, every flag, the `.fig` format, the node-field tables, and the IR schema →
 **[`REFERENCE.md`](./REFERENCE.md)**.

@@ -499,16 +499,42 @@ directory together so the relative imports resolve.
 field-confirmation escape hatch, and the **verifier the IR is checked against**.
 It reads `message.json` (not the IR).
 
-| Subcommand     | Usage                                                                    | Purpose                                                                                                                                                             |
-| -------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dump`         | `node cli/raw.mts dump <msg.json> <guidKey> [depth] [--abs] [--resolve]` | per-screen implementation dump (`--abs` absolute coords; `--resolve` composes instances + tags placeholders)                                                        |
-| `resolve`      | `node cli/raw.mts resolve <msg.json> <guidKey> [depth]`                  | compose master + symbolOverrides → the rendered instance tree                                                                                                       |
-| `overrides`    | `node cli/raw.mts overrides <msg.json> <guidKey> [--full]`               | instance text/color overrides (`--full` value-prints lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings)                                                   |
-| `variables`    | `node cli/raw.mts variables <msg.json>`                                  | design tokens from Figma variables (alias chains resolved transitively → concrete value; **skips soft-deleted**)                                                    |
-| `components`   | `node cli/raw.mts components <msg.json> [nameRegex]`                     | list component sets + variant masters + proposed TS prop API                                                                                                        |
-| `intent`       | `node cli/raw.mts intent <msg.json> <screen-guidKey>`                    | one copy-pasteable designer-intent gap checklist (placeholders, denylisted/repeated strings, reconciliation conflicts, default-variant instances, mono-color icons) |
-| `match-tokens` | `node cli/raw.mts match-tokens <msg.json> <theme.(ts\|json)> [guidKey]`  | brownfield map mode: annotate fig values vs a code theme **by value, within kind** (`exact`/`nearest(Δ)`/`none`); never rewrites                                    |
-| `diff-frames`  | `node cli/raw.mts diff-frames <msg.json> <guidA> <guidB>`                | resolve both frames, align by name-path, report per-node property deltas. **Surfaces** drift; does **not** pick a canonical winner                                  |
+| Subcommand        | Usage                                                                                          | Purpose                                                                                                                                                             |
+| ----------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dump`            | `node cli/raw.mts dump <msg.json> <guidKey> [depth] [--abs] [--resolve]`                       | per-screen implementation dump (`--abs` absolute coords; `--resolve` composes instances + tags placeholders)                                                        |
+| `resolve`         | `node cli/raw.mts resolve <msg.json> <guidKey> [depth]`                                        | compose master + symbolOverrides → the rendered instance tree                                                                                                       |
+| `overrides`       | `node cli/raw.mts overrides <msg.json> <guidKey> [--full]`                                     | instance text/color overrides (`--full` value-prints lineHeight/letterSpacing(px)/textCase/cornerRadius/paddings)                                                   |
+| `variables`       | `node cli/raw.mts variables <msg.json>`                                                        | design tokens from Figma variables (alias chains resolved transitively → concrete value; **skips soft-deleted**)                                                    |
+| `components`      | `node cli/raw.mts components <msg.json> [nameRegex]`                                           | list component sets + variant masters + proposed TS prop API                                                                                                        |
+| `intent`          | `node cli/raw.mts intent <msg.json> <screen-guidKey>`                                          | one copy-pasteable designer-intent gap checklist (placeholders, denylisted/repeated strings, reconciliation conflicts, default-variant instances, mono-color icons) |
+| `match-tokens`    | `node cli/raw.mts match-tokens <msg.json> <theme.(ts\|json)> [guidKey]`                        | brownfield map mode: annotate fig values vs a code theme **by value, within kind** (`exact`/`nearest(Δ)`/`none`); never rewrites                                    |
+| `diff-frames`     | `node cli/raw.mts diff-frames <msg.json> <guidA> <guidB>`                                      | resolve both frames, align by name-path, report per-node property deltas. **Surfaces** drift; does **not** pick a canonical winner                                  |
+| `verify-defaults` | `node cli/raw.mts verify-defaults <msg.json> [--tolerance <px>] [--min-children <n>] [--list]` | check this export's own geometry against the omit-when-default reading of `stackPrimarySizing` (see below). Exit 1 on any violation                                 |
+
+#### `verify-defaults` — validating a format assumption against the bytes
+
+`stackPrimarySizing` / `stackCounterSizing` are written only when they hold a **non-default**
+value, so an absent field is a real value the reader has to supply — and the two axes default
+**oppositely** (primary absent ⇒ hug, counter absent ⇒ fixed). Reading either one backwards is
+invisible: a frame frozen at exactly its content size renders pixel-identically to a hugging
+one and only diverges once the content changes.
+
+`verify-defaults` tests the reading arithmetically, per file, instead of against a fixed
+expectation: a frame that really hugs along its stack direction must measure
+`sum(in-flow children) + gaps + padding` on that axis. Every frame whose primary sizing is
+**absent** is one independent test of "absent ⇒ hug"; frames that state `RESIZE_TO_FIT`
+outright are reported separately as the **control** for the arithmetic itself (controls passing
+while absent-frames fail is the signature of a wrong default).
+
+Frames that cannot be computed exactly are **skipped with a reason**, never guessed at — fewer
+than `--min-children` (default 2) in-flow children, `stackWrap: WRAP`, a distributed justify
+(`SPACE_BETWEEN`/`SPACE_EVENLY`), a missing `size`, an explicit `FIXED`. Hidden and
+`stackPositioning: ABSOLUTE` children take no space and are excluded from the sum.
+
+Run it on any new `.fig` **before trusting a build from it**. The three outcomes are distinct:
+all testable frames agree (exit 0), _n_ disagree (exit 1, each printed with both sides and the
+delta), or nothing was testable — which is reported as neither confirming nor refuting the
+default, not as a pass.
 
 ### Libraries & test
 
@@ -518,3 +544,15 @@ so deterministic logic is written once and never drifts: `figma-index.mts`,
 `reconcile-lib.mts`, `tokens-lib.mts`, `mapping-lib.mts`, `theme-lib.mts`,
 `intent-lib.mts`, `ir-lib.mts`, `raster-lib.mts`, `describe-lib.mts`,
 `svg-lib.mts`. Run the regression suite with `npm test` (`selftest.mts`).
+
+`scripts/fixtures/decode-fixture.json` is a small **synthetic, committed, decode-shaped**
+message (no `.fig`, no local artifact) that `selftest.mts` drives through the real pipeline —
+`load` → `build-ir` → `codegen`/`theme-gen` — so the stages are tested for AGREEMENT, not only
+in isolation. It deliberately carries the cases that are invisible to a screenshot or a
+typecheck: `assetRef`-addressed variable/style bindings, omitted `stack*Sizing` fields with
+geometry that matches the hug reading, component properties (a `TEXT` assignment and a
+`VISIBLE:false`), typography bound through `parameterConsumptionMap` on one style and
+`variableConsumptionMap` on another, a mask-wrapped clip rectangle, mixed `imageScaleMode`
+paints, and identifier hazards (a variant axis named `item count`, another named `in`, a
+component property named `class`). Its geometry is also what `verify-defaults` is exercised
+against. Extend it rather than adding a second fixture.
