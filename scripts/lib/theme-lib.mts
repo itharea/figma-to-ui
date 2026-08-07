@@ -4,8 +4,8 @@
 // catalog so re-runs are byte-identical (the repo's determinism contract).
 //
 // Two outputs, same data:
-//   web → CSS custom properties (`:root { --color-praline-950: #2a1e1e; … }`), default
-//         mode in `:root`, future named modes in `.mode-<slug>`.
+//   web → CSS custom properties (`:root { --color-praline-950: #2a1e1e; … }`), the ACTIVE
+//         mode in `:root`, every other mode in `.mode-<slug>` after it.
 //   rn  → a typed TS const tree keyed by mode name; per-mode IIFE declares each variable
 //         as a `const` (concrete value or a reference to another variable's const, in
 //         topological order) then returns the nested tree built from those consts.
@@ -19,7 +19,11 @@ import { slugify } from "./naming.mts";
 
 export type ThemeVar = IRToken; // the variables.json element shape
 export type Framework = "web" | "rn";
-export type ThemeResult = { code: string; warnings: string[] };
+// A duplicate-named variable the use census proved dead and the emitter therefore left out.
+export type DroppedVar = { name: string; guid: string; keptGuid: string };
+export type ThemeResult = { code: string; warnings: string[]; dropped: DroppedVar[] };
+// variable guidKey → how many times a non-VARIABLE node references it (see variableUseCensus).
+export type UseCensus = ReadonlyMap<string, number>;
 
 // --- name munging (ONE rule each; reused by codegen so the two never drift) --------
 
@@ -138,28 +142,175 @@ export function primaryMode(vars: ThemeVar[]): string {
   return top ?? unionModes(vars)[0] ?? "default";
 }
 
+export type ModeMatch =
+  { mode: string } | { mode: null; reason: "unknown" | "ambiguous"; candidates: string[] };
+
+// Match a REQUESTED mode name against the catalog's real mode names. Figma mode names are
+// free text and routinely contain spaces and slashes ("App / freetypeface"), so the string a
+// caller types rarely survives a shell verbatim, and the name the generated CSS advertises is
+// the SLUG ("mode-app-freetypeface"), not the mode. Three tiers, most literal first: exact →
+// case-insensitive → slug-equal. Returning a discriminated miss (never a silent fallback) is
+// the point: a requested mode that quietly does not root is the defect this guards.
+export function resolveMode(modes: readonly string[], requested: string): ModeMatch {
+  const tiers: ((m: string) => boolean)[] = [
+    (m) => m === requested,
+    (m) => m.toLowerCase() === requested.toLowerCase(),
+    (m) => slugify(m) === slugify(requested),
+  ];
+  for (const match of tiers) {
+    const hits = modes.filter(match);
+    if (hits.length === 1) return { mode: hits[0] };
+    if (hits.length > 1) return { mode: null, reason: "ambiguous", candidates: hits };
+  }
+  return { mode: null, reason: "unknown", candidates: [...modes] };
+}
+
+// Emission order: the ROOTED mode first, every other mode after it. `:root` and `.mode-x` have
+// the SAME CSS specificity (0,1,0), so when a consumer opts in by putting the class on <html>
+// both rules match and only source order decides — the class must come later or the opt-in is
+// dead. (RN output is order-insensitive; it shares this for a consistent, diffable shape.)
+export function orderedModes(modes: readonly string[], primary: string): string[] {
+  return modes.includes(primary) ? [primary, ...modes.filter((m) => m !== primary)] : [...modes];
+}
+
+// --- live-use census (which of two same-named variables is the real one) ------------
+
+// Count, per variable guidKey, how many times a NON-VARIABLE node references it. Every
+// binding shape Figma uses — a paint's `colorVar`, a text style's `variableConsumptionMap`,
+// FONT_STYLE's extra `fontStyleValue.asString` wrapper, a component property default —
+// bottoms out in the same `{ alias: { guid: {sessionID, localID} } }` payload, so we walk
+// generically for `alias.guid` rather than enumerating field names that vary by fig version.
+// VARIABLE / VARIABLE_SET nodes are excluded on purpose: a variable aliasing another is the
+// token graph talking to itself, not evidence that anything in the DESIGN consumes it.
+//
+// Why this exists: a renumbered scale can leave superseded variables in the file under the
+// SAME names as their replacements (observed on one library export: six duplicated typography
+// names, every stale one with exactly 0 references and its live twin with 1–14). Reference
+// count is the only signal in the bytes that separates them.
+export function variableUseCensus(nodes: readonly unknown[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  const bump = (g: any): void => {
+    if (!g || g.sessionID === undefined || g.localID === undefined) return;
+    const k = `${g.sessionID}:${g.localID}`;
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  };
+  // depth cap: JSON from a decode is acyclic, but a bounded walk can never hang on a
+  // pathological payload. 24 clears the deepest known binding nesting several times over.
+  const walk = (v: any, depth: number): void => {
+    if (!v || typeof v !== "object" || depth > 24) return;
+    if (Array.isArray(v)) {
+      for (const x of v) walk(x, depth + 1);
+      return;
+    }
+    for (const [k, val] of Object.entries(v)) {
+      if (k === "alias" && val && typeof val === "object") bump((val as any).guid ?? val);
+      else walk(val, depth + 1);
+    }
+  };
+  for (const n of nodes) {
+    const node = n as any;
+    if (!node || typeof node !== "object") continue;
+    if (node.type === "VARIABLE" || node.type === "VARIABLE_SET") continue;
+    walk(node, 0);
+  }
+  return counts;
+}
+
+// Rank two candidates for one name. MOST-REFERENCED wins — that is the whole point of the
+// census. The tie-break must not be array order (the defect: whichever the catalog happened
+// to list first took the clean name), so it is the guid itself, HIGHEST first: a guid is
+// `sessionID:localID` and Figma hands out rising ids, so the larger guid is the variable
+// created LATER — the one that supersedes an identically-named predecessor. Non-numeric
+// guids fall back to a descending string compare, which is still order-independent.
+function rankForName(a: ThemeVar, b: ThemeVar, uses?: UseCensus): number {
+  const ua = uses?.get(a.guid) ?? 0;
+  const ub = uses?.get(b.guid) ?? 0;
+  if (ua !== ub) return ub - ua;
+  const na = a.guid.split(":").map(Number);
+  const nb = b.guid.split(":").map(Number);
+  if (na.every(Number.isFinite) && nb.every(Number.isFinite) && na.length === nb.length) {
+    for (let i = 0; i < na.length; i++) if (na[i] !== nb[i]) return nb[i] - na[i];
+    return 0;
+  }
+  return a.guid < b.guid ? 1 : a.guid > b.guid ? -1 : 0;
+}
+
+// Drop the duplicates the census proves dead. A variable is dropped only when ALL hold:
+// another variable carries the same Figma name, that twin IS referenced, this one is
+// referenced ZERO times, and no variable in the catalog aliases it (an alias target is live
+// by definition even with no direct design use). Everything else is kept and merely suffixed,
+// so an ambiguous case degrades to today's behaviour rather than losing data. Without a
+// census (`uses` absent) nothing is ever dropped.
+export function dedupeByCensus(
+  vars: ThemeVar[],
+  uses?: UseCensus,
+): { kept: ThemeVar[]; dropped: DroppedVar[] } {
+  if (!uses) return { kept: vars, dropped: [] };
+  const aliasTargets = new Set<string>();
+  for (const v of vars) for (const t of Object.values(v.aliasTargets ?? {})) aliasTargets.add(t);
+  const byName = new Map<string, ThemeVar[]>();
+  for (const v of vars) {
+    const group = byName.get(v.name);
+    if (group) group.push(v);
+    else byName.set(v.name, [v]);
+  }
+  const dropped = new Map<string, DroppedVar>();
+  for (const group of byName.values()) {
+    if (group.length < 2) continue;
+    const ranked = [...group].sort((a, b) => rankForName(a, b, uses));
+    const winner = ranked[0];
+    if ((uses.get(winner.guid) ?? 0) === 0) continue; // nothing proven live → keep them all
+    for (const v of ranked.slice(1)) {
+      if ((uses.get(v.guid) ?? 0) > 0) continue;
+      if (aliasTargets.has(v.guid)) continue;
+      dropped.set(v.guid, { name: v.name, guid: v.guid, keptGuid: winner.guid });
+    }
+  }
+  return { kept: vars.filter((v) => !dropped.has(v.guid)), dropped: [...dropped.values()] };
+}
+
 // --- unique-name assignment (collision-proof) --------------------------------------
 
-// Assign one munged name per variable guid; on a base collision append a deterministic
-// suffix (CSS "-2", RN "_2") and warn. guid → name so a reference resolves to the same name.
+// Assign one munged name per variable guid. Same-base variables are ranked by rankForName —
+// the live one takes the clean name, the rest get a deterministic suffix (CSS "-2", RN "_2")
+// and a warning. Grouping first is what makes this order-independent: previously the FIRST
+// variable in catalog order won the clean name, so a dead duplicate could shadow its live
+// twin. guid → name, so a reference resolves to the same name the declaration used.
 function assignNames(
   vars: ThemeVar[],
   baseOf: (v: ThemeVar) => string,
   sep: string,
+  uses?: UseCensus,
 ): { nameByGuid: Map<string, string>; warnings: string[] } {
   const nameByGuid = new Map<string, string>();
   const taken = new Set<string>();
   const warnings: string[] = [];
+  const groups = new Map<string, ThemeVar[]>();
+  const seen = new Set<string>();
   for (const v of vars) {
-    if (nameByGuid.has(v.guid)) continue;
+    if (seen.has(v.guid)) continue;
+    seen.add(v.guid);
     const base = baseOf(v);
-    let name = base;
-    let i = 2;
-    while (taken.has(name)) name = `${base}${sep}${i++}`;
-    if (name !== base)
-      warnings.push(`name collision: "${v.name}" → "${name}" (base "${base}" already taken)`);
-    taken.add(name);
-    nameByGuid.set(v.guid, name);
+    const group = groups.get(base);
+    if (group) group.push(v);
+    else groups.set(base, [v]);
+  }
+  const useStr = (v: ThemeVar) => (uses ? `${uses.get(v.guid) ?? 0} use(s)` : `no census`);
+  for (const [base, group] of groups) {
+    const ranked = group.length > 1 ? [...group].sort((a, b) => rankForName(a, b, uses)) : group;
+    for (const v of ranked) {
+      let name = base;
+      let i = 2;
+      while (taken.has(name)) name = `${base}${sep}${i++}`;
+      if (name !== base)
+        warnings.push(
+          `name collision: "${v.name}" ${v.guid} (${useStr(v)}) → "${name}"; ` +
+            `"${nameByGuid.get(ranked[0].guid) ?? base}" went to ${ranked[0].guid} ` +
+            `(${useStr(ranked[0])})`,
+        );
+      taken.add(name);
+      nameByGuid.set(v.guid, name);
+    }
   }
   return { nameByGuid, warnings };
 }
@@ -257,9 +408,19 @@ function modeBlockSelector(mode: string, primary: string): string {
   return mode === primary ? ":root" : `.mode-${slugify(mode)}`;
 }
 
-function emitWeb(vars: ThemeVar[], modes: string[], primary: string): ThemeResult {
+function emitWeb(
+  vars: ThemeVar[],
+  modes: string[],
+  primary: string,
+  uses?: UseCensus,
+): Omit<ThemeResult, "dropped"> {
   const warnings: string[] = [];
-  const { nameByGuid, warnings: nameWarn } = assignNames(vars, (v) => cssVarName(v.name), "-");
+  const { nameByGuid, warnings: nameWarn } = assignNames(
+    vars,
+    (v) => cssVarName(v.name),
+    "-",
+    uses,
+  );
   warnings.push(...nameWarn);
   const blocks: string[] = [];
   for (const mode of modes) {
@@ -294,9 +455,19 @@ function emitWeb(vars: ThemeVar[], modes: string[], primary: string): ThemeResul
   return { code: header + blocks.join("\n\n") + "\n", warnings };
 }
 
-function emitRn(vars: ThemeVar[], modes: string[], primary: string): ThemeResult {
+function emitRn(
+  vars: ThemeVar[],
+  modes: string[],
+  primary: string,
+  uses?: UseCensus,
+): Omit<ThemeResult, "dropped"> {
   const warnings: string[] = [];
-  const { nameByGuid, warnings: nameWarn } = assignNames(vars, (v) => constIdent(v.name), "_");
+  const { nameByGuid, warnings: nameWarn } = assignNames(
+    vars,
+    (v) => constIdent(v.name),
+    "_",
+    uses,
+  );
   warnings.push(...nameWarn);
   const guidToName = new Map(vars.map((v) => [v.guid, v.name] as const));
   const modeEntries: string[] = [];
@@ -349,19 +520,42 @@ function emitRn(vars: ThemeVar[], modes: string[], primary: string): ThemeResult
 }
 
 // Emit a theme for ONE framework. theme-gen calls this once per requested framework.
+//
+// `activeMode` is THE style decision: the requested mode is what gets rooted (`:root` /
+// `defaultMode`), with every other mode emitted after it as a switchable `.mode-<slug>`
+// class — building "at" a mode has to mean the values a consumer reads by default. Omit it
+// and the catalog's primary (most variables' collection default) roots, unchanged. A
+// requested mode that matches nothing is reported, never silently swapped for the default.
+//
+// `uses` is the live-use census (see variableUseCensus); pass it and duplicate names resolve
+// by reference count instead of catalog order, with proven-dead duplicates returned in
+// `dropped` for the caller to report. Omit it and nothing is dropped.
 export function emitTheme(
   vars: ThemeVar[],
-  opts: { framework: Framework; activeMode?: string },
+  opts: { framework: Framework; activeMode?: string; uses?: UseCensus },
 ): ThemeResult {
   const modes = unionModes(vars);
-  // The active mode (the single style decision) becomes :root / defaultMode; if it isn't a
-  // real mode, fall back to the catalog's primary. All modes are still emitted (switchable).
-  const primary =
-    opts.activeMode && modes.includes(opts.activeMode) ? opts.activeMode : primaryMode(vars);
   if (modes.length === 0)
     return {
       code: opts.framework === "web" ? ":root {}\n" : "export const theme = {} as const;\n",
       warnings: ["no variables — emitted an empty theme"],
+      dropped: [],
     };
-  return opts.framework === "web" ? emitWeb(vars, modes, primary) : emitRn(vars, modes, primary);
+  const warnings: string[] = [];
+  let primary = primaryMode(vars);
+  if (opts.activeMode) {
+    const match = resolveMode(modes, opts.activeMode);
+    if (match.mode !== null) primary = match.mode;
+    else
+      warnings.push(
+        `requested mode "${opts.activeMode}" is ${match.reason} among [${match.candidates.join(", ")}] — rooted "${primary}" instead`,
+      );
+  }
+  const { kept, dropped } = dedupeByCensus(vars, opts.uses);
+  const ordered = orderedModes(modes, primary);
+  const res =
+    opts.framework === "web"
+      ? emitWeb(kept, ordered, primary, opts.uses)
+      : emitRn(kept, ordered, primary, opts.uses);
+  return { code: res.code, warnings: [...warnings, ...res.warnings], dropped };
 }
