@@ -25,7 +25,7 @@
 //   (--out is an output DIRECTORY; <out>/<slug>/ is written, a file summary to stderr.)
 import * as fs from "fs";
 import * as path from "path";
-import type { IRNode } from "../lib/screens-lib.mts";
+import { imagePlacement, type IRFill, type IRNode } from "../lib/screens-lib.mts";
 import { mapValue, deriveLogicals, type Logical } from "../lib/components-lib.mts";
 import { disambiguateJustify } from "../lib/reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
@@ -240,10 +240,13 @@ function assetRef(hash: string | undefined): string | null {
   assetCache.set(hash, file);
   return file;
 }
-const imageHashOf = (n: IRNode): string | undefined => {
-  const f = (n.style?.fills ?? []).find((x: any) => x.type === "image" && x.imageHash);
-  return f ? ((f as any).imageHash as string) : undefined;
-};
+// The node's raster fill — the ONE selector both emitters (web backgroundImage, rn
+// <Image>) use, so they can never disagree about which paint won. "First" is safe
+// because style.fills[] is already a VISIBLE-paint list (fillToIR drops visible:false),
+// and that matters: nodes do stack image paints with a hidden first entry, and picking
+// paints[0] off the raw node would extract the wrong raster.
+const imageFillOf = (n: IRNode): IRFill | undefined =>
+  (n.style?.fills ?? []).find((x) => x.type === "image" && x.imageHash);
 function variantComponentName(v: any): string {
   const k = variantPropKey(v);
   const camel = k
@@ -474,16 +477,19 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
     // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
     // (handled there). Skipped in override mode (`only`): an image override is flagged by
     // the caller's instance-override TODO, not inlined into a `style={{…}}` prop.
-    const imgFill =
-      !only && web && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
+    const imgFill = !only && web ? imageFillOf(n) : undefined;
     if (imgFill) {
-      const hash = (imgFill as any).imageHash as string;
+      const hash = imgFill.imageHash as string;
+      // background-size/-repeat come from the paint's own imageScaleMode — a STRETCH
+      // raster forced to `cover` is cropped by a different amount per source aspect.
+      const place = imagePlacement(imgFill);
+      if (place.note) push(`image fill "${n.name}" (${n.guid}) — ${place.note}`);
       const file = assetRef(hash);
       if (file) {
         lines.push(`backgroundImage: "url('./assets/${file}')",`);
-        lines.push(`backgroundSize: 'cover',`);
-        lines.push(`backgroundPosition: 'center',`);
-        lines.push(`backgroundRepeat: 'no-repeat',`);
+        lines.push(`backgroundSize: '${place.size}',`);
+        lines.push(`backgroundPosition: '${place.position}',`);
+        lines.push(`backgroundRepeat: '${place.repeat}',`);
       } else {
         push(
           `image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — pass --images <dir> to extract + wire the src`,
@@ -493,7 +499,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
         lines.push(
           `// TODO: image — backgroundImage: "url('./assets/${hash.slice(0, 16)}…')" (re-run codegen with --images)`,
         );
-        lines.push(`backgroundSize: 'cover',`);
+        lines.push(`backgroundSize: '${place.size}',`);
       }
     }
   }
@@ -1138,9 +1144,13 @@ function renderVariant(v: any): VariantRender {
     // rn: a View style can't hold a background image, so render an absolute-fill <Image>
     // BEHIND the children (web set backgroundImage in the style above). Needs --images to
     // extract the asset; without it, flag the node so nothing is silently dropped.
+    // resizeMode comes from the paint's imageScaleMode — RN's vocabulary maps 1:1.
     if (!web) {
-      const ih = imageHashOf(n);
-      if (ih) {
+      const imgFill = imageFillOf(n);
+      const ih = imgFill?.imageHash;
+      if (imgFill && ih) {
+        const place = imagePlacement(imgFill);
+        if (place.note) push(`image fill "${n.name}" (${n.guid}) — ${place.note}`);
         const file = assetRef(ih);
         if (file) {
           rnImageUsed = true;
@@ -1149,7 +1159,7 @@ function renderVariant(v: any): VariantRender {
             key: ik,
             body: "position: 'absolute',\ntop: 0,\nleft: 0,\nright: 0,\nbottom: 0,",
           });
-          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="cover" />`;
+          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="${place.resizeMode}" />`;
           inner = inner ? `${imgEl}\n${inner}` : imgEl;
         } else {
           push(

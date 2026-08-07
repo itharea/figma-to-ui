@@ -170,6 +170,12 @@ export type IRFill = {
   varGuid?: string | null; // the variable guidKey, else absent/null
   stops?: { position: number; hex: string }[]; // gradient
   imageHash?: string; // image: hash bytes → hex (filename in images/, §7)
+  // image PLACEMENT — how the raster sits in the box. Carried because the four
+  // Figma modes are not interchangeable and the IR is the only place an emitter
+  // can learn which one a paint asked for (see imagePlacement for the CSS map).
+  scaleMode?: string; // imageScaleMode verbatim: FILL | FIT | STRETCH | TILE
+  scalingFactor?: number; // TILE only: multiple of the raster's INTRINSIC size
+  imageTransform?: unknown; // STRETCH + non-null = Figma's "Crop"; the 2×3 matrix verbatim
   opacity?: number; // paint opacity when < 1
 };
 export type IRStroke = {
@@ -387,7 +393,12 @@ function paintToIRColor(p: any | null, varIndex: VarIndex): IRColor {
 
 // One fillPaint → IRFill (or null to drop a non-visible / unrecognized paint).
 // SOLID carries hex + bound var (Phase A resolver); GRADIENT_* carries stops[];
-// IMAGE carries imageHash. paint.opacity (< 1) is preserved.
+// IMAGE carries imageHash + its placement. paint.opacity (< 1) is preserved.
+//
+// The `visible === false` drop here is load-bearing beyond tidiness: it is what makes
+// style.fills[] a VISIBLE-paint list, so every downstream "first image fill" is really
+// "first visible image fill". Nodes do stack image paints with a hidden first entry —
+// picking paints[0] off the raw node would extract the wrong raster.
 function fillToIR(p: any, varIndex: VarIndex): IRFill | null {
   if (!p || p.visible === false) return null;
   const op = typeof p.opacity === "number" && p.opacity < 1 ? { opacity: p.opacity } : {};
@@ -414,9 +425,95 @@ function fillToIR(p: any, varIndex: VarIndex): IRFill | null {
       : typeof h === "string"
         ? h
         : undefined;
-    return { type: "image", ...(imageHash ? { imageHash } : {}), ...op };
+    // Placement is per-paint and must survive into the IR verbatim — see IRFill.
+    // scalingFactor is meaningful only for TILE, so it is emitted only there (blocks
+    // stay omitted when they carry nothing); imageTransform only when non-null, which
+    // is exactly the signal that STRETCH means "Crop" rather than a plain stretch.
+    const scaleMode = typeof p.imageScaleMode === "string" ? p.imageScaleMode : undefined;
+    const tile =
+      scaleMode === "TILE" && typeof p.scalingFactor === "number"
+        ? { scalingFactor: p.scalingFactor }
+        : {};
+    return {
+      type: "image",
+      ...(imageHash ? { imageHash } : {}),
+      ...(scaleMode ? { scaleMode } : {}),
+      ...tile,
+      ...(p.imageTransform != null ? { imageTransform: p.imageTransform } : {}),
+      ...op,
+    };
   }
   return null;
+}
+
+// An image paint's placement, in the vocabulary the emitters need. Figma's four
+// imageScaleMode values are NOT interchangeable, and a scaffold that assumes one of
+// them silently mis-renders the other three: STRETCH rasters emitted as FILL get
+// scaled by the larger ratio and cropped by a DIFFERENT amount per source aspect, so
+// a grid of tiles that should look uniform does not. (Observed on a 20-variant photo
+// set: 14 STRETCH + 4 FILL visible paints, sources 2842×1880 to 2604×1144 — the FILL
+// ones looked fine only because their sources happened to be square, which is what
+// made the breakage look arbitrary.)
+//
+// fig → CSS background-size / RN <Image resizeMode>:
+//   FILL    → cover       / cover    — cover the box, crop the overflow
+//   FIT     → contain     / contain  — fit inside the box, letterbox the rest
+//   STRETCH → 100% 100%   / stretch  — distort to the box exactly (aspect NOT kept)
+//   TILE    → auto+repeat / repeat   — the raster at intrinsic size, repeated
+//
+// Two cases CANNOT be expressed in CSS and come back with a `note` the emitter turns
+// into a TODO rather than a silent wrong value:
+//   • STRETCH with a NON-null imageTransform is Figma's "Crop" — a 2×3 placement
+//     matrix, not a plain stretch. `100% 100%` would distort it, so it is approximated
+//     as `cover` (fills the box without distorting: the closest single-declaration
+//     reading of a crop) and flagged for hand re-cropping.
+//   • TILE's scalingFactor is a multiple of the raster's INTRINSIC size, and CSS has
+//     no such unit (percentages resolve against the element box, not the image). The
+//     size is left `auto` — exactly right at factor 1 — and the factor is reported.
+// An ABSENT mode falls back to cover: that is Figma's own default for a new image
+// paint, and the behaviour every emitter had before placement was read at all. An
+// unrecognized mode falls back the same way but is flagged.
+export type ImagePlacement = {
+  size: string; // CSS background-size
+  repeat: string; // CSS background-repeat
+  position: string; // CSS background-position
+  resizeMode: string; // React Native <Image resizeMode>
+  note?: string; // set when the mapping is approximate — emit it, never swallow it
+};
+export function imagePlacement(fill: IRFill): ImagePlacement {
+  const cover = (): ImagePlacement => ({
+    size: "cover",
+    repeat: "no-repeat",
+    position: "center",
+    resizeMode: "cover",
+  });
+  const mode = fill.scaleMode;
+  if (!mode || mode === "FILL") return cover();
+  if (mode === "FIT")
+    return { size: "contain", repeat: "no-repeat", position: "center", resizeMode: "contain" };
+  if (mode === "STRETCH") {
+    if (fill.imageTransform != null)
+      return {
+        ...cover(),
+        note: "STRETCH with a crop matrix (imageTransform) — no CSS equivalent; approximated as cover, re-crop by hand if the framing is off",
+      };
+    return { size: "100% 100%", repeat: "no-repeat", position: "center", resizeMode: "stretch" };
+  }
+  if (mode === "TILE") {
+    const f = fill.scalingFactor;
+    return {
+      size: "auto",
+      repeat: "repeat",
+      position: "top left",
+      resizeMode: "repeat",
+      ...(typeof f === "number" && f !== 1
+        ? {
+            note: `TILE scalingFactor ${f} — CSS has no multiple-of-intrinsic-size unit; background-size left auto, set an explicit px size from the source dimensions`,
+          }
+        : {}),
+    };
+  }
+  return { ...cover(), note: `unknown imageScaleMode "${mode}" — defaulted to cover` };
 }
 
 // Per-corner radii → uniform number when all four agree, else the {tl,tr,br,bl}

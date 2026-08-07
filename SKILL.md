@@ -146,7 +146,10 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
   `--svg` explicitly.)
 - **`--images $WORK/ex/images`** extracts raster fills into `<slug>/assets/` and wires real
-  references (web `backgroundImage` / rn `<Image>`).
+  references (web `backgroundImage` / rn `<Image>`), honouring each paint's own
+  `imageScaleMode` — `FILL`→`cover`, `FIT`→`contain`, `STRETCH`→`100% 100%`, `TILE`→`repeat`.
+  A placement CSS can't express (a `STRETCH` crop matrix, a `TILE` scaling factor) is
+  approximated and gets a `// TODO`.
 
 The scaffold is **faithful but verbose — raw material, not the finished component.** One file per
 variant on purpose: Figma variants often have different frame structures; collapsing them to CSS
