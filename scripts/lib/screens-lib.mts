@@ -210,15 +210,20 @@ export type IRStyle = {
   effects?: IREffect[];
   opacity?: number;
 };
-// IRLayout carries the auto-layout CONTAINER picture. sizing & wrap (improvement
-// 1-sizing / spec sizing) describe how the container sizes itself on each axis and
-// whether it wraps — emitted only when the raw stackPrimarySizing/stackCounterSizing/
-// stackWrap are present (non-default). fig→CSS sizing map:
+// IRLayout carries the auto-layout CONTAINER picture. sizing & wrap describe how the
+// container sizes itself on each axis and whether it wraps. fig→CSS sizing map:
 //   stackPrimarySizing/stackCounterSizing "FIXED" → "fixed" (CSS: a real width/height),
 //   "RESIZE_TO_FIT…"/"RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" → "hug" (CSS: width/height:auto,
 //   i.e. content-driven). stackWrap "WRAP" → wrap:true (CSS flex-wrap:wrap).
+// primarySizing/counterSizing are REQUIRED (always emitted, unlike every other optional
+// field here): the raw fields are omit-when-default, so an absent one is a real value and
+// not "unknown". Resolving it once here is the only place that knows the two axes default
+// OPPOSITELY — leaving it optional would push that per-axis knowledge onto every consumer,
+// which is exactly how "absent ⇒ fixed" got baked in. See sizingOf.
 export type IRLayout = {
   mode: "row" | "column";
+  primarySizing: "fixed" | "hug"; // main-axis self-sizing
+  counterSizing: "fixed" | "hug"; // cross-axis self-sizing
   gap?: number;
   paddingTop?: number;
   paddingRight?: number;
@@ -226,8 +231,6 @@ export type IRLayout = {
   paddingLeft?: number;
   justify?: string;
   align?: string;
-  primarySizing?: "fixed" | "hug"; // main-axis self-sizing
-  counterSizing?: "fixed" | "hug"; // cross-axis self-sizing
   wrap?: boolean; // stackWrap = WRAP → flex-wrap:wrap
 };
 
@@ -509,10 +512,16 @@ const STACK_ALIGN: Record<string, string> = {
 // Build the IRLayout block ONLY when the node carries a real stackMode
 // (HORIZONTAL/VERTICAL → row/column). NONE/absent → absolute positioning → no
 // layout block. Paddings/gap omitted when 0; justify/align only when explicit.
-function buildLayout(n: any): IRLayout | null {
+// Sizing is the exception: both axes are always resolved, each with its own
+// fallback, because the two raw fields default OPPOSITELY — see sizingOf.
+export function buildLayout(n: any): IRLayout | null {
   const sm = n.stackMode;
   if (sm !== "HORIZONTAL" && sm !== "VERTICAL") return null;
-  const l: IRLayout = { mode: sm === "HORIZONTAL" ? "row" : "column" };
+  const l: IRLayout = {
+    mode: sm === "HORIZONTAL" ? "row" : "column",
+    primarySizing: sizingOf(n.stackPrimarySizing, "hug"),
+    counterSizing: sizingOf(n.stackCounterSizing, "fixed"),
+  };
   if (n.stackSpacing) l.gap = n.stackSpacing;
   if (n.stackVerticalPadding) l.paddingTop = n.stackVerticalPadding;
   if (n.stackPaddingRight) l.paddingRight = n.stackPaddingRight;
@@ -522,22 +531,27 @@ function buildLayout(n: any): IRLayout | null {
     l.justify = STACK_ALIGN[n.stackPrimaryAlignItems] ?? n.stackPrimaryAlignItems;
   if (n.stackCounterAlignItems)
     l.align = STACK_ALIGN[n.stackCounterAlignItems] ?? n.stackCounterAlignItems;
-  // sizing & wrap: fixed vs hug self-sizing per axis, wrap.
-  const ps = sizingOf(n.stackPrimarySizing);
-  if (ps) l.primarySizing = ps;
-  const cs = sizingOf(n.stackCounterSizing);
-  if (cs) l.counterSizing = cs;
   if (n.stackWrap === "WRAP") l.wrap = true;
   return l;
 }
 
-// fig stack*Sizing enum → "fixed" | "hug" (or undefined for an unknown/absent
-// value). FIXED → fixed (real px); any RESIZE_TO_FIT* (incl. the implicit-size
-// variant) → hug (content-driven). Pure pass-through of the confirmed enum.
-function sizingOf(v: any): "fixed" | "hug" | undefined {
+// fig stack*Sizing enum → "fixed" | "hug". FIXED → fixed (real px); any RESIZE_TO_FIT*
+// (incl. the implicit-size variant) → hug (content-driven).
+//
+// The field is ABSENT when it holds its default, and the two axes default differently,
+// hence the caller-supplied per-axis fallback:
+//   stackPrimarySizing  omitted ⇒ RESIZE_TO_FIT (hug)   — "FIXED" is what gets written
+//   stackCounterSizing  omitted ⇒ FIXED                 — "RESIZE_TO_FIT*" is written
+// Observed on a 56-component library export: those are the ONLY two values each field
+// ever takes (primary 486 FIXED / 430 absent; counter 364 RESIZE_TO_FIT* / 552 absent),
+// and a geometric check of all 285 independently-testable frames with primary absent
+// found the primary axis equal to content+padding in 100% of them. Treating absent as
+// "fixed" froze every hugging frame at its authored size — a two-line text column stayed
+// 48px tall after one of its lines was removed.
+function sizingOf(v: any, fallback: "fixed" | "hug"): "fixed" | "hug" {
   if (v === "FIXED") return "fixed";
   if (typeof v === "string" && v.startsWith("RESIZE_TO_FIT")) return "hug";
-  return undefined;
+  return fallback;
 }
 
 // Normalize a raw resize-constraint enum (MIN/MAX/CENTER/STRETCH/SCALE) to a

@@ -76,6 +76,15 @@ node cli/tree.mts  $WORK/msg-<name>.json          # pages + top-level frames
 Page/frame names carry the IA. Reject scratchpad pages (`trial`, `old`, `wip`, `-`, local
 equivalents). **Confirm the canonical pages with the user** before compiling.
 
+A file that subscribes to its own published library addresses its variable/style bindings by
+published `assetRef` key rather than by node guid. Every load re-addresses those onto the local
+guids automatically, so nothing downstream has to know — but if a decode looks entirely
+untokenised (raw hex, frozen px, unbound type), check it:
+
+```sh
+node cli/normalize-assetrefs.mts $WORK/msg-<name>.json   # re-addressed sites + unresolved keys
+```
+
 ## Step 2 — Build the IR
 
 ```sh
@@ -230,6 +239,10 @@ illustrations and for raw SVG export:
 ```sh
 node cli/export-svg.mts msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
 ```
+
+Mask layers are clip regions, never artwork — they and their subtrees are skipped. Clips are not
+re-emitted, so a mask whose reveal is not a full-bounds rectangle warns on stderr and its artwork
+exports uncropped; crop at the consuming frame.
 
 Video fills (from the zip's `videos/` by content hash) are the only assets left to wire by hand.
 

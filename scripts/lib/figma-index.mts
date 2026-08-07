@@ -1,12 +1,20 @@
 // Shared node-graph index for decoded .fig messages.
 // Every script takes the path to message.json (produced by parse.mts) as argv[2].
 import * as fs from "fs";
+import { normalizeAssetRefs } from "./assetref-lib.mts";
 
 export const key = (g: any) => `${g.sessionID}:${g.localID}`;
 
+// Loading is also where published-library `assetRef` bindings are re-addressed onto local
+// guids (assetref-lib.mts). It happens HERE, not in an opt-in pass, because this is the one
+// chokepoint every CLI and lib goes through: an export that needs the rewrite and does not
+// get it resolves no variable, no text style and no paint style — with no error. The rewrite
+// is a no-op on guid-addressed exports, so it costs a correct file nothing. The report rides
+// along on the index for whoever wants to print it (cli/normalize-assetrefs.mts).
 export function load(messagePath: string) {
   if (!messagePath) throw new Error("missing message.json path argument");
   const msg = JSON.parse(fs.readFileSync(messagePath, "utf8"));
+  const assetRefs = normalizeAssetRefs(msg);
   const nodes: any[] = msg.nodeChanges ?? [];
   const byKey = new Map<string, any>();
   for (const n of nodes) byKey.set(key(n.guid), n);
@@ -19,7 +27,7 @@ export function load(messagePath: string) {
   }
   for (const arr of children.values())
     arr.sort((a, b) => (a.parentIndex.position < b.parentIndex.position ? -1 : 1));
-  return { msg, nodes, byKey, children };
+  return { msg, nodes, byKey, children, assetRefs };
 }
 
 export function colorStr(c: any): string {
