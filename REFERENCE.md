@@ -190,14 +190,20 @@ Detection is **structural first**: a frame whose visible direct children are all
 (`[structural, high]`). The `#9747ff` dashed stroke is only a **labeled fallback**
 (`[stroke-hint, medium]`) — an editor render hint, not a format guarantee, so
 never rely on it alone. A single-axis set proposes a prop named `variant`
-regardless of the axis's own name; multi-axis sets get one prop per axis.
+regardless of the axis's own name; multi-axis sets get one prop per axis, under a
+**sanitised** identifier — an axis is free to be named `item count` or `in`, and
+neither is legal TypeScript, so the name is camelCased and reserved words take a
+`Prop` suffix (axes that sanitise alike are suffixed `2`, `3`, … rather than
+merged). Axis _values_ are transliterated to ASCII, not stripped: they form the
+component's public value union, so dropping non-ASCII loses whole words.
 `raw.mts components` lists only component _sets_; a standalone master (a lone
 SYMBOL with no variant siblings) is found via `find … SYMBOL` (§3).
 
 **Non-variant props (text / boolean / instance-swap).** Beyond the variant axes,
 a set frame's `componentPropDefs` declare props that toggle a child node's
 `visible`, swap its `TEXT_DATA`, or swap an instance's master. `build-ir.mts`
-emits these as `components/<set>.json` `props[]` (`{name (camelCase), rawName,
+emits these as `components/<set>.json` `props[]` (`{name (sanitised camelCase
+identifier — see the axis note above), rawName,
 kind, default, bindings:[{node,field}]}`) + `propGroups[]` (props binding the same
 node). The namespace join is the trap: a child's `componentPropRefs.defID` is in
 the **master** def namespace, each master def is a stub `{id, parentPropDefId}`,

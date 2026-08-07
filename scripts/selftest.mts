@@ -33,8 +33,18 @@ import { spawnSync } from "child_process";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { extractGeometry, toSvgString, emitIconComponent } from "./lib/svg-lib.mts";
-import { deriveLogicals } from "./lib/components-lib.mts";
-import { slugify, uniqueSlug, kebab, camel, compIdent } from "./lib/naming.mts";
+import { deriveLogicals, mapValue, proposePropApi } from "./lib/components-lib.mts";
+import {
+  slugify,
+  uniqueSlug,
+  kebab,
+  camel,
+  compIdent,
+  propIdent,
+  axisPropNames,
+  isSafeIdent,
+  RESERVED_WORDS,
+} from "./lib/naming.mts";
 
 let pass = 0;
 let fail = 0;
@@ -77,6 +87,90 @@ eq("camel single word lowercased", camel("Icon"), "icon");
 eq("camel empty → prop", camel("—"), "prop");
 eq("compIdent → PascalCase", compIdent("product-card collections"), "ProductCardCollections");
 eq("compIdent empty → Component", compIdent(""), "Component");
+
+// ── naming: Latin transliteration (#49) ─────────────────────────────────────
+// slugify/kebab used to DROP non-ASCII rather than fold it, and their output is not
+// internal — kebab feeds mapValue, i.e. the public value union of a generated component,
+// and slugify names the files. Whole words were being lost ("öğütücü" → "tc"/"").
+for (const [fig, want] of [
+  ["öğütücü", "ogutucu"],
+  ["sütlaç", "sutlac"],
+  ["güllaç", "gullac"],
+  ["trileçe", "trilece"],
+  ["keşfet", "kesfet"],
+  ["açık", "acik"],
+  ["hazırlanıyor", "hazirlaniyor"],
+  ["iade talebi alındı", "iade-talebi-alindi"],
+] as const) {
+  eq(`slugify transliterates "${fig}"`, slugify(fig), want);
+  eq(`kebab transliterates "${fig}"`, kebab(fig), want);
+}
+// General Latin, not one language: strokes and ligatures have no NFKD decomposition.
+eq("slugify folds strokes + ligatures", slugify("Straße Æther Łódź"), "strasse-aether-lodz");
+eq("compIdent transliterates", compIdent("öğütücü seçimi"), "OgutucuSecimi");
+eq("mapValue folds a non-ASCII variant value", mapValue("Hazırlanıyor"), "hazirlaniyor");
+eq("mapValue keeps its synonyms", mapValue("L"), "large");
+
+// ── naming: identifier sanitisation (#49) ───────────────────────────────────
+// An axis / prop name reaches the emitted scaffold as a bare identifier — in the Props
+// type, in the destructuring pattern, and in the dispatcher's switch key. "item count"
+// (kebab → "item-count") and "in" (reserved) both made the file fail to PARSE.
+eq("propIdent: space → camelCase", propIdent("item count"), "itemCount");
+eq("propIdent: reserved word suffixed", propIdent("in"), "inProp");
+eq("propIdent: reserved word (class)", propIdent("class"), "classProp");
+eq("propIdent: leading digit prefixed", propIdent("941"), "prop941");
+eq("propIdent: already-safe name unchanged", propIdent("actionText"), "actionText");
+eq("propIdent: idempotent", propIdent(propIdent("item count")), "itemCount");
+eq("propIdent: transliterates", propIdent("Öğütücü tipi"), "ogutucuTipi");
+eq("propIdent: unnameable → prop", propIdent("—"), "prop");
+{
+  // The cheap end-to-end proof the scaffold parses: every emitted identifier must be
+  // bindable. Sweep the whole reserved set plus the shapes seen in real exports.
+  const names = [
+    ...RESERVED_WORDS,
+    "item count",
+    "941",
+    "—",
+    "a/b",
+    "iade talebi alındı",
+    "Öğütücü",
+    "  ",
+    "Size / L",
+  ];
+  const bad = names.filter((n) => !isSafeIdent(propIdent(n)));
+  check("propIdent: arbitrary names → bindable identifiers", bad.length === 0, bad.join(", "));
+}
+{
+  // Collision safety: two distinct axes that sanitise alike must NOT merge — merging
+  // drops an axis from the type while the dispatcher still composes both values.
+  const m = axisPropNames(["item count", "item-count", "in"]);
+  eq(
+    "axisPropNames: collision → suffixed, never merged",
+    [...m.values()],
+    ["itemCount", "itemCount2", "inProp"],
+  );
+  eq("axisPropNames: keyed by the raw axis name", m.get("item-count"), "itemCount2");
+}
+{
+  const api = proposePropApi({
+    axes: { type: ["kahve", "seki"], "item count": ["more than 3", "less than 4", "1"] },
+    variants: [],
+  });
+  eq(
+    "proposePropApi: axis with a space → a legal identifier",
+    api,
+    "type: 'kahve' | 'seki'; itemCount: 'more-than-3' | 'less-than-4' | '1'",
+  );
+  const keys = proposePropApi({ axes: { in: ["a"], "item count": ["b"] }, variants: [] })
+    .split(";")
+    .map((s) => s.split(":")[0].trim());
+  check("proposePropApi: every declared key is bindable", keys.every(isSafeIdent), keys.join(", "));
+}
+eq(
+  "proposePropApi: single axis is still `variant`",
+  proposePropApi({ axes: { "item count": ["öğütücü", "sütlaç"] }, variants: [] }),
+  "variant: 'ogutucu' | 'sutlac'",
+);
 
 // ── reconcile-lib: placeholder classifier (string half) ────────────────
 eq(
@@ -666,6 +760,51 @@ const bind = (node: string, field: string) => [{ node, field }];
     "deriveLogicals: instanceSwap → slot, defSym set",
     lg.role === "slot" && lg.defSym === "315:2646",
     JSON.stringify(lg),
+  );
+}
+{
+  // #49 — a component prop is free to be named `in`. It lands in a destructuring pattern
+  // (`function X({ header, in })`), which is a SyntaxError, so the prop model must
+  // sanitise; two props that sanitise alike must still stay distinct.
+  const { logicals } = deriveLogicals({
+    props: [
+      {
+        name: "in",
+        rawName: "in",
+        kind: "text",
+        defKey: "t5",
+        default: null,
+        bindings: bind("N5", "characters"),
+      },
+      {
+        name: "In",
+        rawName: "In",
+        kind: "instanceSwap",
+        defKey: "s5",
+        default: null,
+        bindings: bind("N6", "symbolId"),
+      },
+      {
+        name: "item count",
+        rawName: "item count",
+        kind: "text",
+        defKey: "t6",
+        default: "2",
+        bindings: bind("N7", "characters"),
+      },
+    ],
+  });
+  eq(
+    "deriveLogicals: reserved name suffixed, collision de-duped",
+    logicals.map((l) => l.name),
+    ["inProp", "inProp2", "itemCount"],
+  );
+  const bad = logicals.filter((l) => !isSafeIdent(l.name)).map((l) => l.name);
+  check("deriveLogicals: every emitted prop name is bindable", bad.length === 0, bad.join(", "));
+  check(
+    "deriveLogicals: raw Figma names kept for traceability",
+    logicals.every((l) => l.figNames.length > 0),
+    JSON.stringify(logicals.map((l) => l.figNames)),
   );
 }
 

@@ -136,6 +136,13 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
   `--svg` explicitly.)
 - **`--images $WORK/ex/images`** extracts raster fills into `<slug>/assets/` and wires real
   references (web `backgroundImage` / rn `<Image>`).
+- **Prop names are sanitised identifiers; variant values are transliterated.** A Figma axis or
+  component prop named with a space, punctuation or a JavaScript reserved word is emitted as a
+  legal camelCase identifier (reserved words take a `Prop` suffix, and two names that sanitise
+  alike stay distinct) — the original Figma name rides along in a doc comment so the generated
+  Props still read against the design. Variant _values_, which become the component's public
+  value union, are transliterated to ASCII rather than stripped, so a non-English file keeps
+  readable option values.
 
 The scaffold is **faithful but verbose — raw material, not the finished component.** One file per
 variant on purpose: Figma variants often have different frame structures; collapsing them to CSS
