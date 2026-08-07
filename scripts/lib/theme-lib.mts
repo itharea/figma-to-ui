@@ -165,6 +165,36 @@ export function resolveMode(modes: readonly string[], requested: string): ModeMa
   return { mode: null, reason: "unknown", candidates: [...modes] };
 }
 
+// The staleness identity of a `--mode` request, for an incremental rebuild deciding whether it
+// may reuse a previous build. What an artifact is pinned to is the RESOLVED mode — the mode every
+// variable-bound value was read at — never the spelling the caller typed, so once `--mode` matches
+// tolerantly, "App / freetypeface" and "app-freetypeface" must count as the SAME request or the
+// cache is thrown away to rebuild byte-identical output.
+//
+// The caller only asks this once the source bytes are known identical, and that is what makes
+// `prev.modes` usable as the catalog: same bytes ⇒ same mode names ⇒ the request resolves here
+// exactly as it will after re-decoding. So a tolerant no-op can never reuse an IR built at a
+// DIFFERENT mode; a miss is not a match either (`mode: null` must not pair with a manifest that
+// recorded no `activeMode`), and a manifest predating the `modes` field resolves against an empty
+// catalog, i.e. rebuilds. Every unrecognised case fails safe toward doing the work again.
+//
+// Passing `--mode` and omitting it stay DIFFERENT identities even when they resolve to the same
+// mode: the primary is a function of the variables — the very work this check exists to skip —
+// and `requestedMode` is provenance, so an omitted flag must not be silently backfilled from an
+// earlier explicit one (or the reverse).
+export function sameModeRequest(
+  prev: {
+    modes?: readonly string[] | null;
+    activeMode?: string | null;
+    requestedMode?: string | null;
+  },
+  requested: string,
+): boolean {
+  const asked = !!(prev.requestedMode ?? "");
+  if (!requested || !asked) return !requested && !asked;
+  return !!prev.activeMode && resolveMode(prev.modes ?? [], requested).mode === prev.activeMode;
+}
+
 // Emission order: the ROOTED mode first, every other mode after it. `:root` and `.mode-x` have
 // the SAME CSS specificity (0,1,0), so when a consumer opts in by putting the class on <html>
 // both rules match and only source order decides — the class must come later or the opt-in is

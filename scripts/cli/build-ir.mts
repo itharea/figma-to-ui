@@ -40,7 +40,7 @@ import {
   fontTokenCollisions,
   type IntentItem,
 } from "../lib/mapping-lib.mts";
-import { unionModes, primaryMode } from "../lib/theme-lib.mts";
+import { unionModes, primaryMode, resolveMode, sameModeRequest } from "../lib/theme-lib.mts";
 import { uniqueSlug } from "../lib/naming.mts";
 import {
   splitTokens,
@@ -77,6 +77,8 @@ const themePath = flag("--theme"); // brownfield: map IR color/font.size → cod
 const force = hasFlag("--force");
 // The single style decision: which variable MODE to resolve styles at (Light/Dark/brand).
 // Empty ⇒ each variable's own collection default. The harness asks only when >1 mode exists.
+// Matched by theme-lib's resolveMode (exact → case-insensitive → slug) once the catalog is
+// known, so the same flag value means the same thing here and in theme-gen.
 const modeArg = flag("--mode") ?? "";
 
 const name =
@@ -91,10 +93,15 @@ const srcBytes = fs.readFileSync(msgPath);
 const sourceHash = crypto.createHash("sha256").update(srcBytes).digest("hex");
 
 // --- re-run / overwrite guard ----------------------------------------------
+// The no-op test runs BEFORE the decode is indexed — that is the point of it — so the mode half
+// of the staleness identity is answered from the previous manifest's own `modes` catalog, which
+// is authoritative precisely because the source hash already matched. sameModeRequest compares
+// the RESOLVED mode, so re-running with a different spelling of the mode already built is the
+// no-op it should be, while a genuinely different mode (or an unrecognisable one) rebuilds.
 const manifestPath = path.join(outDir, "manifest.json");
 if (fs.existsSync(manifestPath)) {
   const prev = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  if (prev.sourceHash === sourceHash && (prev.requestedMode ?? "") === modeArg && !force) {
+  if (prev.sourceHash === sourceHash && sameModeRequest(prev, modeArg) && !force) {
     console.error(
       `no-op: ${outDir} already built from this source + mode (use --force to rebuild)`,
     );
@@ -151,14 +158,33 @@ const variables = toIRTokens(resolvedVars);
 // are a clear TODO — that map's structure is ambiguous and would be a guess here.
 // Modes (the single style decision). `modes` = every mode name across the catalog; the
 // harness asks the user which to use only when there's more than one. `activeMode` is the
-// chosen mode if valid, else the catalog's primary (most-common collection default). Every
+// resolved --mode, else the catalog's primary (most-common collection default). Every
 // variable-bound value below resolves at activeMode, so the whole IR is pinned to one mode.
+//
+// Matching goes through theme-lib's resolveMode — the SAME matcher theme-gen uses — because the
+// two CLIs are handed the same `--mode <M>` by the harness and a value that means one mode in
+// one and another mode in the other splits the pipeline in half. Figma mode names are free text
+// with spaces and slashes, and the name the generated CSS advertises is the slug, so exact
+// string equality misses the spelling a caller most naturally has to hand.
+//
+// An explicit-but-unmatched --mode is a HARD EXIT (2), matching theme-gen. Falling back to the
+// primary was the old behaviour, and it is exactly the wrong shape of failure here: activeMode
+// pins every variable-bound value in the IR and is stamped into the manifest, so a near-miss
+// wrote a whole IR at the wrong mode, exited 0, and propagated into every component and screen
+// built from it behind one warning line in a long build log. "The mode I asked for does not
+// exist" is a caller error.
 const modes = unionModes(variables);
-const activeMode = modeArg && modes.includes(modeArg) ? modeArg : primaryMode(variables);
-if (modeArg && !modes.includes(modeArg))
-  console.error(
-    `  ⚠ --mode "${modeArg}" not in [${modes.join(", ")}] — using primary "${activeMode}"`,
-  );
+let activeMode = primaryMode(variables);
+if (modeArg) {
+  const match = resolveMode(modes, modeArg);
+  if (match.mode === null) {
+    console.error(
+      `build-ir: --mode "${modeArg}" is ${match.reason} — the catalog's modes are [${match.candidates.join(", ")}]`,
+    );
+    process.exit(2);
+  }
+  activeMode = match.mode;
+}
 
 const varIndex: VarIndex = new Map();
 for (const t of resolvedVars)
@@ -464,7 +490,10 @@ const manifest = {
   sourceHash, // top-level mirror for the staleness re-read (Phase 9 diff-ir)
   modes, // every variable mode in the catalog (the single style decision)
   activeMode, // the mode every variable-bound value was resolved at
-  requestedMode: modeArg || null, // the raw --mode flag (staleness identity)
+  // The raw --mode flag as typed, kept as provenance and as the "was a mode asked for at all?"
+  // half of the staleness identity. The identity itself is `activeMode` — the resolved mode is
+  // what the artifacts are pinned to, so a different spelling of it is not a different build.
+  requestedMode: modeArg || null,
   figFormatVersion: index.msg?.figFormatVersion ?? null,
   builtAt: new Date().toISOString(),
   scope: { kind: "pages", value: allPages ? "all" : scopeRaw },
