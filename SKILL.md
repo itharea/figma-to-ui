@@ -76,6 +76,15 @@ node cli/tree.mts  $WORK/msg-<name>.json          # pages + top-level frames
 Page/frame names carry the IA. Reject scratchpad pages (`trial`, `old`, `wip`, `-`, local
 equivalents). **Confirm the canonical pages with the user** before compiling.
 
+A file that subscribes to its own published library addresses its variable/style bindings by
+published `assetRef` key rather than by node guid. Every load re-addresses those onto the local
+guids automatically, so nothing downstream has to know — but if a decode looks entirely
+untokenised (raw hex, frozen px, unbound type), check it:
+
+```sh
+node cli/normalize-assetrefs.mts $WORK/msg-<name>.json   # re-addressed sites + unresolved keys
+```
+
 ## Step 2 — Build the IR
 
 ```sh
