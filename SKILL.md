@@ -132,8 +132,10 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
 - **Every other mode still ships**, as a `.mode-<slug>` block emitted after `:root` — switching
   is opting a subtree into the class. Omit `--mode` and the catalog's own primary mode roots.
 - Mode names are free text (spaces, slashes), so `--mode` also accepts the name
-  case-insensitively or as its slug (the one the `.mode-<slug>` class advertises). A name that
-  matches **no** mode is a hard error listing the real ones — it never quietly roots the default.
+  case-insensitively or as its slug (the one the `.mode-<slug>` class advertises). **All three
+  CLIs match it identically**, so one spelling threads through the whole pipeline. A name that
+  matches **no** mode is a hard error listing the real ones — `build-ir` and `theme-gen` both
+  exit `2` rather than quietly building at the catalog's default.
 - **Duplicate variable names are settled by a live-use census**, not by whichever came first in
   the file: theme-gen counts how many non-`VARIABLE` nodes reference each variable guid, gives
   the most-referenced one the canonical name, and drops a same-named duplicate only when it has

@@ -46,6 +46,7 @@ import {
   topoOrder,
   emitTheme,
   resolveMode,
+  sameModeRequest,
   variableUseCensus,
   type ThemeVar,
 } from "./lib/theme-lib.mts";
@@ -3029,6 +3030,202 @@ const bind = (node: string, field: string) => [{ node, field }];
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }
+}
+
+// ── build-ir: --mode resolves like theme-gen's, and a miss is a hard error (#69) ─
+//
+// `theme-gen` resolves `--mode` in three tiers (exact → case-insensitive → slug) and exits 2 on a
+// miss. `build-ir` tested `modes.includes(modeArg)` and fell back to the catalog's primary behind
+// one warning line, so ONE flag value threaded through the pipeline could mean two different modes
+// — `--mode app-freetypeface` building the theme at the requested mode and the IR at the default.
+// The IR is the worse half: `activeMode` pins EVERY variable-bound value and is stamped into the
+// manifest, so the wrong mode propagates into every component and screen while the build exits 0.
+//
+// Both CLIs now call the SAME theme-lib matcher, and the assertions below are written to fail if
+// they ever stop agreeing rather than to restate either one's implementation.
+
+// The tolerant match, over mode names shaped like Figma's (free text, spaces and slashes) — the
+// tier the fixture's own "Light"/"Dark" cannot exercise, because their slug IS their lowercase.
+{
+  const modes = ["App / freetypeface", "Default"];
+  eq("mode: exact spelling resolves", resolveMode(modes, "App / freetypeface").mode, modes[0]);
+  eq("mode: the advertised slug resolves", resolveMode(modes, "app-freetypeface").mode, modes[0]);
+  eq(
+    "mode: case-folded spelling resolves",
+    resolveMode(modes, "APP / FREETYPEFACE").mode,
+    modes[0],
+  );
+  eq("mode: an unknown name never falls back", resolveMode(modes, "Nope").mode, null);
+
+  // The staleness identity an incremental rebuild consults. It compares the RESOLVED mode, so a
+  // re-run that spells the built mode differently is a no-op rather than a wasted rebuild — and,
+  // because the source hash already matched when it is asked, it can never reuse an IR that was
+  // pinned to a different mode.
+  const prev = { modes, activeMode: modes[0], requestedMode: "App / freetypeface" };
+  check(
+    "stale: the same mode by slug is not a new build",
+    sameModeRequest(prev, "app-freetypeface"),
+  );
+  check(
+    "stale: the same mode case-folded is not a new build",
+    sameModeRequest(prev, "APP / FREETYPEFACE"),
+  );
+  check("stale: a DIFFERENT mode rebuilds", !sameModeRequest(prev, "Default"));
+  check("stale: an unknown mode never reuses the cache", !sameModeRequest(prev, "Nope"));
+  check(
+    "stale: dropping --mode rebuilds (the primary is not known here)",
+    !sameModeRequest(prev, ""),
+  );
+
+  // Omitting --mode is its own identity in both directions: `requestedMode` is provenance, and
+  // the primary can only be computed from the variables — the work this check exists to skip.
+  const plain = { modes, activeMode: modes[1], requestedMode: null };
+  check("stale: no --mode then no --mode is a no-op", sameModeRequest(plain, ""));
+  check("stale: naming the primary explicitly still rebuilds", !sameModeRequest(plain, "Default"));
+
+  // Fail-safe corners: a manifest written before `modes` existed, and one that recorded no
+  // active mode at all. Both must rebuild rather than match a null against a null.
+  check(
+    "stale: a manifest without a mode catalog rebuilds",
+    !sameModeRequest({ activeMode: modes[0], requestedMode: modes[0] }, "App / freetypeface"),
+  );
+  check(
+    "stale: a null activeMode never matches an unknown request",
+    !sameModeRequest({ modes: [], activeMode: null, requestedMode: "x" }, "Nope"),
+  );
+}
+
+// End to end over the committed decode fixture (modes: Light, Dark): what the CLIs actually do.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-mode-"));
+  const run = (script: string, args: string[]) =>
+    spawnSync(process.argv[0], [path.join(here, "cli", script), ...args], { encoding: "utf8" });
+  const buildIR = (out: string, mode?: string) =>
+    run("build-ir.mts", [
+      fixture,
+      "--scope",
+      "all",
+      "--out",
+      out,
+      ...(mode ? ["--mode", mode] : []),
+    ]);
+  try {
+    const irDir = path.join(tmp, "ir");
+    const readManifest = (dir: string) =>
+      JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+
+    // A case-folded spelling used to miss entirely and pin the IR to "Light".
+    const folded = buildIR(irDir, "dark");
+    check(
+      "build-ir: a case-folded --mode exits 0",
+      folded.status === 0,
+      (folded.stderr ?? "").slice(-400),
+    );
+    eq("build-ir: …and pins the IR to the mode asked for", readManifest(irDir).activeMode, "Dark");
+    eq("build-ir: the raw flag is kept as provenance", readManifest(irDir).requestedMode, "dark");
+
+    // Staleness identity: a second spelling of the SAME mode is the no-op it should be…
+    const respell = buildIR(irDir, "Dark");
+    eq(
+      "build-ir: another spelling of the built mode is a no-op",
+      JSON.parse(respell.stdout ?? "{}").noop,
+      true,
+    );
+    // …while a genuinely different mode still rebuilds, cache or no cache.
+    const other = buildIR(irDir, "Light");
+    check("build-ir: a different mode is not a no-op", !JSON.parse(other.stdout ?? "{}").noop);
+    eq("build-ir: …and re-pins the IR", readManifest(irDir).activeMode, "Light");
+    check(
+      "build-ir: the mode built at is never reused for another",
+      !JSON.parse(buildIR(irDir, "Dark").stdout ?? "{}").noop,
+    );
+
+    // An unknown mode is a caller error: exit 2, the real modes listed, nothing written. The
+    // defect was that this exited 0 having silently built a whole IR at the wrong mode.
+    const before = readManifest(irDir).activeMode;
+    const bad = buildIR(irDir, "Nope");
+    eq("build-ir: an unmatched --mode exits 2", bad.status, 2);
+    check(
+      "build-ir: …reporting the modes that do exist",
+      /--mode "Nope" is unknown/.test(bad.stderr ?? "") && /\[Light, Dark\]/.test(bad.stderr ?? ""),
+      (bad.stderr ?? "").slice(-300),
+    );
+    eq("build-ir: …and leaves the previous IR untouched", readManifest(irDir).activeMode, before);
+
+    // Omitting --mode is unchanged: the catalog's primary, no requestedMode, re-run is a no-op.
+    const plainDir = path.join(tmp, "ir-plain");
+    const plain = buildIR(plainDir);
+    check("build-ir: no --mode exits 0", plain.status === 0, (plain.stderr ?? "").slice(-400));
+    eq("build-ir: no --mode still roots the primary", readManifest(plainDir).activeMode, "Light");
+    eq("build-ir: no --mode records no request", readManifest(plainDir).requestedMode, null);
+    eq(
+      "build-ir: re-running with no --mode is still a no-op",
+      JSON.parse(buildIR(plainDir).stdout ?? "{}").noop,
+      true,
+    );
+
+    // The anti-drift assertion the issue asks for: for every spelling, build-ir and theme-gen
+    // reach the SAME verdict — accepted or rejected — and the accepted ones land on the same mode.
+    // Compared as observable CLI behaviour, so a second matcher reintroduced in either one fails.
+    let n = 0;
+    for (const [spelling, expect] of [
+      ["Dark", "Dark"],
+      ["dark", "Dark"],
+      ["DARK", "Dark"],
+      ["Light", "Light"],
+      ["Nope", null],
+      ["mode-dark", null], // the CSS class, not the mode: a near-miss must stay a miss in both
+    ] as [string, string | null][]) {
+      const b = buildIR(path.join(tmp, `x${n++}`), spelling);
+      const t = run("theme-gen.mts", [
+        plainDir,
+        "--framework",
+        "web",
+        "--no-census",
+        "--mode",
+        spelling,
+      ]);
+      check(
+        `cross-CLI: build-ir and theme-gen agree that "${spelling}" is ${expect ? "a mode" : "not a mode"}`,
+        (b.status === 0) === (t.status === 0) && (b.status === 0) === (expect !== null),
+        `build-ir ${b.status} / theme-gen ${t.status}`,
+      );
+      if (expect === null) {
+        eq(`cross-CLI: "${spelling}" is exit 2 in both`, [b.status, t.status], [2, 2]);
+        continue;
+      }
+      eq(
+        `cross-CLI: build-ir pins "${spelling}" to ${expect}`,
+        readManifest(path.join(tmp, `x${n - 1}`)).activeMode,
+        expect,
+      );
+      // theme-gen's verdict is observable in WHICH mode's values reached :root.
+      const root = /:root \{([^}]*)\}/.exec(t.stdout ?? "")?.[1] ?? "";
+      const wantHex = expect === "Dark" ? "#1a1a1a" : "#ffffff";
+      check(
+        `cross-CLI: theme-gen roots "${spelling}" at ${expect}`,
+        root.includes(`--color-surface-card: ${wantHex};`),
+        root,
+      );
+    }
+
+    // codegen is the third `--mode` entry point. It cannot re-pin anything — it reads the IR as
+    // built — so its flag is only a coherence guard, but it compared by string equality too, which
+    // made it cry wolf about a pipeline threaded with a perfectly valid spelling of its own mode.
+    const cgOut = path.join(tmp, "cg");
+    const coherence = (mode: string) =>
+      run("codegen.mts", [plainDir, "Chip", "--framework", "web", "--out", cgOut, "--mode", mode])
+        .stderr ?? "";
+    const warned = (s: string) => /codegen --mode .* ≠ manifest\.activeMode/.test(s);
+    check("codegen: the mode the IR was built at does not warn", !warned(coherence("Light")));
+    check("codegen: …nor does another spelling of it", !warned(coherence("light")));
+    check("codegen: a genuinely different mode still warns", warned(coherence("Dark")));
+    check("codegen: a name that is no mode at all still warns", warned(coherence("Nope")));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 

@@ -28,7 +28,7 @@ import * as path from "path";
 import { type IRNode, imagePlacement, type IRFill } from "../lib/screens-lib.mts";
 import { mapValue, deriveLogicals, proposePropApi, type Logical } from "../lib/components-lib.mts";
 import { disambiguateJustify } from "../lib/reconcile-lib.mts";
-import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
+import { cssVarName, tsAccessor, resolveMode } from "../lib/theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap, sizingLines } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
 import {
@@ -173,11 +173,19 @@ const svgArg = flag("--svg") ?? flag("--message");
 const msgPath = svgArg ?? manifest.source?.path;
 const svgIndex = msgPath && fs.existsSync(msgPath) ? load(msgPath) : null;
 // Mode coherence guard (the single style decision): build-ir + theme-gen must share --mode.
+// Compared through resolveMode, not string equality, for the same reason build-ir and theme-gen
+// resolve rather than match: the harness threads ONE `--mode <M>` through all three, and a slug
+// or a differently-cased spelling of the mode the IR was genuinely built at would otherwise fire
+// a "rebuild the IR" warning about a pipeline that is in fact coherent. A warning either way —
+// codegen reads the IR as already built and cannot re-pin it, so the manifest is the truth here.
 const modeArg = flag("--mode");
-if (modeArg && manifest.activeMode && modeArg !== manifest.activeMode)
-  console.error(
-    `⚠ codegen --mode "${modeArg}" ≠ manifest.activeMode "${manifest.activeMode}" — rebuild IR + theme with the same mode`,
-  );
+if (modeArg && manifest.activeMode) {
+  const manifestModes: string[] = manifest.modes ?? [manifest.activeMode];
+  if (resolveMode(manifestModes, modeArg).mode !== manifest.activeMode)
+    console.error(
+      `⚠ codegen --mode "${modeArg}" ≠ manifest.activeMode "${manifest.activeMode}" — rebuild IR + theme with the same mode`,
+    );
+}
 
 // variable guid → token name, to resolve icon colour overrides read straight from the raw
 // message (the IR drops deep-node colour overrides on icons — see iconOverrideColor).
