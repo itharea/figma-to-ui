@@ -62,6 +62,15 @@ There is no nested tree — `lib/figma-index.mts` rebuilds it:
   fractional-index string — sort children lexically by it.
 - Roots: `type === "DOCUMENT"` → children are `CANVAS` (pages) → children are
   top-level frames/sections.
+- Addressing: a file that **subscribes to its own published library** binds variables,
+  text styles and paint styles by `{assetRef: {key, version}}` instead of `{guid: …}` —
+  at every site (`fillPaints[].colorVar`, `variableConsumptionMap` /
+  `parameterConsumptionMap`, `styleIdForText` / `styleIdForFill`, `variableSetID`,
+  variable→variable aliases). Every resolver reads `.guid`, so `load()` re-addresses them
+  unconditionally (`lib/assetref-lib.mts`): each publishing node carries its own `key`, so
+  `key → guid` is exact. It adds a **sibling** `guid`, never removes the `assetRef` and
+  never overwrites an existing `guid`, which makes it a no-op on a guid-addressed export.
+  Keys naming no node in the file are genuinely external and stay unresolved.
 
 ```sh
 node cli/tree.mts $WORK/msg-<name>.json                 # pages + top-level frames with guid keys
@@ -78,20 +87,20 @@ about undecided content.
 
 ## 4. Node fields that matter for UI code
 
-| Field                                                                  | Meaning / mapping                                                                                                                                                                                                                          |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `type`                                                                 | `FRAME`, `TEXT`, `INSTANCE`, `SYMBOL` (component master), `CANVAS`, `SECTION`, `VECTOR`, `ROUNDED_RECTANGLE`, …                                                                                                                            |
-| `name`                                                                 | layer name — semantic gold (`product-card`, `tab-bar`, `icons/Nav/Home`)                                                                                                                                                                   |
-| `visible`                                                              | absent = visible; `false` = hidden (skip it)                                                                                                                                                                                               |
-| `size`                                                                 | `{x: width, y: height}`                                                                                                                                                                                                                    |
-| `transform`                                                            | 2×3 matrix `{m00,m01,m02,m10,m11,m12}`; `m02`,`m12` = x,y relative to parent                                                                                                                                                               |
-| `fillPaints[]` / `strokePaints[]`                                      | `type: "SOLID"` with `color` as **0–1 floats** `{r,g,b,a}` (×255 → hex); `type: "IMAGE"` with `image.hash` (bytes → hex = filename in `images/`, §7); gradients carry `stops[]`                                                            |
-| `strokeWeight`, `strokeAlign`                                          | border width / position                                                                                                                                                                                                                    |
-| `borderStrokeWeightsIndependent` + `borderTop/Right/Bottom/LeftWeight` | **per-side** border widths (when independent these apply INSTEAD of `strokeWeight`; absent side = 0). Lets a **bottom-only divider** survive. IR `style.borderWidths {top,right,bottom,left}` → `border-<side>-width`                      |
-| `strokeCap`, `strokeJoin`, `dashPattern`                               | optional stroke detail: `cap`/`join` lower-cased (`join:MITER` is default → omitted), `dashPattern` (`number[]`, e.g. `[10,5]`) → **dashed** stroke (`border-style:dashed` / SVG `stroke-dasharray`). IR per-stroke `cap?`/`join?`/`dash?` |
-| `cornerRadius` or `rectangleTopLeftCornerRadius` (×4)                  | border radius (uniform or per-corner)                                                                                                                                                                                                      |
-| `effects[]`                                                            | shadows/blurs (`type`, `color`, `offset`, `radius`)                                                                                                                                                                                        |
-| `opacity`                                                              | layer opacity                                                                                                                                                                                                                              |
+| Field                                                                  | Meaning / mapping                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `type`                                                                 | `FRAME`, `TEXT`, `INSTANCE`, `SYMBOL` (component master), `CANVAS`, `SECTION`, `VECTOR`, `ROUNDED_RECTANGLE`, …                                                                                                                                                                                                                                                                            |
+| `name`                                                                 | layer name — semantic gold (`product-card`, `tab-bar`, `icons/Nav/Home`)                                                                                                                                                                                                                                                                                                                   |
+| `visible`                                                              | absent = visible; `false` = hidden (skip it)                                                                                                                                                                                                                                                                                                                                               |
+| `size`                                                                 | `{x: width, y: height}`                                                                                                                                                                                                                                                                                                                                                                    |
+| `transform`                                                            | 2×3 matrix `{m00,m01,m02,m10,m11,m12}`; `m02`,`m12` = x,y relative to parent                                                                                                                                                                                                                                                                                                               |
+| `fillPaints[]` / `strokePaints[]`                                      | `type: "SOLID"` with `color` as **0–1 floats** `{r,g,b,a}` (×255 → hex); `type: "IMAGE"` with `image.hash` (bytes → hex = filename in `images/`, §7) **plus `imageScaleMode` / `scalingFactor` / `imageTransform` — the placement, not optional detail (§7)**; gradients carry `stops[]`. Paints STACK and a hidden first entry is normal: filter on `visible !== false` before taking one |
+| `strokeWeight`, `strokeAlign`                                          | border width / position                                                                                                                                                                                                                                                                                                                                                                    |
+| `borderStrokeWeightsIndependent` + `borderTop/Right/Bottom/LeftWeight` | **per-side** border widths (when independent these apply INSTEAD of `strokeWeight`; absent side = 0). Lets a **bottom-only divider** survive. IR `style.borderWidths {top,right,bottom,left}` → `border-<side>-width`                                                                                                                                                                      |
+| `strokeCap`, `strokeJoin`, `dashPattern`                               | optional stroke detail: `cap`/`join` lower-cased (`join:MITER` is default → omitted), `dashPattern` (`number[]`, e.g. `[10,5]`) → **dashed** stroke (`border-style:dashed` / SVG `stroke-dasharray`). IR per-stroke `cap?`/`join?`/`dash?`                                                                                                                                                 |
+| `cornerRadius` or `rectangleTopLeftCornerRadius` (×4)                  | border radius (uniform or per-corner)                                                                                                                                                                                                                                                                                                                                                      |
+| `effects[]`                                                            | shadows/blurs (`type`, `color`, `offset`, `radius`)                                                                                                                                                                                                                                                                                                                                        |
+| `opacity`                                                              | layer opacity                                                                                                                                                                                                                                                                                                                                                                              |
 
 **Auto-layout** (flexbox, on frames):
 
@@ -102,9 +111,30 @@ about undecided content.
 | `stackVerticalPadding`, `stackHorizontalPadding`, `stackPaddingBottom`, `stackPaddingRight` | `paddingTop`, `paddingLeft`, `paddingBottom`, `paddingRight` (yes — the first two are **top/left**)                                                                                                                                 |
 | `stackPrimaryAlignItems`                                                                    | `justifyContent` (`MIN`/`CENTER`/`MAX`/`SPACE_EVENLY`/`SPACE_BETWEEN`). Codegen/render disambiguate `SPACE_EVENLY`→`SPACE_BETWEEN` by **resolved child geometry** (in-flow children flush at both main-axis ends → `space-between`) |
 | `stackCounterAlignItems`                                                                    | `alignItems`                                                                                                                                                                                                                        |
-| `stackPrimarySizing` / `stackCounterSizing`                                                 | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug`                                           |
+| `stackPrimarySizing` / `stackCounterSizing`                                                 | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug` (see the sizing-defaults note below)      |
 | `stackWrap: "WRAP"`                                                                         | `flexWrap: wrap`. IR `layout.wrap = true`                                                                                                                                                                                           |
 | absent/`NONE`                                                                               | absolute positioning via child `transform`                                                                                                                                                                                          |
+
+**Sizing defaults — the two axes default OPPOSITELY.** `stackPrimarySizing` and
+`stackCounterSizing` are written only when they hold a NON-default value, so an
+absent field is a real value, not "unknown":
+
+| field                | absent means              | value ever written |
+| -------------------- | ------------------------- | ------------------ |
+| `stackPrimarySizing` | `RESIZE_TO_FIT` → **hug** | `FIXED`            |
+| `stackCounterSizing` | `FIXED` → **fixed**       | `RESIZE_TO_FIT…`   |
+
+The IR therefore resolves both axes and **always** emits
+`layout.primarySizing`/`counterSizing`; treating an absent primary as `fixed`
+silently freezes every hugging frame at whatever size it happened to have.
+
+Both sizing fields are stated per axis **relative to `stackMode`** — for a row the
+primary axis is horizontal, for a column it is vertical — so each must be mapped back
+to width/height before it means anything in CSS. Codegen spells **hug** as
+`fit-content`, never `auto`: on a block-level box `width: auto` means _fill_, which is
+wrong in exactly the case that matters. A **fill** axis (the child has `grow`, or
+`alignSelf: stretch`) is omitted outright — `flexGrow`/`align-self` size it, and a
+number there would pin it.
 
 **Per-child sizing & constraints** (on the child node, not the container):
 
@@ -116,6 +146,7 @@ about undecided content.
 | `horizontalConstraint` / `verticalConstraint` (`MIN`/`MAX`/`CENTER`/`STRETCH`/`SCALE`) | resize constraints for absolute layouts → pin/stretch/scale on resize. IR node `constraints: {h, v}`                                                                                                                                                                                                                                                                      |
 | `minSize: {value:{x,y}}`                                                               | `minWidth`/`minHeight` (emit when > 0). IR node `minW`/`minH` (`maxSize`→`maxW`/`maxH`, absent in current decodes)                                                                                                                                                                                                                                                        |
 | `targetAspectRatio: {value:{x,y}}`                                                     | `aspectRatio = x / y`. IR node `aspectRatio`                                                                                                                                                                                                                                                                                                                              |
+| _(derived — the PARENT's `stackMode`)_                                                 | IR node `parentMode: "row"\|"column"`, stamped on every child of an auto-layout frame. `grow`/`alignSelf` mean "fill along the parent's primary / counter axis", so a consumer reading a child in isolation cannot tell fill-width from fill-height without it. Absent ⇒ the parent is not auto-layout, so nothing fills                                                  |
 
 **Text** (`type: "TEXT"`):
 
@@ -160,6 +191,23 @@ box.y=20 < lh=36 → size likely ~16` when a declared line-height cannot fit the
   (path of guids into the master, possibly nested through inner instances) plus
   the overridden fields (`textData`, `fillPaints`, `size`, `visible`, …). This is
   where per-instance text lives.
+- …and apply the instance's **component properties**, the second (modern) override
+  channel: `componentPropDefs` on the master carry the defaults,
+  `componentPropAssignments` on the instance carry the supplied values, and each
+  consuming node names the field it drives via `componentPropRefs:
+[{defID, componentPropNodeField}]` — `TEXT_DATA` → `textData`, `VISIBLE` →
+  `visible`, `OVERRIDDEN_SYMBOL_ID` → swap this instance's master. Props are applied
+  **before** `symbolOverrides`, so an explicit override on the same node wins.
+  Prop-driven copy and show/hide are invisible in `symbolOverrides` — an instance can
+  look override-free and still render different text.
+
+An `OVERRIDDEN_SYMBOL_ID` prop (or override) re-points a nested instance at a
+different master _after_ its subtree was composed from the old one, so the resolver
+re-composes that subtree from the master actually in use. Two shape traps in this
+payload: the swap guid nests one level deeper on `varValue`
+(`{symbolIdValue:{guid}}`) than on `initialValue` (`{guidValue}`); and the swap must
+rewrite the node's own `symbolData.symbolID` so re-composition is idempotent (the
+post-pass re-runs at every enclosing instance).
 
 ```sh
 node cli/raw.mts overrides $WORK/msg-<name>.json <screen-guidKey>          # raw override list
@@ -173,7 +221,8 @@ tree, so instances no longer dead-end at `instanceOf=`; it tags overridden text
 `raw.mts dump --resolve` does the same in the per-screen dump (the default dump
 stays raw/fast).
 
-**Designer-intent signal:** an instance with _no_ `textData` override renders the
+**Designer-intent signal:** an instance with _no_ `textData` override and _no_ text
+property supplying that node renders the
 master's placeholder text (e.g. every CTA showing the master's default label =
 copy never decided). Detect this and **ask the user instead of shipping
 placeholders**.
@@ -235,6 +284,12 @@ standalone logos/illustrations. Vector shapes index into `message.blobs`:
   transform is dropped (it becomes the viewBox origin).
 - `windingRule: "ODD"` → `fill-rule="evenodd"`, else `nonzero`.
 - Fill color from `fillPaints[0].color`; multiply node × paint opacities.
+- `node.mask === true` marks a **clip region, not paint** — the node and its whole subtree are
+  skipped. (Descending into one exports the clip shape as ordinary artwork: SVG-imported
+  drawings carry a mask whose only child is an opaque black rectangle the size of the frame,
+  which then paints over everything behind it.) The clip is not re-emitted as a `<clipPath>`,
+  which is exact when the mask reveals a full-bounds rectangle; any other reveal shape is still
+  skipped but warns on stderr, so its art exporting uncropped is visible rather than silent.
 
 ```sh
 node cli/export-svg.mts $WORK/msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
@@ -264,6 +319,19 @@ SVG on the brand background, screenshotted at 3×.)
 
 - Image fills: `paint.image.hash` (byte array) → hex string → filename in the
   zip's `images/`. Copy + downscale (`sips -Z 800` on macOS) into app assets.
+- **`paint.imageScaleMode` is load-bearing — the four values are not
+  interchangeable.** `FILL` → `background-size: cover`, `FIT` → `contain`,
+  `STRETCH` → `100% 100%`, `TILE` → `background-repeat: repeat` at the raster's
+  intrinsic size (`paint.scalingFactor` is a multiple of that intrinsic size — CSS
+  has no such unit, so it needs the source dimensions to become an explicit px
+  size). Rendering a `STRETCH` raster as `cover` scales it by the larger ratio and
+  crops the overflow by a **different amount per source aspect**, so a grid of
+  tiles that should look uniform does not.
+- `STRETCH` with a **non-null** `paint.imageTransform` is Figma's _Crop_, not a
+  plain stretch: the 2×3 matrix places a sub-rect of the raster. `100% 100%` would
+  distort it; `cover` is the closest single-declaration approximation.
+- Paints **stack**, and the first entry may be `visible:false`. Count/pick
+  **visible** paints — `paints[0]` can be a hidden layer, i.e. the wrong raster.
 - Video fills: `paint.video.hash` → file in `videos/`. Check the codec before
   bundling (H.264 `avc1` is safe cross-platform; the `mvhd` box gives duration —
   useful for splash-animation timing).
@@ -285,14 +353,27 @@ present so files stay lean.
   `color.varGuid` = the variable guidKey, `color.match = "bound"`, and
   `color.hex` is the variable's RESOLVED value (never the stale cached
   `paint.color`). A literal (unbound) fill keeps `var:null`, `hex = paint.color`.
-  One shared resolver (`resolvePaintColor`) drives `color`, `style.fills[]`, and
-  `style.strokes[]` so all three stay consistent.
+  One shared resolver (`resolvePaintColor`) drives `color`, `stroke`,
+  `style.fills[]`, and `style.strokes[]` so all four stay consistent.
+- **Stroke (`stroke`)** — the node's OUTLINE, in the **same shape as `color`**
+  (`hex`/`token`/`match`/`var`/`varGuid`) and resolved from `strokePaints`
+  independently of the fill. Fill and stroke are two separate paint arrays and a
+  node may carry **both** (a near-white glyph with a dark outline so it reads on
+  photography), so `color` alone is not the node's colour — **read both**. Emitted
+  only when the node has a visible solid stroke paint. The outline's **weight** is
+  not duplicated here: `style.strokes[]` is built from the same paint array and is
+  always present whenever `stroke` is, so read `style.strokes[0].weight` (or
+  `style.borderWidths`) to tell a 2px outline from a hairline.
 - **`style?`** `{ fills?, cornerRadius?, strokes?, borderWidths?, effects?,
 opacity? }`:
-  - `fills[]` — the COMPLETE paint list: each `{type:"solid"|"gradient"|"image",
-hex?, var?, varGuid?, stops?:[{position,hex}], imageHash?, opacity?}`.
-    Gradients keep `stops`; images keep `imageHash` (bytes→hex, the `images/`
-    filename); solids keep the bound `var`/`varGuid`.
+  - `fills[]` — the COMPLETE **visible** paint list (hidden paints are dropped, so
+    "first fill" always means first _visible_ fill): each
+    `{type:"solid"|"gradient"|"image", hex?, var?, varGuid?,
+stops?:[{position,hex}], imageHash?, scaleMode?, scalingFactor?, imageTransform?,
+opacity?}`. Gradients keep `stops`; images keep `imageHash` (bytes→hex, the
+    `images/` filename) plus their placement — `scaleMode` (`FILL`/`FIT`/`STRETCH`/
+    `TILE`, see §7), `scalingFactor` (TILE only) and `imageTransform` (only when
+    non-null: a `STRETCH` crop matrix); solids keep the bound `var`/`varGuid`.
   - `cornerRadius` — a bare number (uniform) or `{tl,tr,br,bl}` (per-corner).
   - `strokes[]` — `{weight, align, hex, var?, varGuid?, cap?, join?, dash?}`
     (`cap`/`join` lower-cased, default `MITER` join omitted; `dash` non-empty ⇒
@@ -303,12 +384,16 @@ hex?, var?, varGuid?, stops?:[{position,hex}], imageHash?, opacity?}`.
     `strokes[].weight` is kept.
   - `effects[]` — `{type, hex, offsetX, offsetY, radius, spread?}`
     (DROP_SHADOW/INNER_SHADOW/*_BLUR). `opacity` only when < 1.
-- **`layout?`** `{mode:"row"|"column", gap?, paddingTop?, paddingRight?,
-paddingBottom?, paddingLeft?, justify?, align?, primarySizing?, counterSizing?,
+- **`layout?`** `{mode:"row"|"column", primarySizing, counterSizing, gap?,
+paddingTop?, paddingRight?, paddingBottom?, paddingLeft?, justify?, align?,
 wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
-  absolutely positioned (use `box.absX/absY`).
+  absolutely positioned (use `box.absX/absY`). `primarySizing`/`counterSizing`
+  are **always** present when `layout` is (`fixed`\|`hug`) — the raw fields are
+  omit-when-default with opposite per-axis defaults, so absence is resolved here
+  rather than by each consumer.
 - **Responsive child fields:** `grow`, `alignSelf`, `positioning:"absolute"`,
-  `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`.
+  `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`, `parentMode`
+  (the parent's stack direction — see the per-child sizing table).
 - **`box`** `{x,y,w,h,absX,absY}` — `x/y` relative to parent; `absX/absY`
   absolute from the page origin.
 - **`text?`** `{value, placeholder, …}` and **`font?`** — reconciled
@@ -319,10 +404,10 @@ styleName?, vars?, lineHeightPx, letterSpacingPx, conflicts[]}`. **Trust the
   codegen references the theme, not literals.
 
 This extraction is a pure function of the bytes and always runs (no `--theme`).
-With `--theme <p>`, each **unbound** `color.hex`/`font.size` also gets a code
-token **by value, within kind** (`color.{token,match}`,
-`font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`; bound colors stay
-`"bound"`). `issues.json`/`intent.json` are informational review notes (never a gate; there is no `decisions.json`).
+With `--theme <p>`, each **unbound** `color.hex`/`stroke.hex`/`font.size` also
+gets a code token **by value, within kind** (`color.{token,match}`,
+`stroke.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`;
+bound colors stay `"bound"`). `issues.json`/`intent.json` are informational review notes (never a gate; there is no `decisions.json`).
 
 ## 9. Pitfalls checklist
 
@@ -388,12 +473,13 @@ directory together so the relative imports resolve.
 
 ### Decode & locate (pre-IR)
 
-| Script      | Usage                                                          | Purpose                                                     |
-| ----------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| `parse.mts` | `node cli/parse.mts <canvas.fig> <out.json>`                   | fig-kiwi → message.json                                     |
-| `tree.mts`  | `node cli/tree.mts <msg.json>`                                 | page/frame skeleton with guid keys                          |
-| `find.mts`  | `node cli/find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree)        |
-| `node.mts`  | `node cli/node.mts <msg.json> <guidKey> [field …]`             | raw single-node JSON (confirm a field before relying on it) |
+| Script                    | Usage                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parse.mts`               | `node cli/parse.mts <canvas.fig> <out.json>`                   | fig-kiwi → message.json                                                                                                                                                                                                                                                                                                                                                          |
+| `tree.mts`                | `node cli/tree.mts <msg.json>`                                 | page/frame skeleton with guid keys                                                                                                                                                                                                                                                                                                                                               |
+| `find.mts`                | `node cli/find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree)                                                                                                                                                                                                                                                                                                                             |
+| `node.mts`                | `node cli/node.mts <msg.json> <guidKey> [field …]`             | raw single-node JSON (confirm a field before relying on it)                                                                                                                                                                                                                                                                                                                      |
+| `normalize-assetrefs.mts` | `node cli/normalize-assetrefs.mts <msg.json> [out.json]`       | **diagnostic, not a pipeline step** — reports the published-library `assetRef` → local-guid re-addressing every `load()` already applies: keyed local assets, rewrites per binding-site field trail, and keys that name no node in the file. Zero rewrites means the export addresses by guid. `out.json` materialises the normalised message for something outside this harness |
 
 ### IR pipeline (the harness spine)
 

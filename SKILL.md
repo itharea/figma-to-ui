@@ -76,6 +76,15 @@ node cli/tree.mts  $WORK/msg-<name>.json          # pages + top-level frames
 Page/frame names carry the IA. Reject scratchpad pages (`trial`, `old`, `wip`, `-`, local
 equivalents). **Confirm the canonical pages with the user** before compiling.
 
+A file that subscribes to its own published library addresses its variable/style bindings by
+published `assetRef` key rather than by node guid. Every load re-addresses those onto the local
+guids automatically, so nothing downstream has to know — but if a decode looks entirely
+untokenised (raw hex, frozen px, unbound type), check it:
+
+```sh
+node cli/normalize-assetrefs.mts $WORK/msg-<name>.json   # re-addressed sites + unresolved keys
+```
+
 ## Step 2 — Build the IR
 
 ```sh
@@ -130,12 +139,17 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
 - **`--svg msg-<name>.json` makes icons an internal, deterministic step.** Codegen exports each
   vector's geometry into a **deduplicated owned icon component** under `<out>/icons/` (the
   `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value — a
-  mono icon gets `currentColor` + the resolved token, so it recolours correctly. Instance-swap
+  mono icon gets `currentColor` + the resolved token, so it recolours correctly. A glyph that is
+  **both filled and outlined** counts as two paints (IR `color` + `stroke`) — it is not mono, so
+  both colours are baked and the outline survives instead of being flattened. Instance-swap
   slots render `{icon ?? <DefaultGlyph/>}`. No `export-svg` placeholder boxes, no manual re-map.
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
   `--svg` explicitly.)
 - **`--images $WORK/ex/images`** extracts raster fills into `<slug>/assets/` and wires real
-  references (web `backgroundImage` / rn `<Image>`).
+  references (web `backgroundImage` / rn `<Image>`), honouring each paint's own
+  `imageScaleMode` — `FILL`→`cover`, `FIT`→`contain`, `STRETCH`→`100% 100%`, `TILE`→`repeat`.
+  A placement CSS can't express (a `STRETCH` crop matrix, a `TILE` scaling factor) is
+  approximated and gets a `// TODO`.
 - **Prop names are sanitised identifiers; variant values are transliterated.** A Figma axis or
   component prop named with a space, punctuation or a JavaScript reserved word is emitted as a
   legal camelCase identifier (reserved words take a `Prop` suffix, and two names that sanitise
@@ -202,7 +216,9 @@ dir, IR component JSON, out file) and the shared theme note. The codegen scaffol
 source of truth: it refactors form (opaque keys → semantic names, N near-identical variant files →
 one prop-driven component, repeated subtrees → shared sub-components, variant axes → props)
 **without changing a single resolved value** (geometry, padding, gap, radius, colour token,
-typography, borders, effects, absolute position, the variant→structure map). It resolves every
+typography, borders, effects, absolute position, the variant→structure map) — a `'fit-content'`
+axis, or one the scaffold omits, is a resolved value too (the designer's hug / fill), never a
+missing number. It resolves every
 `// TODO` and ships zero. Icons already arrive wired as `<NameIcon size color/>` — it preserves
 them. When the same subtree recurs across members of a group, it is extracted once and shared —
 this changes only where the code lives, never a resolved value.
@@ -222,7 +238,8 @@ write `$WORK/groups-assemble.json` with `kind: "assemble"`).
 screen IR path, and out file), the shared elevated components dir, and the theme note. It walks
 `ir-<name>/screens/<page>/<screen>.json`, renders every component **instance through the elevated
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
-rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `absX/absY` for absolute children). It
+rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `color` **and** `stroke` — a node can
+be filled and outlined at once — plus `absX/absY` for absolute children). It
 binds variable-backed values to the theme and changes no resolved value.
 
 **Brownfield?** Build with `build-ir … --theme <path>` and map fig values to repo tokens **by value,
@@ -237,6 +254,10 @@ illustrations and for raw SVG export:
 ```sh
 node cli/export-svg.mts msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
 ```
+
+Mask layers are clip regions, never artwork — they and their subtrees are skipped. Clips are not
+re-emitted, so a mask whose reveal is not a full-bounds rectangle warns on stderr and its artwork
+exports uncropped; crop at the consuming frame.
 
 Video fills (from the zip's `videos/` by content hash) are the only assets left to wire by hand.
 

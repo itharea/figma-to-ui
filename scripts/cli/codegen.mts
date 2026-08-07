@@ -25,11 +25,11 @@
 //   (--out is an output DIRECTORY; <out>/<slug>/ is written, a file summary to stderr.)
 import * as fs from "fs";
 import * as path from "path";
-import type { IRNode } from "../lib/screens-lib.mts";
+import { type IRNode, imagePlacement, type IRFill } from "../lib/screens-lib.mts";
 import { mapValue, deriveLogicals, proposePropApi, type Logical } from "../lib/components-lib.mts";
 import { disambiguateJustify } from "../lib/reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
-import { overlap, hasSignificantNonAdjacentOverlap } from "../lib/layout-lib.mts";
+import { overlap, hasSignificantNonAdjacentOverlap, sizingLines } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
 import { extractGeometry, emitIconComponent } from "../lib/svg-lib.mts";
 import { slugify, compIdent, axisPropNames } from "../lib/naming.mts";
@@ -246,10 +246,13 @@ function assetRef(hash: string | undefined): string | null {
   assetCache.set(hash, file);
   return file;
 }
-const imageHashOf = (n: IRNode): string | undefined => {
-  const f = (n.style?.fills ?? []).find((x: any) => x.type === "image" && x.imageHash);
-  return f ? ((f as any).imageHash as string) : undefined;
-};
+// The node's raster fill — the ONE selector both emitters (web backgroundImage, rn
+// <Image>) use, so they can never disagree about which paint won. "First" is safe
+// because style.fills[] is already a VISIBLE-paint list (fillToIR drops visible:false),
+// and that matters: nodes do stack image paints with a hidden first entry, and picking
+// paints[0] off the raw node would extract the wrong raster.
+const imageFillOf = (n: IRNode): IRFill | undefined =>
+  (n.style?.fills ?? []).find((x) => x.type === "image" && x.imageHash);
 function variantComponentName(v: any): string {
   const k = variantPropKey(v);
   const camel = k
@@ -422,6 +425,30 @@ function collectVectorFills(n: IRNode): { hex: string; var: string | null }[] {
   return out;
 }
 
+// Every DISTINCT paint a vector subtree draws with — its fills PLUS its strokes. A
+// glyph can be filled AND outlined (a near-white heart with a dark outline), and
+// svg-lib renders the pre-outlined strokeGeometry as a second baked fill, so counting
+// fills alone calls such a glyph "mono" and recolours its outline to the fill —
+// exactly the colour the design chose it NOT to be. `IRNode.stroke` is the node-level
+// outline companion to `color`; both are resolved (variable-bound) values.
+// Order-preserved, deduped by hex|var across the two paint kinds.
+function collectVectorPaints(n: IRNode): { hex: string; var: string | null }[] {
+  const out = collectVectorFills(n);
+  const seen = new Set(out.map((p) => `${p.hex}|${p.var ?? ""}`));
+  (function walk(m: IRNode) {
+    const s = m.stroke;
+    if (s?.hex) {
+      const k = `${s.hex}|${s.var ?? ""}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push({ hex: s.hex, var: s.var ?? null });
+      }
+    }
+    for (const c of m.children ?? []) walk(c);
+  })(n);
+  return out;
+}
+
 // One node's style object body (container/box fields). web|rn share most fields.
 // `only` (optional) restricts emission to the listed override field names (a subset
 // of FIELD_KEYS): codegen passes it to build a per-instance ROOT style OVERRIDE for a
@@ -431,11 +458,10 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   const lines: string[] = [];
   const s = n.style;
   const want = (f: string) => !only || only.has(f);
-  // size: emit when fixed (a hug/grow child sizes itself; still record for faithful sizing).
-  if (want("size") && n.box) {
-    if (n.box.w) lines.push(`width: ${n.box.w},`);
-    if (n.box.h) lines.push(`height: ${n.box.h},`);
-  }
+  // size: honour Figma's per-axis sizing MODE (hug / fill / fixed) instead of always
+  // freezing the measured bbox. Freezing turns every hug into a magic number, so a
+  // longer label clips and a fill child stops tracking its parent.
+  if (want("size")) lines.push(...sizingLines(n));
   // background = first solid fill (bound var wins as a token comment).
   if (want("fillPaints")) {
     const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
@@ -457,16 +483,19 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
     // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
     // (handled there). Skipped in override mode (`only`): an image override is flagged by
     // the caller's instance-override TODO, not inlined into a `style={{…}}` prop.
-    const imgFill =
-      !only && web && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
+    const imgFill = !only && web ? imageFillOf(n) : undefined;
     if (imgFill) {
-      const hash = (imgFill as any).imageHash as string;
+      const hash = imgFill.imageHash as string;
+      // background-size/-repeat come from the paint's own imageScaleMode — a STRETCH
+      // raster forced to `cover` is cropped by a different amount per source aspect.
+      const place = imagePlacement(imgFill);
+      if (place.note) push(`image fill "${n.name}" (${n.guid}) — ${place.note}`);
       const file = assetRef(hash);
       if (file) {
         lines.push(`backgroundImage: "url('./assets/${file}')",`);
-        lines.push(`backgroundSize: 'cover',`);
-        lines.push(`backgroundPosition: 'center',`);
-        lines.push(`backgroundRepeat: 'no-repeat',`);
+        lines.push(`backgroundSize: '${place.size}',`);
+        lines.push(`backgroundPosition: '${place.position}',`);
+        lines.push(`backgroundRepeat: '${place.repeat}',`);
       } else {
         push(
           `image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — pass --images <dir> to extract + wire the src`,
@@ -476,7 +505,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
         lines.push(
           `// TODO: image — backgroundImage: "url('./assets/${hash.slice(0, 16)}…')" (re-run codegen with --images)`,
         );
-        lines.push(`backgroundSize: 'cover',`);
+        lines.push(`backgroundSize: '${place.size}',`);
       }
     }
   }
@@ -727,8 +756,10 @@ function isSingleIconWrapper(n: IRNode): boolean {
   return kids.length === 1 && isVectorOnly(kids[0]);
 }
 
-// `overlap()` / `hasSignificantNonAdjacentOverlap()` live in layout-lib.mts (pure +
-// unit-tested). Strict bbox intersection: touching edges (==) do NOT count.
+// `overlap()` / `hasSignificantNonAdjacentOverlap()` / `sizingLines()` live in
+// layout-lib.mts (pure + unit-tested; this file runs its CLI at import time, so nothing
+// defined here is reachable from selftest). Strict bbox intersection: touching edges
+// (==) do NOT count.
 
 // Does THIS container position its children absolutely?
 //   #7: a non-auto-layout container (no layout) positions children absolutely.
@@ -1122,9 +1153,13 @@ function renderVariant(v: any): VariantRender {
     // rn: a View style can't hold a background image, so render an absolute-fill <Image>
     // BEHIND the children (web set backgroundImage in the style above). Needs --images to
     // extract the asset; without it, flag the node so nothing is silently dropped.
+    // resizeMode comes from the paint's imageScaleMode — RN's vocabulary maps 1:1.
     if (!web) {
-      const ih = imageHashOf(n);
-      if (ih) {
+      const imgFill = imageFillOf(n);
+      const ih = imgFill?.imageHash;
+      if (imgFill && ih) {
+        const place = imagePlacement(imgFill);
+        if (place.note) push(`image fill "${n.name}" (${n.guid}) — ${place.note}`);
         const file = assetRef(ih);
         if (file) {
           rnImageUsed = true;
@@ -1133,7 +1168,7 @@ function renderVariant(v: any): VariantRender {
             key: ik,
             body: "position: 'absolute',\ntop: 0,\nleft: 0,\nright: 0,\nbottom: 0,",
           });
-          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="cover" />`;
+          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="${place.resizeMode}" />`;
           inner = inner ? `${imgEl}\n${inner}` : imgEl;
         } else {
           push(
@@ -1190,7 +1225,7 @@ function renderVariant(v: any): VariantRender {
     let defaultEl = "null";
     if (defSym) {
       const defNode = findNodeByGuid(defSym);
-      const defFills = defNode ? collectVectorFills(defNode) : [];
+      const defFills = defNode ? collectVectorPaints(defNode) : [];
       const icon = ownIcon(
         { guid: defSym, name: defNode?.name },
         defFills.length ? defFills.length === 1 : undefined,
@@ -1234,10 +1269,12 @@ function renderVariant(v: any): VariantRender {
     // (override-aware) resolved fills — a mono icon gets currentColor + the resolved token
     // (fixes the baked-master-fill defect). The sized wrapper still flex-centres the glyph;
     // absolute placement / root-style merge ride on it exactly as before.
-    const fills = collectVectorFills(n);
-    // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
+    const fills = collectVectorPaints(n);
+    // Icon colour: a single resolved paint (override-aware) wins; else the instance's raw
     // fill/stroke colour override (the common case — icons are recoloured via an override
     // the IR drops). null ⇒ the icon keeps its currentColor default and inherits context.
+    // A filled-AND-outlined glyph has two paints ⇒ NOT mono ⇒ svg-lib bakes both, so the
+    // outline survives instead of being flattened into the fill colour.
     const iconColor =
       fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
     const monoHint = fills.length ? fills.length === 1 : iconColor ? true : undefined;
@@ -1274,7 +1311,7 @@ function renderVariant(v: any): VariantRender {
     // (b) no geometry source (no --svg/--out) → keep the export-svg placeholder so the user
     //     knows to pass it.
     const fillNote = fills.length
-      ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
+      ? ` paints:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
       : "";
     const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
     push(
