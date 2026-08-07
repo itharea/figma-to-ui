@@ -2,6 +2,7 @@
 // No side effects, no CLI: safe to import from selftest.mts (codegen.mts runs its CLI
 // at import time and therefore cannot be imported). See SKILL.md / REFERENCE.md.
 
+import { key } from "./figma-index.mts";
 import type { IRNode } from "./screens-lib.mts";
 
 export type Box = { x: number; y: number; w: number; h: number };
@@ -108,4 +109,150 @@ export function sizingLines(n: IRNode): string[] {
   emit("width", mode.w, box.w);
   emit("height", mode.h, box.h);
   return out;
+}
+
+// === geometric default-verifier: the omit-when-default assumption, checked per file ===
+//
+// `stackPrimarySizing` is written only when it holds a NON-default value, so an absent
+// field is a real value and the reader has to supply the default. Getting that default
+// backwards is invisible: a frame frozen at exactly its content height renders
+// pixel-identically to a hugging one, and only diverges once the content changes.
+//
+// So instead of trusting a fixed expectation, check the assumption against the bytes of
+// whatever file is at hand: a frame that really hugs along its stack direction MUST
+// measure `sum(children) + gaps + padding` on that axis, because that is what hugging
+// means. Every frame whose primary sizing is absent is an independent test of
+// "absent ⇒ hug"; the frames that state `RESIZE_TO_FIT` outright are the control group
+// that tests the ARITHMETIC rather than the default, so the two are reported separately —
+// controls passing while absent-frames fail is precisely the signature of a wrong default.
+//
+// (On the 56-component library export these defaults were first characterised against,
+// all 285 independently-testable absent-primary frames agreed.)
+//
+// Preconditions are conservative — every frame that cannot be computed EXACTLY is skipped
+// with a reason rather than guessed at, because one false violation would make the whole
+// check ignorable:
+//   • ≥ `minChildren` in-flow children (hidden and `stackPositioning: ABSOLUTE` children
+//     take no space, so they are not part of the sum)
+//   • not wrapping (a WRAP stack's primary axis is a row-packing problem, not a sum)
+//   • not SPACE_BETWEEN / SPACE_EVENLY (the flow gap is then distributed, not `stackSpacing`)
+//   • the frame and every in-flow child carry a `size`
+export type StackDefaultCheck = {
+  guid: string;
+  name: string;
+  mode: "row" | "column";
+  // "absent" = the frame under test (the default supplied the value);
+  // "hug" = an explicitly RESIZE_TO_FIT frame (the control for the arithmetic itself).
+  declared: "absent" | "hug";
+  actual: number; // the frame's measured primary axis
+  expected: number; // sum(children) + gaps + padding
+  delta: number; // actual − expected (0 = agrees)
+  children: number; // in-flow children counted
+  content: number; // sum of the children's primary extents
+  gap: number;
+  padStart: number;
+  padEnd: number;
+};
+export type StackDefaultReport = {
+  autoLayoutFrames: number; // every frame with a real stackMode
+  checked: StackDefaultCheck[]; // frames that met the preconditions (agreeing + violating)
+  violations: StackDefaultCheck[]; // the subset that did NOT agree
+  skipped: Record<string, number>; // reason → count, so "untestable" never reads as "passed"
+  tolerance: number;
+};
+
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const round4 = (v: number) => Math.round(v * 1e4) / 1e4;
+const hasSize = (n: any): boolean => !!n?.size && finite(n.size.x) && finite(n.size.y);
+
+// Run the check over a decoded message index (figma-index.load, or anything exposing the
+// same `nodes` + `children` maps). Pure: reads only from `index`, reports rather than
+// throws, and an export with nothing testable comes back with `checked: []` — which is a
+// different answer from "everything agreed", and callers must be able to tell them apart.
+export function verifyStackDefaults(
+  index: { nodes: any[]; children: Map<string, any[]> },
+  opts: { tolerance?: number; minChildren?: number } = {},
+): StackDefaultReport {
+  const tolerance = opts.tolerance ?? 0.5; // px; decoded sizes carry float32 noise
+  const minChildren = opts.minChildren ?? 2;
+  const checked: StackDefaultCheck[] = [];
+  const violations: StackDefaultCheck[] = [];
+  const skipped: Record<string, number> = {};
+  const skip = (why: string) => void (skipped[why] = (skipped[why] ?? 0) + 1);
+  let autoLayoutFrames = 0;
+
+  for (const n of index.nodes ?? []) {
+    const sm = n?.stackMode;
+    if (sm !== "HORIZONTAL" && sm !== "VERTICAL") continue;
+    autoLayoutFrames++;
+
+    const raw = n.stackPrimarySizing;
+    let declared: StackDefaultCheck["declared"];
+    if (raw === undefined || raw === null) declared = "absent";
+    else if (typeof raw === "string" && raw.startsWith("RESIZE_TO_FIT")) declared = "hug";
+    else {
+      skip("declared-fixed"); // FIXED (or an unknown enum) predicts nothing geometric
+      continue;
+    }
+    if (n.stackWrap === "WRAP") {
+      skip("wrapping");
+      continue;
+    }
+    if (
+      n.stackPrimaryAlignItems === "SPACE_BETWEEN" ||
+      n.stackPrimaryAlignItems === "SPACE_EVENLY"
+    ) {
+      skip("distributed-justify");
+      continue;
+    }
+    if (!hasSize(n)) {
+      skip("frame-without-size");
+      continue;
+    }
+    const kids = (index.children.get(key(n.guid)) ?? []).filter(
+      (c: any) => c?.visible !== false && c?.stackPositioning !== "ABSOLUTE",
+    );
+    if (kids.length < minChildren) {
+      skip("few-in-flow-children");
+      continue;
+    }
+    if (!kids.every(hasSize)) {
+      skip("child-without-size");
+      continue;
+    }
+
+    const row = sm === "HORIZONTAL";
+    const padStart = finite(row ? n.stackHorizontalPadding : n.stackVerticalPadding)
+      ? row
+        ? n.stackHorizontalPadding
+        : n.stackVerticalPadding
+      : 0;
+    const padEnd = finite(row ? n.stackPaddingRight : n.stackPaddingBottom)
+      ? row
+        ? n.stackPaddingRight
+        : n.stackPaddingBottom
+      : 0;
+    const gap = finite(n.stackSpacing) ? n.stackSpacing : 0;
+    const content = kids.reduce((a: number, c: any) => a + (row ? c.size.x : c.size.y), 0);
+    const expected = content + gap * (kids.length - 1) + padStart + padEnd;
+    const actual = row ? n.size.x : n.size.y;
+    const entry: StackDefaultCheck = {
+      guid: key(n.guid),
+      name: typeof n.name === "string" ? n.name : (n.type ?? ""),
+      mode: row ? "row" : "column",
+      declared,
+      actual: round4(actual),
+      expected: round4(expected),
+      delta: round4(actual - expected),
+      children: kids.length,
+      content: round4(content),
+      gap,
+      padStart,
+      padEnd,
+    };
+    checked.push(entry);
+    if (Math.abs(actual - expected) > tolerance) violations.push(entry);
+  }
+
+  return { autoLayoutFrames, checked, violations, skipped, tolerance };
 }

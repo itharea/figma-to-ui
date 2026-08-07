@@ -16,7 +16,9 @@
 //   intent      <message.json> <screen-guidKey>
 //   match-tokens <message.json> <theme.(ts|json)> [guidKey]
 //   diff-frames <message.json> <guidA> <guidB>
+//   verify-defaults <message.json> [--tolerance <px>] [--min-children <n>] [--list]
 import { load, key, colorStr, absCoords } from "../lib/figma-index.mts";
+import { verifyStackDefaults, type StackDefaultCheck } from "../lib/layout-lib.mts";
 import { describeNode } from "../lib/describe-lib.mts";
 import { resolveScreen, type ResolvedNode } from "../lib/resolve-lib.mts";
 import {
@@ -554,6 +556,88 @@ function cmdDiffFrames(argv: string[]) {
     console.log("\n(no per-node property deltas — frames are structurally identical)");
 }
 
+// --- verify-defaults ---------------------------------------------------------
+// Check this export's own geometry against the omit-when-default reading of
+// `stackPrimarySizing` (absent ⇒ hug). Run it on any new .fig BEFORE trusting a build:
+// it is the one check that validates an assumption about the FORMAT against the BYTES,
+// per file, instead of against a fixed expectation. See layout-lib.verifyStackDefaults
+// for the preconditions and why each skip exists.
+function cmdVerifyDefaults(argv: string[]) {
+  const msgPath = argv[2];
+  if (!msgPath)
+    throw new Error(
+      "usage: raw.mts verify-defaults <message.json> [--tolerance <px>] [--min-children <n>] [--list]",
+    );
+  const numFlag = (name: string, dflt: number): number => {
+    const i = argv.indexOf(name);
+    if (i < 0) return dflt;
+    const v = Number(argv[i + 1]);
+    if (!Number.isFinite(v)) throw new Error(`${name} expects a number (got "${argv[i + 1]}")`);
+    return v;
+  };
+  const tolerance = numFlag("--tolerance", 0.5);
+  const minChildren = numFlag("--min-children", 2);
+  const listAll = argv.includes("--list");
+
+  const rep = verifyStackDefaults(load(msgPath), { tolerance, minChildren });
+  const of = (d: StackDefaultCheck["declared"]) => ({
+    checked: rep.checked.filter((c) => c.declared === d).length,
+    bad: rep.violations.filter((c) => c.declared === d).length,
+  });
+  const absent = of("absent");
+  const hug = of("hug");
+  const line = (c: StackDefaultCheck) =>
+    `${c.mode} "${c.name}" [${c.guid}] primary ${c.actual} vs ${c.expected} (Δ ${c.delta}) ` +
+    `= ${c.children} child(ren) ${c.content} + gaps ${c.gap * (c.children - 1)} + padding ${c.padStart}+${c.padEnd}`;
+
+  console.log(`# verify-defaults ${msgPath}`);
+  console.log(
+    `# every auto-layout frame whose primary axis is content-driven must measure` +
+      ` sum(children) + gaps + padding on that axis`,
+  );
+  console.log(`auto-layout frames: ${rep.autoLayoutFrames}`);
+  console.log(
+    `  primary ABSENT (the default under test): ${absent.checked} testable, ${absent.checked - absent.bad} agree`,
+  );
+  console.log(
+    `  primary RESIZE_TO_FIT (control — the arithmetic): ${hug.checked} testable, ${hug.checked - hug.bad} agree`,
+  );
+  const skips = Object.entries(rep.skipped).sort((a, b) => b[1] - a[1]);
+  console.log(
+    `  not testable: ${skips.reduce((a, [, n]) => a + n, 0)}` +
+      (skips.length ? ` (${skips.map(([k, n]) => `${k} ${n}`).join(", ")})` : ""),
+  );
+  console.log(`  tolerance: ±${tolerance}px`);
+
+  if (listAll)
+    for (const c of rep.checked) console.log(`  ${c.delta === 0 ? "ok " : "≈  "}${line(c)}`);
+
+  if (rep.violations.length) {
+    console.log("");
+    for (const c of rep.violations) console.log(`VIOLATION ${c.declared}: ${line(c)}`);
+    console.log("");
+    console.log(
+      `VERDICT: ${rep.violations.length} of ${rep.checked.length} testable frame(s) DISAGREE — ` +
+        `the sizing default is wrong for this file (or a precondition above does not hold); ` +
+        `do NOT trust a build from it until this is understood`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!rep.checked.length) {
+    console.log("");
+    console.log(
+      "VERDICT: no testable frames — this export can neither confirm nor refute the default " +
+        "(loosen --min-children, or accept that it carries no evidence either way)",
+    );
+    return;
+  }
+  console.log("");
+  console.log(
+    `VERDICT: all ${rep.checked.length} testable frame(s) agree — absent primary sizing reads as HUG in this file`,
+  );
+}
+
 // --- dispatch ----------------------------------------------------------------
 const COMMANDS: Record<string, (argv: string[]) => void> = {
   dump: cmdDump,
@@ -564,6 +648,7 @@ const COMMANDS: Record<string, (argv: string[]) => void> = {
   intent: cmdIntent,
   "match-tokens": cmdMatchTokens,
   "diff-frames": cmdDiffFrames,
+  "verify-defaults": cmdVerifyDefaults,
 };
 
 const sub = process.argv[2];
@@ -571,7 +656,7 @@ const run = sub ? COMMANDS[sub] : undefined;
 if (!run) {
   console.error(
     "usage: raw.mts <cmd> <args…>\n" +
-      "  dump | resolve | overrides | variables | components | intent | match-tokens | diff-frames\n" +
+      "  dump | resolve | overrides | variables | components | intent | match-tokens | diff-frames | verify-defaults\n" +
       "(run a cmd with no args for its own usage line)",
   );
   process.exit(1);
