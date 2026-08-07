@@ -31,7 +31,7 @@ import { disambiguateJustify } from "../lib/reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
-import { extractGeometry, emitIconComponent } from "../lib/svg-lib.mts";
+import { extractGeometry, emitIconComponent, planIcon, type IconColor } from "../lib/svg-lib.mts";
 import { slugify, compIdent, kebab } from "../lib/naming.mts";
 
 const argv = process.argv.slice(2);
@@ -322,11 +322,14 @@ function iconExportName(n: { name?: string | null }): string {
 }
 
 // Extract geometry for a node and generate (or reuse) an owned icon component. Returns its
-// identifier + import file + mono flag, or null (caller keeps the placeholder). monoHint:
-// true/false from the IR's resolved fills; undefined ⇒ decide from the extracted geometry.
+// identifier + import file + mono flag, or null (caller keeps the placeholder). `resolved`
+// is THIS call site's colour truth (the IR's override-/variable-aware fills, else the raw
+// instance colour override) — planIcon turns it into the sharing key and the baked palette,
+// so a shape drawn in two different ramps never converges on one component.
 function ownIcon(
   n: { guid: string; name?: string | null },
-  monoHint?: boolean,
+  resolved: IconColor[],
+  push: (m: string) => void,
 ): { Name: string; file: string; mono: boolean } | null {
   if (!svgIndex || !outDir) return null;
   let geo;
@@ -336,29 +339,60 @@ function ownIcon(
     return null;
   }
   if (!geo.paths.length) return null;
-  const mono = monoHint != null ? monoHint : geo.fills.length === 1;
-  // mono recolours via the caller's `color` prop ⇒ dedup on shape only; multi bakes its fills.
-  const dedupKey = mono ? geo.geomHash : `${geo.geomHash}#${geo.fills.join(",")}`;
-  const hit = iconByKey.get(dedupKey);
+  const plan = planIcon(geo, resolved);
+  // A multi-fill glyph whose resolved colours don't line up 1:1 with the master's keeps the
+  // master paints — which a variable binding may have superseded. Flag it every time it is
+  // used (not just when first generated) so no variant inherits a stale palette silently.
+  if (!plan.mono && !plan.palette && resolved.length)
+    push(
+      `icon "${n.name}" (${n.guid}): ${resolved.length} resolved colour(s) [${resolved
+        .map((c) => c.var ?? c.hex)
+        .join(
+          ", ",
+        )}] vs ${geo.fills.length} baked master fill(s) — colours kept from the master; confirm the palette`,
+    );
+  const hit = iconByKey.get(plan.dedupKey);
   if (hit) return hit;
   // CONTENT-ADDRESSED name (fix): the Figma node name is generic ("Vector" for every
   // Phosphor glyph), and codegen is invoked once-per-set into a SHARED icons/ dir, so a
   // per-invocation counter ("VectorIcon","VectorIcon2"...) makes different glyphs from
-  // different sets collide on the same filename and clobber each other. Folding the
-  // geometry hash into the name makes it stable+unique per geometry across invocations:
-  // same glyph → same file (idempotent), different glyph → different file (no clobber).
+  // different sets collide on the same filename and clobber each other. planIcon's idHash
+  // makes the name stable+unique per SHARED IDENTITY across invocations: same icon → same
+  // file (idempotent), different icon → different file (no clobber). It is the geometry
+  // hash for a mono glyph and geometry+palette for a baked one — the local `iconTakenNames`
+  // counter cannot disambiguate across invocations, so the identity must be in the hash.
   let stem = iconExportName(n) || "Glyph";
   // A glyph named e.g. "941" (the iOS 9:41 time) yields an invalid identifier start; prefix it.
   if (!/^[A-Za-z_]/.test(stem)) stem = "Glyph" + stem;
-  const base = `${stem}_${geo.geomHash.slice(0, 8)}Icon`;
+  const base = `${stem}_${plan.idHash}Icon`;
   let Name = base,
     i = 2;
   while (iconTakenNames.has(Name)) Name = `${base}${i++}`;
   iconTakenNames.add(Name);
-  const rec = { Name, file: Name, mono };
-  iconByKey.set(dedupKey, rec);
-  iconFiles.set(`icons/${Name}.tsx`, emitIconComponent(Name, geo, { web, mono }));
+  const rec = { Name, file: Name, mono: plan.mono };
+  iconByKey.set(plan.dedupKey, rec);
+  iconFiles.set(
+    `icons/${Name}.tsx`,
+    emitIconComponent(Name, geo, { web, mono: plan.mono, palette: plan.palette }),
+  );
   return rec;
+}
+
+// The `color=` attribute for an owned icon reference. A mono icon has NO baked default
+// (svg-lib emits `color` as a required prop — see planIcon), so ALWAYS pass one: the
+// resolved token when the IR/override gives us it, else the framework's inherit-from-
+// context value, flagged so the unknown never passes as a confident colour.
+function iconColorAttr(
+  mono: boolean,
+  color: { hex: string; var?: string | null } | null,
+  label: string,
+  push: (m: string) => void,
+): string {
+  if (!mono) return ""; // multi/duotone bakes its fills; `color` is not a prop
+  if (color?.hex)
+    return ` color={${colorRef({ hex: color.hex, var: color.var, match: color.var ? "bound" : null }, label, push)}}`;
+  push(`${label}: no resolved colour — falls back to ${web ? "currentColor" : "#000"}; confirm`);
+  return web ? ` color="currentColor"` : ` color="#000"`;
 }
 
 // === per-node JSX rendering (a variant's resolved subtree → a JSX tree) =========
@@ -1182,25 +1216,22 @@ function renderVariant(v: any): VariantRender {
     if (defSym) {
       const defNode = findNodeByGuid(defSym);
       const defFills = defNode ? collectVectorFills(defNode) : [];
-      const icon = ownIcon(
-        { guid: defSym, name: defNode?.name },
-        defFills.length ? defFills.length === 1 : undefined,
-      );
+      // Icon colour: the default symbol's own resolved fill(s) if it has any, ELSE the
+      // CONTEXTUAL colour this slot is recoloured to (read from the slot instance's
+      // override — e.g. a filled button paints its icon praline-50). Without this a mono
+      // icon renders the wrong colour (dark icon on a dark button).
+      const slotOverride = iconOverrideColor(n.guid);
+      const slotResolved: IconColor[] = defFills.length
+        ? defFills
+        : slotOverride
+          ? [slotOverride]
+          : [];
+      const icon = ownIcon({ guid: defSym, name: defNode?.name }, slotResolved, push);
       if (icon) {
         iconImports.set(icon.Name, icon.file);
         const sizeAttr = defNode?.box?.w ? ` size={${defNode.box.w}}` : "";
-        // Icon colour: the default symbol's own fill if it has one, ELSE the CONTEXTUAL
-        // colour this slot is recoloured to (read from the slot instance's override — e.g. a
-        // filled button paints its icon praline-50). Without this a mono icon falls back to
-        // currentColor and renders the wrong colour (dark icon on a dark button).
-        const slotColor =
-          defFills.length === 1
-            ? { hex: defFills[0].hex, var: defFills[0].var as string | null }
-            : iconOverrideColor(n.guid);
-        const colorAttr =
-          icon.mono && slotColor && slotColor.hex
-            ? ` color={${colorRef({ hex: slotColor.hex, var: slotColor.var, match: slotColor.var ? "bound" : null }, `${n.name} default icon`, push)}}`
-            : "";
+        const slotColor = defFills.length === 1 ? defFills[0] : slotOverride;
+        const colorAttr = iconColorAttr(icon.mono, slotColor, `${n.name} default icon`, push);
         defaultEl = `<${icon.Name}${sizeAttr}${colorAttr} />`;
       } else {
         push(
@@ -1228,11 +1259,13 @@ function renderVariant(v: any): VariantRender {
     const fills = collectVectorFills(n);
     // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
     // fill/stroke colour override (the common case — icons are recoloured via an override
-    // the IR drops). null ⇒ the icon keeps its currentColor default and inherits context.
-    const iconColor =
-      fills.length === 1 ? { hex: fills[0].hex, var: fills[0].var } : iconOverrideColor(n.guid);
-    const monoHint = fills.length ? fills.length === 1 : iconColor ? true : undefined;
-    const icon = ownIcon(n, monoHint);
+    // the IR drops). This IS the source of truth the shared icon must be driven by: the
+    // geometry is master-only (and its baked paints are the master's, possibly stale), so
+    // whatever this call site resolved has to reach the component as a prop or a palette.
+    const override = iconOverrideColor(n.guid);
+    const iconColor = fills.length === 1 ? fills[0] : override;
+    const resolved: IconColor[] = fills.length ? fills : override ? [override] : [];
+    const icon = ownIcon(n, resolved, push);
     const box = [
       n.box?.w ? `width: ${n.box.w},` : "",
       n.box?.h ? `height: ${n.box.h},` : "",
@@ -1246,10 +1279,7 @@ function renderVariant(v: any): VariantRender {
     if (icon) {
       iconImports.set(icon.Name, icon.file);
       const sizeAttr = n.box?.w ? ` size={${n.box.w}}` : "";
-      const colorAttr =
-        icon.mono && iconColor
-          ? ` color={${colorRef({ hex: iconColor.hex, var: iconColor.var, match: iconColor.var ? "bound" : null }, `${n.name} icon`, push)}}`
-          : "";
+      const colorAttr = iconColorAttr(icon.mono, iconColor, `${n.name} icon`, push);
       const el = `${pad}<${Box} ${styleAttr}><${icon.Name}${sizeAttr}${colorAttr} /></${Box}>`;
       return wrapConditional(el, binds, depth, n);
     }

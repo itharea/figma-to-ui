@@ -129,8 +129,11 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
 
 - **`--svg msg-<name>.json` makes icons an internal, deterministic step.** Codegen exports each
   vector's geometry into a **deduplicated owned icon component** under `<out>/icons/` (the
-  `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value — a
-  mono icon gets `currentColor` + the resolved token, so it recolours correctly. Instance-swap
+  `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value.
+  Icons are shared by GEOMETRY, so a shared icon never bakes a default colour: a mono glyph
+  takes a **required `color` prop** (`currentColor` + the resolved token) and every call site
+  passes its own. A multi-fill glyph does bake, so its resolved palette is part of its identity
+  — same shape in two different ramps ⇒ two icons, not one. Instance-swap
   slots render `{icon ?? <DefaultGlyph/>}`. No `export-svg` placeholder boxes, no manual re-map.
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
   `--svg` explicitly.)
