@@ -102,6 +102,7 @@ was testable" is reported as its own outcome, never as a pass (see REFERENCE.md)
 ## Step 2 — Build the IR
 
 ```sh
+node cli/build-ir.mts msg-<name>.json --list-modes          # the decode's variable modes
 node cli/build-ir.mts msg-<name>.json --scope <pages|all> --out ir-<name>
 ```
 
@@ -111,6 +112,13 @@ and `screens/<page>/<screen>.json` (resolved instances, reconciled text, absolut
 `style`/`layout` per node). Read those files directly. **Trust the reconciled `font.size`**, not the
 raw `fontSize`. Faithful defaults: an unmapped font uses its Figma family; an unmatched colour keeps
 its literal hex; placeholder/denylisted copy renders the master text with a `// TODO`. Nothing blocks.
+
+`--list-modes` asks Step 3's mode question one step earlier: it prints the modes this decode
+defines — the one a build with no `--mode` pins marked `(active)` — and exits without writing
+anything, so the decision below can be settled **before** the first build instead of forcing a
+rebuild after it. It is not free the way `theme-gen`'s is: the modes live in the message's bytes
+rather than in a catalog already on disk, so it costs the indexing pass. It builds nothing either
+way — no `--scope` needed, `--out` untouched, an existing IR and its no-op left exactly as they were.
 
 ## Step 3 — Theme from the variables (+ pick the mode)
 
@@ -123,8 +131,9 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
 `theme.ts` rn), mirroring Figma's `/`-hierarchy (`Color/praline/950` → `var(--color-praline-950)`
 / `theme.color.praline['950']`), aliases preserved as code references.
 
-> **Decision point — mode.** If `--list-modes` shows more than one mode, **ask the user which
-> mode to style at**, then thread that one mode through everything:
+> **Decision point — mode.** If `--list-modes` shows more than one mode (either CLI answers it,
+> identically — `build-ir` from the decode before an IR exists, `theme-gen` from a built one),
+> **ask the user which mode to style at**, then thread that one mode through everything:
 > `build-ir … --mode <M>` (re-build), `theme-gen … --mode <M>`, and `codegen … --mode <M>`. The
 > chosen mode is **rooted**: its values are what `:root` / `defaultMode` carry. One mode ⇒ no
 > question; just proceed.
@@ -135,7 +144,8 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
   case-insensitively or as its slug (the one the `.mode-<slug>` class advertises). **All three
   CLIs match it identically**, so one spelling threads through the whole pipeline. A name that
   matches **no** mode is a hard error listing the real ones — `build-ir` and `theme-gen` both
-  exit `2` rather than quietly building at the catalog's default.
+  exit `2` rather than quietly building at the catalog's default, and both answer `--list-modes`
+  so the spelling can be read off rather than guessed at.
 - **Duplicate variable names are settled by a live-use census**, not by whichever came first in
   the file: theme-gen counts how many non-`VARIABLE` nodes reference each variable guid, gives
   the most-referenced one the canonical name, and drops a same-named duplicate only when it has
