@@ -29,7 +29,7 @@ import type { IRNode } from "../lib/screens-lib.mts";
 import { mapValue, deriveLogicals, type Logical } from "../lib/components-lib.mts";
 import { disambiguateJustify } from "../lib/reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
-import { overlap, hasSignificantNonAdjacentOverlap } from "../lib/layout-lib.mts";
+import { overlap, hasSignificantNonAdjacentOverlap, sizingLines } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
 import { extractGeometry, emitIconComponent } from "../lib/svg-lib.mts";
 import { slugify, compIdent, kebab } from "../lib/naming.mts";
@@ -425,11 +425,10 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   const lines: string[] = [];
   const s = n.style;
   const want = (f: string) => !only || only.has(f);
-  // size: emit when fixed (a hug/grow child sizes itself; still record for faithful sizing).
-  if (want("size") && n.box) {
-    if (n.box.w) lines.push(`width: ${n.box.w},`);
-    if (n.box.h) lines.push(`height: ${n.box.h},`);
-  }
+  // size: honour Figma's per-axis sizing MODE (hug / fill / fixed) instead of always
+  // freezing the measured bbox. Freezing turns every hug into a magic number, so a
+  // longer label clips and a fill child stops tracking its parent.
+  if (want("size")) lines.push(...sizingLines(n));
   // background = first solid fill (bound var wins as a token comment).
   if (want("fillPaints")) {
     const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
@@ -721,8 +720,10 @@ function isSingleIconWrapper(n: IRNode): boolean {
   return kids.length === 1 && isVectorOnly(kids[0]);
 }
 
-// `overlap()` / `hasSignificantNonAdjacentOverlap()` live in layout-lib.mts (pure +
-// unit-tested). Strict bbox intersection: touching edges (==) do NOT count.
+// `overlap()` / `hasSignificantNonAdjacentOverlap()` / `sizingLines()` live in
+// layout-lib.mts (pure + unit-tested; this file runs its CLI at import time, so nothing
+// defined here is reachable from selftest). Strict bbox intersection: touching edges
+// (==) do NOT count.
 
 // Does THIS container position its children absolutely?
 //   #7: a non-auto-layout container (no layout) positions children absolutely.

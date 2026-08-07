@@ -195,7 +195,9 @@ dir, IR component JSON, out file) and the shared theme note. The codegen scaffol
 source of truth: it refactors form (opaque keys → semantic names, N near-identical variant files →
 one prop-driven component, repeated subtrees → shared sub-components, variant axes → props)
 **without changing a single resolved value** (geometry, padding, gap, radius, colour token,
-typography, borders, effects, absolute position, the variant→structure map). It resolves every
+typography, borders, effects, absolute position, the variant→structure map) — a `'fit-content'`
+axis, or one the scaffold omits, is a resolved value too (the designer's hug / fill), never a
+missing number. It resolves every
 `// TODO` and ships zero. Icons already arrive wired as `<NameIcon size color/>` — it preserves
 them. When the same subtree recurs across members of a group, it is extracted once and shared —
 this changes only where the code lives, never a resolved value.

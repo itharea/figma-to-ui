@@ -18,7 +18,13 @@ import {
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
 import { cornerRadiusOf } from "./lib/screens-lib.mts";
-import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
+import {
+  overlap,
+  overlapArea,
+  hasSignificantNonAdjacentOverlap,
+  sizingLines,
+} from "./lib/layout-lib.mts";
+import type { IRNode } from "./lib/screens-lib.mts";
 import {
   cssVarName,
   treePath,
@@ -295,6 +301,128 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
     ]),
     false,
   );
+}
+
+// ── layout-lib: sizingLines — hug/fill/fixed per CSS axis ────────────────────
+{
+  // Synthetic IR nodes: a 200×40 box, varied only in the sizing fields under test.
+  const node = (p: Partial<IRNode>): IRNode => ({
+    id: "n_0",
+    path: "/Page/Frame",
+    guid: "1:1",
+    type: "frame",
+    name: "Frame",
+    box: { x: 0, y: 0, w: 200, h: 40, absX: 0, absY: 0 },
+    children: [],
+    ...p,
+  });
+  const HUG_W = "width: 'fit-content', // hug";
+  const HUG_H = "height: 'fit-content', // hug";
+
+  // A ROW stack's PRIMARY axis is horizontal, its COUNTER axis vertical…
+  eq(
+    "sizing row hug/fixed → hug width, fixed height",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "hug", counterSizing: "fixed" } })),
+    [HUG_W, "height: 40,"],
+  );
+  eq(
+    "sizing row fixed/hug → fixed width, hug height",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "fixed", counterSizing: "hug" } })),
+    ["width: 200,", HUG_H],
+  );
+  // …and a COLUMN stack's is the other way round.
+  eq(
+    "sizing column hug/fixed → hug height, fixed width",
+    sizingLines(node({ layout: { mode: "column", primarySizing: "hug", counterSizing: "fixed" } })),
+    ["width: 200,", HUG_H],
+  );
+  eq(
+    "sizing column fixed/hug → hug width, fixed height",
+    sizingLines(node({ layout: { mode: "column", primarySizing: "fixed", counterSizing: "hug" } })),
+    [HUG_W, "height: 40,"],
+  );
+  // Both axes fixed → the measured box, exactly as before the fix (regression guard).
+  eq(
+    "sizing row fixed/fixed → measured box",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "fixed", counterSizing: "fixed" } })),
+    ["width: 200,", "height: 40,"],
+  );
+
+  // FILL: `grow` fills along the PARENT's primary axis, `alignSelf:'stretch'` across its
+  // counter one — so which CSS axis is dropped depends on parentMode, not on the node.
+  eq(
+    "sizing grow in a row parent → width omitted",
+    sizingLines(node({ grow: 1, parentMode: "row" })),
+    ["height: 40,"],
+  );
+  eq(
+    "sizing grow in a column parent → height omitted",
+    sizingLines(node({ grow: 1, parentMode: "column" })),
+    ["width: 200,"],
+  );
+  eq(
+    "sizing stretch in a row parent → height omitted",
+    sizingLines(node({ alignSelf: "stretch", parentMode: "row" })),
+    ["width: 200,"],
+  );
+  eq(
+    "sizing stretch in a column parent → width omitted",
+    sizingLines(node({ alignSelf: "stretch", parentMode: "column" })),
+    ["height: 40,"],
+  );
+  // grow + stretch in the same parent fills BOTH axes → nothing to emit.
+  eq(
+    "sizing grow + stretch → both axes omitted",
+    sizingLines(node({ grow: 1, alignSelf: "stretch", parentMode: "row" })),
+    [],
+  );
+  // Fill outranks the node's OWN mode: a hugging row told to grow must not emit hug.
+  eq(
+    "sizing fill outranks own hug",
+    sizingLines(
+      node({
+        layout: { mode: "row", primarySizing: "hug", counterSizing: "fixed" },
+        grow: 1,
+        parentMode: "row",
+      }),
+    ),
+    ["height: 40,"],
+  );
+  // No parentMode ⇒ the parent is not auto-layout, so nothing fills: keep the box.
+  eq("sizing grow without parentMode → measured box", sizingLines(node({ grow: 1 })), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  // A plain node with no auto-layout keeps its measured box (unchanged behaviour).
+  eq("sizing no layout → measured box", sizingLines(node({})), ["width: 200,", "height: 40,"]);
+  // A zero measurement stays omitted, as it always was.
+  eq(
+    "sizing zero height omitted",
+    sizingLines(node({ box: { x: 0, y: 0, w: 200, h: 0, absX: 0, absY: 0 } })),
+    ["width: 200,"],
+  );
+
+  // TEXT nodes state the same intent in autoResize.
+  const text = (autoResize: string | null) => node({ type: "text", name: "Label", autoResize });
+  eq("sizing text autoResize HEIGHT → fixed width, hug height", sizingLines(text("HEIGHT")), [
+    "width: 200,",
+    HUG_H,
+  ]);
+  eq("sizing text autoResize WIDTH_AND_HEIGHT → hug both", sizingLines(text("WIDTH_AND_HEIGHT")), [
+    HUG_W,
+    HUG_H,
+  ]);
+  eq("sizing text autoResize NONE → fixed both", sizingLines(text("NONE")), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  eq("sizing text autoResize absent → fixed both", sizingLines(text(null)), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  // A node whose IR carries no box at all (defensive: the field is schema-required, but
+  // sizingLines must never emit `width: undefined`).
+  eq("sizing missing box → nothing", sizingLines(node({ box: undefined as any })), []);
 }
 
 // ── screens-lib: cornerRadiusOf (independent per-corner) ──

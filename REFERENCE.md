@@ -106,6 +106,14 @@ about undecided content.
 | `stackWrap: "WRAP"`                                                                         | `flexWrap: wrap`. IR `layout.wrap = true`                                                                                                                                                                                           |
 | absent/`NONE`                                                                               | absolute positioning via child `transform`                                                                                                                                                                                          |
 
+Both sizing fields are stated per axis **relative to `stackMode`** — for a row the
+primary axis is horizontal, for a column it is vertical — so each must be mapped back
+to width/height before it means anything in CSS. Codegen spells **hug** as
+`fit-content`, never `auto`: on a block-level box `width: auto` means _fill_, which is
+wrong in exactly the case that matters. A **fill** axis (the child has `grow`, or
+`alignSelf: stretch`) is omitted outright — `flexGrow`/`align-self` size it, and a
+number there would pin it.
+
 **Per-child sizing & constraints** (on the child node, not the container):
 
 | fig field                                                                              | CSS / RN equivalent                                                                                                                                                                                                                                                                                                                                                       |
@@ -116,6 +124,7 @@ about undecided content.
 | `horizontalConstraint` / `verticalConstraint` (`MIN`/`MAX`/`CENTER`/`STRETCH`/`SCALE`) | resize constraints for absolute layouts → pin/stretch/scale on resize. IR node `constraints: {h, v}`                                                                                                                                                                                                                                                                      |
 | `minSize: {value:{x,y}}`                                                               | `minWidth`/`minHeight` (emit when > 0). IR node `minW`/`minH` (`maxSize`→`maxW`/`maxH`, absent in current decodes)                                                                                                                                                                                                                                                        |
 | `targetAspectRatio: {value:{x,y}}`                                                     | `aspectRatio = x / y`. IR node `aspectRatio`                                                                                                                                                                                                                                                                                                                              |
+| _(derived — the PARENT's `stackMode`)_                                                 | IR node `parentMode: "row"\|"column"`, stamped on every child of an auto-layout frame. `grow`/`alignSelf` mean "fill along the parent's primary / counter axis", so a consumer reading a child in isolation cannot tell fill-width from fill-height without it. Absent ⇒ the parent is not auto-layout, so nothing fills                                                  |
 
 **Text** (`type: "TEXT"`):
 
@@ -302,7 +311,8 @@ paddingBottom?, paddingLeft?, justify?, align?, primarySizing?, counterSizing?,
 wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
   absolutely positioned (use `box.absX/absY`).
 - **Responsive child fields:** `grow`, `alignSelf`, `positioning:"absolute"`,
-  `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`.
+  `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`, `parentMode`
+  (the parent's stack direction — see the per-child sizing table).
 - **`box`** `{x,y,w,h,absX,absY}` — `x/y` relative to parent; `absX/absY`
   absolute from the page origin.
 - **`text?`** `{value, placeholder, …}` and **`font?`** — reconciled

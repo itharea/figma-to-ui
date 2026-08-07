@@ -46,6 +46,8 @@ wired by codegen (imported from `../icons`) — there is no icon policy to apply
 - Do NOT change any resolved value: width, height, per-side padding, gap, radius,
   colour/token, font family/size/lineHeight/letterSpacing/weight/case, per-side border
   widths & colours, effects, absolute position, opacity, or the variant→structure map.
+  A `'fit-content'` width/height, and an axis the scaffold omits entirely, ARE resolved
+  values — the designer's hug and fill. Never substitute a measured pixel count for one.
 - Do NOT re-derive or guess; every literal must trace to a scaffold style block.
 - Do NOT drop/merge-away or visually alter any variant; do NOT invent copy; do NOT
   "improve" the design.

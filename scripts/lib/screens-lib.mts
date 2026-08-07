@@ -215,8 +215,10 @@ export type IRStyle = {
 // whether it wraps — emitted only when the raw stackPrimarySizing/stackCounterSizing/
 // stackWrap are present (non-default). fig→CSS sizing map:
 //   stackPrimarySizing/stackCounterSizing "FIXED" → "fixed" (CSS: a real width/height),
-//   "RESIZE_TO_FIT…"/"RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" → "hug" (CSS: width/height:auto,
-//   i.e. content-driven). stackWrap "WRAP" → wrap:true (CSS flex-wrap:wrap).
+//   "RESIZE_TO_FIT…"/"RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" → "hug" (content-driven; codegen
+//   spells it fit-content, NOT auto — auto means fill on a block-level box).
+//   Both are stated RELATIVE to `mode`: for a row the primary axis is horizontal, for a
+//   column it is vertical. stackWrap "WRAP" → wrap:true (CSS flex-wrap:wrap).
 export type IRLayout = {
   mode: "row" | "column";
   gap?: number;
@@ -269,6 +271,11 @@ export type IRNode = {
   maxW?: number;
   maxH?: number;
   aspectRatio?: number; // targetAspectRatio x/y
+  // The PARENT's auto-layout direction, stamped onto the child by toIR. `grow` and
+  // `alignSelf` are stated relative to the PARENT's axes ("fill along its primary /
+  // counter axis"), so which CSS axis they size cannot be known from the child alone.
+  // Absent when the parent has no auto-layout (nothing fills an absolute parent).
+  parentMode?: "row" | "column";
   autoResize?: string | null;
   styleRuns?: number;
   unresolved?: string;
@@ -861,7 +868,13 @@ function toIR(
   for (const c of n.children ?? []) {
     if ((c as any).visible === false) continue;
     const childAcc = mul(acc, nodeMat(c as any));
-    node.children.push(toIR(c, childAcc, appFamilyOf, varIndex, typeStyles));
+    const child = toIR(c, childAcc, appFamilyOf, varIndex, typeStyles);
+    // Stamp the PARENT's stack direction on the child. A child's grow/alignSelf say
+    // "fill along the parent's primary / counter axis" — which CSS axis that is can
+    // only be known from the parent, so a consumer reading a child in isolation
+    // (codegen) cannot otherwise tell fill-width from fill-height.
+    if (layout?.mode) child.parentMode = layout.mode;
+    node.children.push(child);
   }
   return node;
 }
