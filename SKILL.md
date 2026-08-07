@@ -112,7 +112,23 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
 > **Decision point — mode.** If `--list-modes` shows more than one mode, **ask the user which
 > mode to style at**, then thread that one mode through everything:
 > `build-ir … --mode <M>` (re-build), `theme-gen … --mode <M>`, and `codegen … --mode <M>`. The
-> chosen mode becomes `:root` / `defaultMode`. One mode ⇒ no question; just proceed.
+> chosen mode is **rooted**: its values are what `:root` / `defaultMode` carry. One mode ⇒ no
+> question; just proceed.
+
+- **Every other mode still ships**, as a `.mode-<slug>` block emitted after `:root` — switching
+  is opting a subtree into the class. Omit `--mode` and the catalog's own primary mode roots.
+- Mode names are free text (spaces, slashes), so `--mode` also accepts the name
+  case-insensitively or as its slug (the one the `.mode-<slug>` class advertises). A name that
+  matches **no** mode is a hard error listing the real ones — it never quietly roots the default.
+- **Duplicate variable names are settled by a live-use census**, not by whichever came first in
+  the file: theme-gen counts how many non-`VARIABLE` nodes reference each variable guid, gives
+  the most-referenced one the canonical name, and drops a same-named duplicate only when it has
+  **zero** references and nothing aliases it — reporting every drop on stderr. (A superseded
+  variable left behind under a live one's name is a real and silent hazard; renumbering a scale
+  in place is enough to cause it.) Ties break on the guid, later-created first. The census reads
+  the decode recorded in `manifest.source.path`; point it elsewhere with `--census <msg.json>` or
+  turn it off with `--no-census` — without it nothing is dropped and duplicates are suffixed
+  (`--x-2`) as before.
 
 ## Step 4 — Components: the faithful scaffold (+ owned icons)
 

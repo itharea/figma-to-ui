@@ -44,6 +44,8 @@ import {
   literalFor,
   topoOrder,
   emitTheme,
+  resolveMode,
+  variableUseCensus,
   type ThemeVar,
 } from "./lib/theme-lib.mts";
 import { spawnSync } from "child_process";
@@ -1470,6 +1472,171 @@ const tv = (
     "emit dangling: warns",
     web.warnings.some((w) => /dangling/.test(w)),
     JSON.stringify(web.warnings),
+  );
+}
+
+// ── theme-lib: --mode roots the REQUESTED mode (synthetic two-mode catalog) ──
+// A variable present in both modes: rooting must pick the requested mode's value, and every
+// other mode must survive as a switchable class emitted AFTER :root (equal specificity).
+const dual = (name: string, guid: string, a: string, b: string): ThemeVar => ({
+  id: `token:${guid}`,
+  name,
+  set: "S",
+  type: "STRING",
+  modes: { "Mode 1": a, "Brand / alt": b },
+  guid,
+  defaultMode: "Mode 1",
+});
+{
+  const vars = [dual("Typography/family/heading", "f1", "Alpha", "Beta")];
+  const base = emitTheme(vars, { framework: "web" });
+  check(
+    "emit web: no --mode keeps the collection default rooted",
+    /:root \{\n  --typography-family-heading: Alpha;/.test(base.code),
+    base.code,
+  );
+  check(
+    "emit web: no --mode still emits the other mode as a class",
+    base.code.includes(".mode-brand-alt {"),
+    base.code,
+  );
+  const picked = emitTheme(vars, { framework: "web", activeMode: "Brand / alt" });
+  check(
+    "emit web: --mode roots the REQUESTED mode",
+    /:root \{\n  --typography-family-heading: Beta;/.test(picked.code),
+    picked.code,
+  );
+  check(
+    "emit web: the unrooted mode is still emitted as a class",
+    /\.mode-mode-1 \{\n  --typography-family-heading: Alpha;/.test(picked.code),
+    picked.code,
+  );
+  check(
+    "emit web: the class block comes AFTER :root so the opt-in can win",
+    picked.code.indexOf(":root {") < picked.code.indexOf(".mode-mode-1 {"),
+    picked.code,
+  );
+  const rn = emitTheme(vars, { framework: "rn", activeMode: "Brand / alt" });
+  check(
+    "emit rn: --mode drives defaultMode, both modes kept",
+    rn.code.includes("export const defaultMode = 'Brand / alt'") &&
+      rn.code.includes("'Mode 1': (() =>"),
+    rn.code,
+  );
+  // a mode name is free text: the slug the CSS advertises must select it back.
+  eq(
+    "resolveMode by slug",
+    resolveMode(["Mode 1", "Brand / alt"], "brand-alt").mode,
+    "Brand / alt",
+  );
+  eq("resolveMode case-insensitive", resolveMode(["Mode 1"], "mode 1").mode, "Mode 1");
+  const miss = resolveMode(["Mode 1", "Brand / alt"], "Nope");
+  eq(
+    "resolveMode unknown reports, never falls back",
+    [miss.mode, (miss as any).reason],
+    [null, "unknown"],
+  );
+  const unknown = emitTheme(vars, { framework: "web", activeMode: "Nope" });
+  check(
+    "emit web: an unmatched mode warns instead of silently rooting the default",
+    unknown.warnings.some((w) => /requested mode "Nope" is unknown/.test(w)),
+    JSON.stringify(unknown.warnings),
+  );
+}
+
+// ── theme-lib: live-use census settles duplicate names ──
+// A renumbered scale can leave superseded variables behind under the SAME name; reference
+// count from non-VARIABLE nodes is the only thing in the bytes that tells them apart.
+{
+  const g = (s: number, l: number) => ({ sessionID: s, localID: l });
+  const nodes = [
+    // the two same-named variables themselves — a VARIABLE never votes for another variable
+    { guid: g(1, 128), type: "VARIABLE", name: "T/size/xs" },
+    { guid: g(129, 3353), type: "VARIABLE", name: "T/size/xs" },
+    // a text style binding the live one (deep FONT_STYLE-shaped nesting) …
+    {
+      guid: g(5, 1),
+      type: "TEXT",
+      variableConsumptionMap: {
+        entries: [
+          {
+            variableField: "FONT_SIZE",
+            variableData: { value: { alias: { guid: g(129, 3353) } } },
+          },
+        ],
+      },
+    },
+    // … and a paint binding it too (the other binding shape).
+    {
+      guid: g(5, 2),
+      type: "FRAME",
+      fillPaints: [{ colorVar: { value: { alias: { guid: g(129, 3353) } } } }],
+    },
+  ];
+  const census = variableUseCensus(nodes);
+  eq("census counts every binding shape", census.get("129:3353"), 2);
+  eq("census: the superseded variable has zero references", census.get("1:128"), undefined);
+
+  const dead = tv("T/size/xs", "FLOAT", "14", "1:128");
+  const live = tv("T/size/xs", "FLOAT", "16", "129:3353");
+  // DECLARATION ORDER MUST NOT MATTER — the whole defect was that it did.
+  const orders: [string, ThemeVar[]][] = [
+    ["dead first", [dead, live]],
+    ["live first", [live, dead]],
+  ];
+  for (const [label, vars] of orders) {
+    const web = emitTheme(vars, { framework: "web", uses: census });
+    check(
+      `census (${label}): the live variable takes the canonical name`,
+      web.code.includes("--t-size-xs: 16"),
+      web.code,
+    );
+    check(
+      `census (${label}): the zero-reference duplicate is dropped, not suffixed`,
+      !web.code.includes("--t-size-xs-2"),
+      web.code,
+    );
+    eq(
+      `census (${label}): the drop is reported`,
+      web.dropped.map((d) => [d.name, d.guid, d.keptGuid]),
+      [["T/size/xs", "1:128", "129:3353"]],
+    );
+  }
+  // no census → nothing is dropped, but the tie-break is the guid (later-created wins),
+  // never array order: both orderings must agree.
+  const a = emitTheme([dead, live], { framework: "web" });
+  const b = emitTheme([live, dead], { framework: "web" });
+  check(
+    "no census: tie breaks on guid, not declaration order",
+    a.code.includes("--t-size-xs: 16") && b.code.includes("--t-size-xs: 16"),
+    a.code + b.code,
+  );
+  check(
+    "no census: the duplicate is kept and suffixed (nothing lost)",
+    a.dropped.length === 0 && a.code.includes("--t-size-xs-2: 14"),
+    a.code,
+  );
+  check(
+    "no census: the suffixing still warns",
+    a.warnings.some((w) => /name collision/.test(w)),
+    JSON.stringify(a.warnings),
+  );
+  // a duplicate that ANOTHER variable aliases is live even with zero direct references.
+  const aliased = tv("T/size/s", "FLOAT", "18", "2:1");
+  const usedTwin = tv("T/size/s", "FLOAT", "20", "3:1");
+  const referrer = tv("T/size/alias", "FLOAT", "18", "4:1", "2:1");
+  const guarded = emitTheme([aliased, usedTwin, referrer], {
+    framework: "web",
+    uses: new Map([
+      ["3:1", 4],
+      ["4:1", 1],
+    ]),
+  });
+  eq("census: an alias target is never dropped", guarded.dropped.length, 0);
+  check(
+    "census: the referenced twin still takes the canonical name",
+    guarded.code.includes("--t-size-s: 20") && guarded.code.includes("--t-size-s-2: 18"),
+    guarded.code,
   );
 }
 
