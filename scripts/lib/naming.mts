@@ -200,11 +200,25 @@ export function axisPropNames(axisNames: string[]): Map<string, string> {
 // PascalCase identifier from a Figma name — the meta component name AND the
 // JSX/import name used for nested-component references (parity across both).
 // "" → "Component".
+//
+// Same guard as propIdent, for the same reason: PascalCasing alone does not make an
+// identifier. A component set is free to be named "3D Card", "2-up Grid" or "404 Page",
+// and the PascalCase of each STARTS WITH A DIGIT — `export function 3DCard(props:
+// 3DCardProps)` is a SyntaxError, so the whole scaffold fails to parse. Such a name is
+// prefixed ("3D Card" → "Comp3DCard"), matching propIdent's `prop941` shape and the
+// `Glyph` prefix codegen's icon namer already applies to the same hazard; the empty
+// fallback is the same word, so one convention covers both. Any name that already starts
+// a legal identifier is returned byte-identical — the prefix is not a general rename.
+// No reserved-word branch: every reserved word is lower-case and this uppercases the
+// first letter of every word, so the output can never be one.
+// Like propIdent, this is NOT globally unique — two sets whose display names PascalCase
+// alike already collide (build-ir disambiguates the FILE slug, not the identifier), so a
+// caller emitting several component identifiers into one scope must de-dupe.
 export function compIdent(name: string): string {
-  return (
+  const base =
     asciiFold(name ?? "")
       .replace(/[^A-Za-z0-9]+/g, " ")
       .replace(/(?:^|\s)(\w)/g, (_: string, ch: string) => ch.toUpperCase())
-      .replace(/\s/g, "") || "Component"
-  );
+      .replace(/\s/g, "") || "Component";
+  return IDENT_RE.test(base) ? base : `Comp${base}`;
 }
