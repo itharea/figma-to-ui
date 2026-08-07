@@ -23,8 +23,10 @@ import {
   classifyPlaceholderText,
   textDecorationToIR,
   majorityDecoration,
+  majorityRunValue,
   type Conflict,
   type DecorationRun,
+  type RunTally,
   type TextDecoration,
 } from "./reconcile-lib.mts";
 import type { ResolvedNode } from "./resolve-lib.mts";
@@ -62,10 +64,12 @@ export type IRFont = {
   size: number;
   // Where size/lineHeight came from, most-certain first: "style" = the applied text
   // style (styleIdForText → typography token, designer intent); "derived" = Figma's own
-  // render (derivedTextData); "fontSize" = the node's declared cache, taken as-is;
-  // "geometry" = the box-vs-lineHeight HEURISTIC (last resort, only when no certain
-  // source covers the field).
-  sizeSource: "fontSize" | "geometry" | "derived" | "style";
+  // render (derivedTextData); "run" = the majority of the node's CHARACTER RUNS
+  // (styleOverrideTable), reached only when the characters genuinely disagree about the
+  // field — always accompanied by a `<field>@run` entry in `conflicts[]`; "fontSize" =
+  // the node's declared cache, taken as-is; "geometry" = the box-vs-lineHeight HEURISTIC
+  // (last resort, only when no certain source covers the field).
+  sizeSource: "fontSize" | "geometry" | "derived" | "style" | "run";
   sizeToken: string | null;
   sizeMatch: string | null;
   // The applied Figma text style (styleIdForText) — the typography DESIGN TOKEN this
@@ -79,7 +83,11 @@ export type IRFont = {
   // just the style as a whole. null when no shared style applies.
   vars: TypeVars | null;
   lineHeightPx: number | null;
-  lineHeightSource: "fontSize" | "derived" | "style";
+  lineHeightSource: "fontSize" | "derived" | "style" | "run";
+  // `family`/`weight`/`letterSpacing*` have no `*Source` of their own and none is added
+  // here: a per-run resolution is only ever reached for a genuinely mixed string, and a
+  // mixed string ALWAYS files a `<field>@run` conflict, so the provenance is never lost —
+  // it just lives in `conflicts[]` rather than in three new keys on every text node.
   letterSpacingPx: number;
   letterSpacingRaw: { value: number; units: string };
   // Underline / strike-through, as the CSS+RN keyword (see reconcile-lib
@@ -827,6 +835,55 @@ function styleDecoration(
   return s ? textDecorationToIR(s.textDecoration) : undefined;
 }
 
+// The typography ONE character run declares. A run entry is a full `NodeChange` (the fig
+// schema types `textData.styleOverrideTable` as `NodeChange[]`), so it states a field
+// inline — `fontSize` / `fontName` / `lineHeight` / `letterSpacing` — or binds a shared
+// text style of its OWN through `styleIdForText`, which is how a run can point at a
+// different design token than the node it sits in. `undefined` on a field means the run
+// is silent about it and its characters inherit the node-level answer; the two are not
+// interchangeable, because a run that only re-sizes must not be counted as a vote for the
+// node's family.
+type RunTypography = {
+  id: number;
+  size: number | undefined;
+  font: { family: string | null; weight: string | null } | undefined;
+  lineHeightRaw: { value?: number; units?: string } | undefined;
+  styleLineHeightPx: number | undefined;
+  letterSpacingRaw: { value?: number; units?: string } | undefined;
+  styleLetterSpacingPx: number | undefined;
+};
+
+function runTypography(r: unknown, typeStyles: Map<string, IRTypography>): RunTypography {
+  const o = r as any;
+  const k = styleRefKey(o);
+  const st = k ? (typeStyles.get(k) ?? null) : null;
+  const fn = o?.fontName;
+  const face = fn?.family != null || fn?.style != null;
+  return {
+    id: typeof o?.styleID === "number" ? o.styleID : -1,
+    size: typeof o?.fontSize === "number" ? o.fontSize : (st?.size ?? undefined),
+    font: face
+      ? { family: fn.family ?? null, weight: fn.style ?? null }
+      : st
+        ? { family: st.family, weight: st.weight }
+        : undefined,
+    lineHeightRaw: o?.lineHeight,
+    styleLineHeightPx: st?.lineHeightPx ?? undefined,
+    letterSpacingRaw: o?.letterSpacing,
+    styleLetterSpacingPx: st ? st["letterSpacingPx@size"] : undefined,
+  };
+}
+
+// Printable spellings for the per-run tallies. They are what a `conflicts[]` reason shows
+// a reviewer AND the identity the majority vote groups by (majorityRunValue buckets on
+// the label), so two runs count as the same value exactly when they print the same.
+const sizeLabel = (v: number) => String(v);
+const fontLabel = (v: { family: string | null; weight: string | null }) =>
+  [v.family, v.weight].filter(Boolean).join(" ") || "(none)";
+const lhLabel = (v: number | null) => (v == null ? "auto" : String(v));
+const lsLabel = (v: { value: number; units: string }) =>
+  v.units === "PERCENT" ? `${v.value}%` : `${v.value}px`;
+
 // Reconcile one resolved TEXT node into the IR `font`/`text`/`color` provenance
 // objects. `appFamilyOf` maps a raw family → its decided appFamily slot (null
 // until decided in Phase 8). `typeStyles` maps a text-style guidKey → its typography
@@ -860,15 +917,81 @@ function reconcileText(
   const style = !fontOverridden && styleKey ? (typeStyles.get(styleKey) ?? null) : null;
   const derived = fontOverridden ? null : deriveFontFromRender(n as any);
 
-  // family / weight / size: RENDER (effective) → STYLE (intent) → cache → geometry.
-  // `rec` (geometry) is only reached when neither certain source covers the node.
-  const family = derived?.family ?? style?.family ?? nodeFamily;
-  const weight = derived?.weight ?? style?.weight ?? nodeWeight;
+  // The node's CHARACTER RUNS. `textData.styleOverrideTable` was only ever COUNTED (the
+  // `styleRuns` conflict below); every typography value still came from the node level,
+  // so a string whose runs carry different sizes or faces reported one of them and never
+  // said which — accurate about the uncertainty, but it never resolved it.
+  //
+  // The rule, one sentence: a run majority is consulted ONLY when the characters
+  // genuinely disagree about that field, and when consulted it slots in immediately above
+  // the node-level DECLARED values (the applied text style and the node's own cache) in
+  // that field's existing chain — `derived`, Figma's own render, keeps whatever place the
+  // chain already gives it.
+  //
+  // Both halves matter. Resolving only a mixed field is what makes this safe to land on
+  // values that already flow into every component and screen: a uniform table says
+  // nothing the node level does not already say, so every node that renders correctly
+  // today emits a byte-identical `font` block, and the only nodes that move are the ones
+  // that were provably wrong (one value reported for a string that has several). Leaving
+  // `derived` alone is what keeps the module's determinism contract intact — the render
+  // is exact bytes, a run majority is a reduction of declared ones.
+  const runTable: any[] = (n as any).textData?.styleOverrideTable ?? [];
+  const charIDs = (n as any).textData?.characterStyleIDs;
+  const runs = runTable.map((r) => runTypography(r, typeStyles));
+  const tallyOf = <T,>(
+    get: (r: RunTypography) => T | undefined,
+    base: T,
+    label: (v: T) => string,
+  ): RunTally<T> | null =>
+    runs.length
+      ? majorityRunValue(
+          charIDs,
+          runs.map((r) => ({ id: r.id, value: get(r) })),
+          base,
+          label,
+        )
+      : null;
+
+  // family / weight / size: RENDER (effective) → character RUNS (majority, mixed only) →
+  // STYLE (intent) → cache → geometry. `rec` (geometry) is only reached when no other
+  // source covers the node. The base a run tally falls back to for characters no run
+  // covers is the NODE-LEVEL answer, never the render — an uncovered character renders
+  // with the node's own style, which is exactly what `styleIdForText`/the cache describe.
+  const sizeTally = fontOverridden
+    ? null
+    : tallyOf((r) => r.size, style?.size ?? rec.size, sizeLabel);
+  const fontTally = fontOverridden
+    ? null
+    : tallyOf(
+        (r) => r.font,
+        { family: style?.family ?? nodeFamily, weight: style?.weight ?? nodeWeight },
+        fontLabel,
+      );
+  let family = derived?.family ?? style?.family ?? nodeFamily;
+  let weight = derived?.weight ?? style?.weight ?? nodeWeight;
+  // family and weight move together or not at all: `fontName` is ONE record in the bytes
+  // ({family, style}), so voting the two independently could elect a face — "Lora
+  // Medium" — that no run ever asked for.
+  if (fontTally?.mixed && derived?.family == null && derived?.weight == null) {
+    family = fontTally.value.family;
+    weight = fontTally.value.weight;
+  }
   let size: number;
   let sizeSource: IRFont["sizeSource"];
   if (derived?.size != null) {
     size = derived.size;
     sizeSource = "derived";
+  } else if (sizeTally?.mixed) {
+    // Majority-by-character, not "the largest run" or "the first run". A mixed-size
+    // string is usually a base size with an emphasised fragment, so the largest would let
+    // a one-character accent inflate the whole block (and with it `letterSpacingPx`,
+    // which is computed AT this size, and the box-vs-font reconciler); "first" is merely
+    // positional and flips answer when the accent leads. It also keeps the two paths
+    // agreeing: `deriveFontFromRender` already reduces a mixed string by taking the MODE
+    // of the rendered glyph sizes "so a stray glyph can't skew it" — the majority over
+    // declared characters is that same rule applied to the declared bytes.
+    size = sizeTally.value;
+    sizeSource = "run";
   } else if (style?.size != null) {
     size = style.size;
     sizeSource = "style";
@@ -901,13 +1024,50 @@ function reconcileText(
     lhPx = cacheLh ?? derived?.lineHeightPx ?? null;
     lineHeightSource = cacheLh != null ? "fontSize" : "derived";
   }
+  // A run's own `lineHeight` is PERCENT-relative to ITS size, so convert at the run's
+  // fontSize where it states one and at the node's resolved size otherwise. `null` (AUTO)
+  // is a real answer here and votes as "auto", distinct from a run that is silent.
+  // The render is ranked LAST for line height (its baseline over-counts font leading —
+  // see the chain above), so "immediately above the declared values" puts a mixed run
+  // majority at the front of this particular chain.
+  const lhTally = tallyOf(
+    (r) =>
+      r.lineHeightRaw !== undefined
+        ? lineHeightPx(r.lineHeightRaw, r.size ?? size)
+        : r.styleLineHeightPx,
+    lhPx,
+    lhLabel,
+  );
+  if (lhTally?.mixed) {
+    lhPx = lhTally.value;
+    lineHeightSource = "run";
+  }
+
+  // letter spacing: same treatment, on the RAW {value, units} pair so a PERCENT run and a
+  // PIXELS run stay distinguishable; `letterSpacingPx` is then computed once, at the
+  // resolved size, exactly as before. A run that only binds a text style contributes that
+  // style's already-resolved px (`letterSpacingPx@size`) — the style has no raw pair to
+  // offer, and its px is what it renders.
+  const lsBase = { value: lsRaw.value ?? 0, units: lsRaw.units ?? "PIXELS" };
+  const lsTally = tallyOf(
+    (r) =>
+      r.letterSpacingRaw !== undefined
+        ? { value: r.letterSpacingRaw.value ?? 0, units: r.letterSpacingRaw.units ?? "PIXELS" }
+        : r.styleLetterSpacingPx !== undefined
+          ? { value: r.styleLetterSpacingPx, units: "PIXELS" }
+          : undefined,
+    lsBase,
+    lsLabel,
+  );
+  const ls = lsTally?.mixed ? lsTally.value : lsBase;
 
   // geometry was a GUESS — surface its conflict ONLY when geometry actually won the size.
   if (sizeSource === "geometry") conflicts.push(...rec.conflicts);
 
   // styleOverrideTable runs: a non-empty table means node-level font may not match
-  // N runs — add a conflict (does not change `size`, only flags).
-  const styleRuns = (n as any).textData?.styleOverrideTable?.length ?? 0;
+  // N runs — add a conflict (does not change `size`, only flags). This stays even now
+  // that the fields below ARE resolved: resolving a value must not hide that it was mixed.
+  const styleRuns = runTable.length;
   if (styleRuns) {
     conflicts.push({
       field: "styleRuns",
@@ -918,6 +1078,32 @@ function reconcileText(
       reason: `node-level font may not match ${styleRuns} style runs`,
     });
   }
+
+  // Per-field run disagreements. A run majority that CHANGED an answer is never silent —
+  // it is only ever reached for a genuinely mixed string, so it always lands here, which
+  // is what lets `family`/`weight`/`letterSpacing` do without a `*Source` key of their
+  // own. `declared`/`chosen` are numeric on Conflict, so they carry only the SHAPE of the
+  // disagreement (N distinct readings collapsed to the 1 a node can render); the readable
+  // tally and the value actually emitted live in `reason`.
+  //
+  // The `@run` suffix on the field name is load-bearing: plain `fontSize` is already
+  // taken by the box-vs-font conflict above, which codegen renders through a size-specific
+  // "confirm size" template that would be nonsense here.
+  for (const [field, t, chosen] of [
+    ["fontSize", sizeTally, sizeLabel(size)],
+    ["fontName", fontTally, fontLabel({ family, weight })],
+    ["lineHeight", lhTally, lhLabel(lhPx)],
+    ["letterSpacing", lsTally, lsLabel(ls)],
+  ] as [string, RunTally<any> | null, string][])
+    if (t?.mixed)
+      conflicts.push({
+        field: `${field}@run`,
+        declared: t.distinct,
+        chosen: 1,
+        boxY: (n as any).size?.y ?? 0,
+        lhPx: lhPx ?? 0,
+        reason: `mixed ${field} across ${styleRuns} style run(s) (${t.detail}) — resolved to "${chosen}"`,
+      });
 
   // Text decoration. Nothing read `textDecoration` anywhere in the skill before this, so
   // an underlined label reached codegen as plain text and the only surviving signal was
@@ -942,16 +1128,15 @@ function reconcileText(
     decoration = appliedDecoration;
     decorationSource = "style";
   }
-  const runTable: any[] = (n as any).textData?.styleOverrideTable ?? [];
   if (runTable.length) {
-    const runs: DecorationRun[] = runTable.map((r: any) => ({
+    const decorationRuns: DecorationRun[] = runTable.map((r: any) => ({
       id: typeof r?.styleID === "number" ? r.styleID : -1,
       decoration:
         r?.textDecoration !== undefined
           ? textDecorationToIR(r.textDecoration)
           : styleDecoration(r, typeStyles),
     }));
-    const tally = majorityDecoration((n as any).textData?.characterStyleIDs, runs, decoration);
+    const tally = majorityDecoration(charIDs, decorationRuns, decoration);
     if (tally.decoration !== decoration) {
       decoration = tally.decoration;
       decorationSource = "run";
@@ -985,11 +1170,8 @@ function reconcileText(
     vars: style?.vars ?? null,
     lineHeightPx: lhPx,
     lineHeightSource,
-    letterSpacingPx: letterSpacingToPx(lsRaw, size),
-    letterSpacingRaw: {
-      value: lsRaw.value ?? 0,
-      units: lsRaw.units ?? "PIXELS",
-    },
+    letterSpacingPx: letterSpacingToPx(ls, size),
+    letterSpacingRaw: ls,
     // Omitted entirely when undecorated — the common case stays byte-identical.
     ...(decoration != null ? { decoration, decorationSource } : {}),
     conflicts,

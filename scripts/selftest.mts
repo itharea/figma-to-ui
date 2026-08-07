@@ -19,6 +19,7 @@ import {
   disambiguateJustify,
   textDecorationToIR,
   majorityDecoration,
+  majorityRunValue,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
 import {
@@ -3812,6 +3813,535 @@ if (fs.existsSync(decodePath)) {
       "screen sizing: no hugging/filling node freezes both axes",
       frozen.map((n) => n.name),
       [],
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── per-run character styles for the rest of the typography fields (#76) ─────
+//
+// #74 resolved DECORATION per character run and left everything else counted-but-
+// unresolved: `reconcileText` filed a `styleRuns` conflict and reported the node-level
+// size/family/lineHeight/letterSpacing regardless of what the runs said. Decoration was
+// safe to do alone because it was a new field with no consumers; these four already flow
+// into every component and screen, so the assertions below come in two halves —
+//
+//   1. the INVARIANT: a node whose runs say nothing new emits a byte-identical `font`
+//      block, key order included. Nothing that renders correctly today may move.
+//   2. the FIX: a node whose characters genuinely disagree resolves to the majority,
+//      says so in `sizeSource`/`lineHeightSource`, and still reports that it was mixed.
+//
+// Ground truth for the shapes, re-read out of the kiwi schema embedded in the committed
+// export: `TextData.styleOverrideTable` is `NodeChange[]` and `NodeChange` carries
+// `fontSize`, `fontName`, `lineHeight`, `letterSpacing`, `styleIdForText` and `styleID`;
+// `TextData.characterStyleIDs` is a `uint[]` parallel to `characters`. Confirmed live in
+// that export on the one node that has a table: a 19-character label, ids [14×9, 13×10],
+// against two entries carrying `fontSize`/`fontName` inline.
+{
+  // The generic tally. Values are grouped by their printable LABEL, which is what lets one
+  // routine count numbers, fontName pairs and {value,units} records alike.
+  const runs = [
+    { id: 1, value: 24 },
+    { id: 2, value: 16 },
+  ];
+  const wide = majorityRunValue([1, 1, 2, 2, 2, 2, 2, 2], runs, 16, String);
+  eq("run tally: the run covering most characters wins", wide.value, 16);
+  eq("run tally: …and is reported as mixed", [wide.mixed, wide.distinct], [true, 2]);
+  eq("run tally: the tally is readable, biggest first", wide.detail, "16×6, 24×2");
+  eq("run tally: the winner is printable for a conflict reason", wide.label, "16");
+  // The same two entries weighted per ENTRY would have tied 1–1 and taken the first.
+  eq(
+    "run tally: a minority run does not win on entry count",
+    majorityRunValue([1, 2, 2, 2], runs, 16, String).value,
+    16,
+  );
+  // An id naming no entry (0 = the node's own style) and a run silent about this field
+  // both INHERIT the base rather than voting for anything.
+  eq(
+    "run tally: uncovered characters inherit the node-level value",
+    majorityRunValue([0, 0, 0, 1], [{ id: 1, value: 48 }], 16, String).value,
+    16,
+  );
+  eq(
+    "run tally: a run that re-styles only the family is silent about size",
+    majorityRunValue([1, 1], [{ id: 1, value: undefined }], 16, String).mixed,
+    false,
+  );
+  eq(
+    "run tally: absent characterStyleIDs falls back to per-run votes",
+    majorityRunValue(undefined, [{ id: 1, value: 24 }], 16, String).value,
+    24,
+  );
+  // Grouping is by label, not by object identity: two runs that print the same are the
+  // same value, which is the whole reason a record can be tallied at all.
+  const pair = (v: { f: string; w: string }) => `${v.f} ${v.w}`;
+  const same = majorityRunValue(
+    [1, 2, 2],
+    [
+      { id: 1, value: { f: "A", w: "Bold" } },
+      { id: 2, value: { f: "A", w: "Bold" } },
+    ],
+    { f: "A", w: "Bold" },
+    pair,
+  );
+  eq(
+    "run tally: equal-printing records are one bucket",
+    [same.mixed, same.detail],
+    [false, "A Bold×3"],
+  );
+  // and `majorityDecoration` is now this function specialised — same answers as #74.
+  eq(
+    "run tally: majorityDecoration still spells a null decoration 'none'",
+    majorityDecoration(
+      [1, 1, 1, 2],
+      [
+        { id: 1, decoration: "underline" },
+        { id: 2, decoration: null },
+      ],
+      null,
+    ),
+    { decoration: "underline", mixed: true, detail: "underline×3, none×1" },
+  );
+}
+
+// The same rules through the real reconciler.
+{
+  const BODY = {
+    id: "type:7:1",
+    name: "Body/m",
+    family: "Fixture Sans",
+    size: 16,
+    weight: "Regular",
+    lineHeightPx: 20,
+    "letterSpacingPx@size": 0,
+    textCase: null,
+    textDecoration: null,
+    vars: null as any,
+    source: "text-style" as const,
+    guid: "7:1",
+  };
+  const DISPLAY = {
+    ...BODY,
+    id: "type:7:2",
+    name: "Display/l",
+    family: "Display Serif",
+    size: 24,
+    weight: "Bold",
+    lineHeightPx: 32,
+    guid: "7:2",
+  };
+  const typeStyles = new Map<string, any>([
+    ["7:1", BODY],
+    ["7:2", DISPLAY],
+  ]);
+  const styleRef = (l: number) => ({ guid: { sessionID: 7, localID: l } });
+  // 12 characters, so a run can hold a clear majority or a clear minority of them.
+  const CHARS = "Mixed run 12";
+  const ir = (fields: any) =>
+    buildScreen(
+      {
+        guid: "1:10",
+        path: "1:10",
+        type: "TEXT",
+        name: "Label",
+        size: { x: 200, y: 20 },
+        fontSize: 16,
+        fontName: { family: "Fixture Sans", style: "Regular" },
+        lineHeight: { value: 20, units: "PIXELS" },
+        letterSpacing: { value: 0, units: "PIXELS" },
+        textData: { characters: CHARS },
+        children: [],
+        ...fields,
+      } as any,
+      I,
+      {},
+      new Map(),
+      typeStyles,
+    );
+  const table = (ids: number[], entries: any[]) => ({
+    textData: { characters: CHARS, characterStyleIDs: ids, styleOverrideTable: entries },
+  });
+  const fields = (f: any) => {
+    const { conflicts, ...rest } = f ?? {};
+    return rest;
+  };
+  const conflictFields = (n: any) => (n.font?.conflicts ?? []).map((c: any) => c.field);
+  const reasonOf = (n: any, field: string) =>
+    (n.font?.conflicts ?? []).find((c: any) => c.field === field)?.reason ?? "";
+
+  // ── 1. the invariant ───────────────────────────────────────────────────────
+  // A node with no table at all is the baseline every other shape is measured against.
+  const plain = ir({});
+  eq(
+    "run typography: the baseline node still resolves node-level",
+    [
+      plain.font?.size,
+      plain.font?.sizeSource,
+      plain.font?.lineHeightPx,
+      plain.font?.lineHeightSource,
+    ],
+    [16, "fontSize", 20, "fontSize"],
+  );
+  eq("run typography: the baseline node has no conflicts", conflictFields(plain), []);
+
+  // A table whose runs restate exactly what the node already says carries no information
+  // the node level lacks — so it must not move a single byte of the font block. This is
+  // the guard the whole change rests on: size/family/lineHeight already flow into every
+  // component and screen, and a node that renders correctly today has to keep doing so.
+  const uniform = ir(
+    table(
+      [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2],
+      [
+        { styleID: 1, fontSize: 16, fontName: { family: "Fixture Sans", style: "Regular" } },
+        { styleID: 2, fontSize: 16, fontName: { family: "Fixture Sans", style: "Regular" } },
+      ],
+    ),
+  );
+  eq(
+    "run typography: uniform runs leave the font block byte-identical",
+    fields(uniform.font),
+    fields(plain.font),
+  );
+  eq(
+    "run typography: …key order included",
+    Object.keys(uniform.font ?? {}),
+    Object.keys(plain.font ?? {}),
+  );
+  // …and the only thing it says is the pre-existing "this string has runs" note.
+  eq("run typography: a uniform table still flags styleRuns", conflictFields(uniform), [
+    "styleRuns",
+  ]);
+
+  // A run that re-styles something else entirely (the #70 shape: decoration only) is
+  // silent about typography and must not vote.
+  const decorationOnly = ir(
+    table([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], [{ styleID: 1, textDecoration: "UNDERLINE" }]),
+  );
+  eq("run typography: a decoration-only run changes no typography", fields(decorationOnly.font), {
+    ...fields(plain.font),
+    decoration: "underline",
+    decorationSource: "run",
+  });
+
+  // ── 2. size ────────────────────────────────────────────────────────────────
+  const bigMajority = ir(
+    table([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0], [{ styleID: 1, fontSize: 24 }]),
+  );
+  eq(
+    "run typography: the size most characters render at wins",
+    [bigMajority.font?.size, bigMajority.font?.sizeSource],
+    [24, "run"],
+  );
+  eq(
+    "run typography: the mix is still reported, with the tally and the choice",
+    reasonOf(bigMajority, "fontSize@run"),
+    'mixed fontSize across 1 style run(s) (24×9, 16×3) — resolved to "24"',
+  );
+  // Majority, NOT "the largest run": a three-character accent must not inflate the block
+  // (and with it letterSpacingPx, which is computed AT this size).
+  const accent = ir(table([1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], [{ styleID: 1, fontSize: 48 }]));
+  eq(
+    "run typography: a large minority run does not take the size",
+    [accent.font?.size, accent.font?.sizeSource],
+    [16, "run"],
+  );
+  eq(
+    "run typography: …and the 48px run is named in the conflict",
+    reasonOf(accent, "fontSize@run"),
+    'mixed fontSize across 1 style run(s) (16×9, 48×3) — resolved to "16"',
+  );
+  // The pre-existing styleRuns flag survives every resolution: resolving a value must not
+  // hide that it was mixed.
+  eq("run typography: a resolved node keeps its styleRuns flag", conflictFields(bigMajority), [
+    "styleRuns",
+    "fontSize@run",
+  ]);
+  eq("run typography: provenance stays clean", provenanceViolations(bigMajority), []);
+
+  // ── 3. family + weight, as ONE record ──────────────────────────────────────
+  // Voting family and weight independently here would elect "Fixture Sans Bold" — a face
+  // no run ever asked for (family: Fixture Sans 7, Display Serif 5; weight: Bold 5,
+  // Regular 4, Medium 3). `fontName` is one record in the bytes, so the PAIR is the vote.
+  const faces = ir(
+    table(
+      [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3],
+      [
+        { styleID: 1, fontName: { family: "Fixture Sans", style: "Regular" } },
+        { styleID: 2, fontName: { family: "Fixture Sans", style: "Medium" } },
+        { styleID: 3, fontName: { family: "Display Serif", style: "Bold" } },
+      ],
+    ),
+  );
+  eq(
+    "run typography: family and weight are elected as one face",
+    [faces.font?.family, faces.font?.weight],
+    ["Display Serif", "Bold"],
+  );
+  eq(
+    "run typography: the face tally names every reading",
+    reasonOf(faces, "fontName@run"),
+    'mixed fontName across 3 style run(s) (Display Serif Bold×5, Fixture Sans Regular×4, Fixture Sans Medium×3) — resolved to "Display Serif Bold"',
+  );
+
+  // ── 4. line height, converted at the RUN's own size ────────────────────────
+  // A PERCENT line height is relative to the size of the run that declares it, not to the
+  // node's: 150% of this run's 24px is 36, where reading it against the node's 16 gives 24.
+  const lh = ir(
+    table(
+      [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0],
+      [{ styleID: 1, fontSize: 24, lineHeight: { value: 150, units: "PERCENT" } }],
+    ),
+  );
+  eq(
+    "run typography: a run's PERCENT line height converts at the run's own size",
+    [lh.font?.lineHeightPx, lh.font?.lineHeightSource],
+    [36, "run"],
+  );
+
+  // ── 5. letter spacing ──────────────────────────────────────────────────────
+  // The vote is on the RAW {value, units} pair, so a PERCENT run and a PIXELS run stay
+  // distinguishable; the px is then computed once, at the resolved size.
+  const ls = ir(
+    table(
+      [1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+      [{ styleID: 1, letterSpacing: { value: 4, units: "PERCENT" } }],
+    ),
+  );
+  eq(
+    "run typography: the majority letter spacing wins, raw units intact",
+    [ls.font?.letterSpacingRaw, ls.font?.letterSpacingPx],
+    [{ value: 4, units: "PERCENT" }, 0.64],
+  );
+  eq(
+    "run typography: letter spacing has no *Source key, so the conflict is its provenance",
+    reasonOf(ls, "letterSpacing@run"),
+    'mixed letterSpacing across 1 style run(s) (4%×9, 0px×3) — resolved to "4%"',
+  );
+
+  // ── 6. a run that binds a shared text style of its OWN ─────────────────────
+  // The other half of the issue: `styleRefKey` read the node and nothing else, so a run
+  // pointing at a DIFFERENT design token was invisible for everything but decoration.
+  const runStyle = ir(
+    table([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0], [{ styleID: 1, styleIdForText: styleRef(2) }]),
+  );
+  eq(
+    "run typography: a run's own text style supplies size, face and line height",
+    [
+      runStyle.font?.size,
+      runStyle.font?.sizeSource,
+      runStyle.font?.family,
+      runStyle.font?.weight,
+      runStyle.font?.lineHeightPx,
+      runStyle.font?.lineHeightSource,
+    ],
+    [24, "run", "Display Serif", "Bold", 32, "run"],
+  );
+  // The node's OWN binding is still what `styleName`/`vars` describe — the run-bound token
+  // is reported through the conflicts, not by silently repointing the node's token.
+  eq(
+    "run typography: the node's own style binding is untouched",
+    [runStyle.font?.styleName, runStyle.font?.styleGuid],
+    [null, null],
+  );
+
+  // ── 7. what a run may NOT outrank ──────────────────────────────────────────
+  // Figma's own render is exact bytes; a run majority is a reduction of declared ones. The
+  // mix is still REPORTED, and the reason names the value actually emitted.
+  const rendered = ir({
+    ...table([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0], [{ styleID: 1, fontSize: 40 }]),
+    derivedTextData: {
+      fontMetaData: [{ key: { family: "Render Face", style: "Black" } }],
+      glyphs: [{ fontSize: 18 }, { fontSize: 18 }],
+      baselines: [{ lineHeight: 22 }],
+    },
+  });
+  eq(
+    "run typography: the rendered truth still outranks a run majority",
+    [rendered.font?.size, rendered.font?.sizeSource, rendered.font?.family],
+    [18, "derived", "Render Face"],
+  );
+  eq(
+    "run typography: …and the disagreement is still reported against what was emitted",
+    reasonOf(rendered, "fontSize@run"),
+    'mixed fontSize across 1 style run(s) (40×9, 16×3) — resolved to "18"',
+  );
+  // An explicit instance override of the font is the designer speaking about THIS
+  // instance; the run table came from the master and must not overrule it.
+  const overridden = ir({
+    ...table([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0], [{ styleID: 1, fontSize: 40 }]),
+    fontSize: 30,
+    overrideApplied: { fontSize: { from: 16, to: 30 } },
+  });
+  eq(
+    "run typography: an instance font override is not overruled by the runs",
+    [overridden.font?.size, overridden.font?.sizeSource],
+    [30, "fontSize"],
+  );
+  eq("run typography: …and no run conflict is invented for it", conflictFields(overridden), [
+    "styleRuns",
+  ]);
+
+  // ── 8. every field at once, and decoration alongside ───────────────────────
+  // The four new conflicts and #74's coexist on one node, in a stable order.
+  const everything = ir(
+    table(
+      [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0],
+      [
+        {
+          styleID: 1,
+          fontSize: 24,
+          fontName: { family: "Display Serif", style: "Bold" },
+          lineHeight: { value: 32, units: "PIXELS" },
+          letterSpacing: { value: 1, units: "PIXELS" },
+          textDecoration: "UNDERLINE",
+        },
+      ],
+    ),
+  );
+  eq("run typography: every mixed field files its own conflict", conflictFields(everything), [
+    "styleRuns",
+    "fontSize@run",
+    "fontName@run",
+    "lineHeight@run",
+    "letterSpacing@run",
+    "textDecoration",
+  ]);
+  eq(
+    "run typography: …and every field resolves to the run",
+    [
+      everything.font?.size,
+      everything.font?.family,
+      everything.font?.weight,
+      everything.font?.lineHeightPx,
+      everything.font?.letterSpacingPx,
+      everything.font?.decoration,
+    ],
+    [24, "Display Serif", "Bold", 32, 1, "underline"],
+  );
+  eq(
+    "run typography: provenance survives a fully mixed node",
+    provenanceViolations(everything),
+    [],
+  );
+}
+
+// ── decode fixture: per-run resolution through the REAL pipeline ─────────────
+//
+// The assertions above hand `buildScreen` an object built by hand. This one runs the
+// committed decode fixture through the real `build-ir` CLI twice — once as committed, once
+// with ONE extra text node whose character runs bind a shared text style by the
+// PUBLISHED-LIBRARY `assetRef` shape (`styleIdForText: {assetRef:{key,version}}` on the run
+// itself, not on the node). That shape is the reason this was invisible: it only resolves
+// if assetref-lib's rewrite walk descends into `textData.styleOverrideTable`, which nothing
+// asserted.
+//
+// The extra node is injected into a COPY rather than committed to the fixture, because a
+// permanent mixed-run node would put a `style-runs` entry in `issues.json` for every build
+// and turn the shared "the build is issue-free" baseline into a filter. Building both
+// versions also buys the strongest form of the invariant: every OTHER node's font block,
+// through the real CLI, must come out deep-equal.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-run-typography-"));
+  try {
+    const msg = JSON.parse(fs.readFileSync(fixture, "utf8"));
+    // "Mixed size run" — 14 characters, 10 of them styled by a run that binds the
+    // fixture's Eyebrow/s style (12px / 16px line height / UNDERLINE) while the node binds
+    // Body/m (16px / 20px). The majority is the run, so every field must follow it.
+    msg.nodeChanges.push({
+      guid: { sessionID: 1, localID: 63 },
+      type: "TEXT",
+      name: "Mixed",
+      parentIndex: { guid: { sessionID: 1, localID: 60 }, position: "c" },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 48 },
+      size: { x: 208, y: 20 },
+      textData: {
+        characters: "Mixed size run",
+        characterStyleIDs: [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0],
+        styleOverrideTable: [
+          { styleID: 9, styleIdForText: { assetRef: { key: "STYLE_EYEBROW", version: "v1" } } },
+        ],
+      },
+      fontSize: 16,
+      fontName: { family: "Fixture Sans", style: "Regular" },
+      lineHeight: { value: 20, units: "PIXELS" },
+      letterSpacing: { value: 0, units: "PIXELS" },
+      textAutoResize: "HEIGHT",
+      styleIdForText: { assetRef: { key: "STYLE_BODY", version: "v1" } },
+    });
+    const mixedFixture = path.join(tmp, "decode-fixture-mixed.json");
+    fs.writeFileSync(mixedFixture, JSON.stringify(msg));
+
+    const build = (src: string, out: string) => {
+      const r = spawnSync(
+        process.argv[0],
+        [path.join(here, "cli", "build-ir.mts"), src, "--scope", "all", "--out", out],
+        { encoding: "utf8" },
+      );
+      check(
+        `run typography/fixture: build-ir exits 0 (${path.basename(out)})`,
+        r.status === 0,
+        (r.stderr ?? "").slice(-400),
+      );
+      return JSON.parse(
+        fs.readFileSync(path.join(out, "screens", "fixture-page", "card.json"), "utf8"),
+      ) as IRNode;
+    };
+    const before = build(fixture, path.join(tmp, "before"));
+    const after = build(mixedFixture, path.join(tmp, "after"));
+    const flatten = (n: IRNode, acc: IRNode[] = []) => {
+      acc.push(n);
+      (n.children ?? []).forEach((c) => flatten(c, acc));
+      return acc;
+    };
+    const mixed = flatten(after).find((n) => n.name === "Mixed");
+
+    // the published-library chain, on a RUN: the run's assetRef resolved to the local
+    // Eyebrow/s style and every field followed the character majority.
+    eq(
+      "run typography/fixture: a run's assetRef-bound style resolves through the real CLI",
+      [
+        mixed?.font?.size,
+        mixed?.font?.sizeSource,
+        mixed?.font?.lineHeightPx,
+        mixed?.font?.lineHeightSource,
+      ],
+      [12, "run", 16, "run"],
+    );
+    // …including #74's decoration, from the very same run — the two resolutions coexist.
+    eq(
+      "run typography/fixture: the run's decoration comes along",
+      [mixed?.font?.decoration, mixed?.font?.decorationSource],
+      ["underline", "run"],
+    );
+    // the node's own binding is still reported as its own.
+    eq(
+      "run typography/fixture: the node keeps its own style token",
+      mixed?.font?.styleName,
+      "Body/m",
+    );
+    eq(
+      "run typography/fixture: the mix is reported, not hidden",
+      (mixed?.font?.conflicts ?? []).map((c) => c.field),
+      ["styleRuns", "fontSize@run", "lineHeight@run", "textDecoration"],
+    );
+
+    // THE INVARIANT, end to end: every pre-existing node on the screen is untouched.
+    const fontsOf = (root: IRNode) =>
+      flatten(root)
+        .filter((n) => n.font && n.name !== "Mixed")
+        .map((n) => [n.name, n.font] as const);
+    eq(
+      "run typography/fixture: every other node's font block is unchanged",
+      fontsOf(after),
+      fontsOf(before),
+    );
+    check(
+      "run typography/fixture: …and there were text nodes to compare",
+      fontsOf(before).length >= 2,
+      String(fontsOf(before).length),
     );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

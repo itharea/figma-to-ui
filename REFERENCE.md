@@ -169,12 +169,25 @@ number there would pin it.
   undecorated: the raw field is omit-when-default, so absence is a real "none".
   Resolved node field → character runs (majority) → applied text style; a decoration
   is most often authored on the **style**, and the applying node declares nothing.
-- Mixed-style runs live in `textData.styleOverrideTable` — rare in app UI; flag
-  if styling looks inconsistent within one string (it is invisible to the tools).
-  Each entry is a full `NodeChange`, so a run carries its own `fontSize`/`fontName`/
-  `textDecoration` — or its own `styleIdForText`. `textData.characterStyleIDs` is
-  parallel to `characters` and names the run styling each one (an id naming no entry
-  means the node's own style), which is the only correct way to weight a run.
+- Mixed-style runs live in `textData.styleOverrideTable` — rare in app UI, and one
+  string can only render with one size/face/line height, so a mixed one has to
+  collapse. Each entry is a full `NodeChange`, so a run carries its own
+  `fontSize`/`fontName`/`lineHeight`/`letterSpacing`/`textDecoration` — or its own
+  `styleIdForText`, pointing at a different shared text style than the node does.
+  `textData.characterStyleIDs` is parallel to `characters` and names the run styling
+  each one (an id naming no entry means the node's own style), which is the only
+  correct way to weight a run: per CHARACTER, never per table entry, or a
+  three-character run outvotes the other sixteen.
+  `reconcileText` resolves this for you. When the characters genuinely **disagree**
+  about a field it emits the per-character **majority** and marks it
+  (`sizeSource`/`lineHeightSource`/`decorationSource: "run"`), plus a `<field>@run`
+  entry in `conflicts[]` carrying the full tally (`24×9, 16×3`) and the value chosen —
+  so a resolved value never hides that it was mixed. When they agree, nothing moves:
+  a uniform table says nothing the node level does not, and the reconciled `font`
+  block is identical to a node with no table at all. A run majority outranks the node's
+  applied style and its own cache, but never Figma's render (`derived`) or an explicit
+  instance font override. The pre-existing `styleRuns` conflict stays on every node
+  with a table, resolved or not.
 
 **Four-source reconciliation (for every text value).** Cross-check four sources;
 on conflict prefer in this order:
@@ -408,9 +421,12 @@ wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
   absolute from the page origin.
 - **`text?`** `{value, placeholder, …}` and **`font?`** — reconciled
   `{family, appFamily, weight, size, sizeSource, sizeToken?, sizeMatch?,
-styleName?, vars?, lineHeightPx, letterSpacingPx, decoration?, decorationSource?,
-conflicts[]}`. **Trust the
-  reconciled `font.size` + `sizeSource`, not the raw `fontSize`.** `vars` carries
+styleName?, vars?, lineHeightPx, lineHeightSource, letterSpacingPx, decoration?,
+decorationSource?, conflicts[]}`. **Trust the
+  reconciled `font.size` + `sizeSource`, not the raw `fontSize`.** A `*Source` of
+  `"run"` means the value is the per-character majority of a genuinely mixed
+  `styleOverrideTable`, and a `<field>@run` conflict carries the readings it beat.
+  `vars` carries
   per-property variable bindings (family/weight/size/lineHeight/letterSpacing) so
   codegen references the theme, not literals.
 
