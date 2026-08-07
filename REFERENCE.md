@@ -62,6 +62,15 @@ There is no nested tree — `lib/figma-index.mts` rebuilds it:
   fractional-index string — sort children lexically by it.
 - Roots: `type === "DOCUMENT"` → children are `CANVAS` (pages) → children are
   top-level frames/sections.
+- Addressing: a file that **subscribes to its own published library** binds variables,
+  text styles and paint styles by `{assetRef: {key, version}}` instead of `{guid: …}` —
+  at every site (`fillPaints[].colorVar`, `variableConsumptionMap` /
+  `parameterConsumptionMap`, `styleIdForText` / `styleIdForFill`, `variableSetID`,
+  variable→variable aliases). Every resolver reads `.guid`, so `load()` re-addresses them
+  unconditionally (`lib/assetref-lib.mts`): each publishing node carries its own `key`, so
+  `key → guid` is exact. It adds a **sibling** `guid`, never removes the `assetRef` and
+  never overwrites an existing `guid`, which makes it a no-op on a guid-addressed export.
+  Keys naming no node in the file are genuinely external and stay unresolved.
 
 ```sh
 node cli/tree.mts $WORK/msg-<name>.json                 # pages + top-level frames with guid keys
@@ -102,9 +111,22 @@ about undecided content.
 | `stackVerticalPadding`, `stackHorizontalPadding`, `stackPaddingBottom`, `stackPaddingRight` | `paddingTop`, `paddingLeft`, `paddingBottom`, `paddingRight` (yes — the first two are **top/left**)                                                                                                                                 |
 | `stackPrimaryAlignItems`                                                                    | `justifyContent` (`MIN`/`CENTER`/`MAX`/`SPACE_EVENLY`/`SPACE_BETWEEN`). Codegen/render disambiguate `SPACE_EVENLY`→`SPACE_BETWEEN` by **resolved child geometry** (in-flow children flush at both main-axis ends → `space-between`) |
 | `stackCounterAlignItems`                                                                    | `alignItems`                                                                                                                                                                                                                        |
-| `stackPrimarySizing` / `stackCounterSizing`                                                 | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug`                                           |
+| `stackPrimarySizing` / `stackCounterSizing`                                                 | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug` (see the sizing-defaults note below)      |
 | `stackWrap: "WRAP"`                                                                         | `flexWrap: wrap`. IR `layout.wrap = true`                                                                                                                                                                                           |
 | absent/`NONE`                                                                               | absolute positioning via child `transform`                                                                                                                                                                                          |
+
+**Sizing defaults — the two axes default OPPOSITELY.** `stackPrimarySizing` and
+`stackCounterSizing` are written only when they hold a NON-default value, so an
+absent field is a real value, not "unknown":
+
+| field                | absent means              | value ever written |
+| -------------------- | ------------------------- | ------------------ |
+| `stackPrimarySizing` | `RESIZE_TO_FIT` → **hug** | `FIXED`            |
+| `stackCounterSizing` | `FIXED` → **fixed**       | `RESIZE_TO_FIT…`   |
+
+The IR therefore resolves both axes and **always** emits
+`layout.primarySizing`/`counterSizing`; treating an absent primary as `fixed`
+silently freezes every hugging frame at whatever size it happened to have.
 
 **Per-child sizing & constraints** (on the child node, not the container):
 
@@ -160,6 +182,23 @@ box.y=20 < lh=36 → size likely ~16` when a declared line-height cannot fit the
   (path of guids into the master, possibly nested through inner instances) plus
   the overridden fields (`textData`, `fillPaints`, `size`, `visible`, …). This is
   where per-instance text lives.
+- …and apply the instance's **component properties**, the second (modern) override
+  channel: `componentPropDefs` on the master carry the defaults,
+  `componentPropAssignments` on the instance carry the supplied values, and each
+  consuming node names the field it drives via `componentPropRefs:
+[{defID, componentPropNodeField}]` — `TEXT_DATA` → `textData`, `VISIBLE` →
+  `visible`, `OVERRIDDEN_SYMBOL_ID` → swap this instance's master. Props are applied
+  **before** `symbolOverrides`, so an explicit override on the same node wins.
+  Prop-driven copy and show/hide are invisible in `symbolOverrides` — an instance can
+  look override-free and still render different text.
+
+An `OVERRIDDEN_SYMBOL_ID` prop (or override) re-points a nested instance at a
+different master _after_ its subtree was composed from the old one, so the resolver
+re-composes that subtree from the master actually in use. Two shape traps in this
+payload: the swap guid nests one level deeper on `varValue`
+(`{symbolIdValue:{guid}}`) than on `initialValue` (`{guidValue}`); and the swap must
+rewrite the node's own `symbolData.symbolID` so re-composition is idempotent (the
+post-pass re-runs at every enclosing instance).
 
 ```sh
 node cli/raw.mts overrides $WORK/msg-<name>.json <screen-guidKey>          # raw override list
@@ -173,7 +212,8 @@ tree, so instances no longer dead-end at `instanceOf=`; it tags overridden text
 `raw.mts dump --resolve` does the same in the per-screen dump (the default dump
 stays raw/fast).
 
-**Designer-intent signal:** an instance with _no_ `textData` override renders the
+**Designer-intent signal:** an instance with _no_ `textData` override and _no_ text
+property supplying that node renders the
 master's placeholder text (e.g. every CTA showing the master's default label =
 copy never decided). Detect this and **ask the user instead of shipping
 placeholders**.
@@ -229,6 +269,12 @@ standalone logos/illustrations. Vector shapes index into `message.blobs`:
   transform is dropped (it becomes the viewBox origin).
 - `windingRule: "ODD"` → `fill-rule="evenodd"`, else `nonzero`.
 - Fill color from `fillPaints[0].color`; multiply node × paint opacities.
+- `node.mask === true` marks a **clip region, not paint** — the node and its whole subtree are
+  skipped. (Descending into one exports the clip shape as ordinary artwork: SVG-imported
+  drawings carry a mask whose only child is an opaque black rectangle the size of the frame,
+  which then paints over everything behind it.) The clip is not re-emitted as a `<clipPath>`,
+  which is exact when the mask reveals a full-bounds rectangle; any other reveal shape is still
+  skipped but warns on stderr, so its art exporting uncropped is visible rather than silent.
 
 ```sh
 node cli/export-svg.mts $WORK/msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
@@ -314,10 +360,13 @@ opacity?}`. Gradients keep `stops`; images keep `imageHash` (bytes→hex, the
     `strokes[].weight` is kept.
   - `effects[]` — `{type, hex, offsetX, offsetY, radius, spread?}`
     (DROP_SHADOW/INNER_SHADOW/*_BLUR). `opacity` only when < 1.
-- **`layout?`** `{mode:"row"|"column", gap?, paddingTop?, paddingRight?,
-paddingBottom?, paddingLeft?, justify?, align?, primarySizing?, counterSizing?,
+- **`layout?`** `{mode:"row"|"column", primarySizing, counterSizing, gap?,
+paddingTop?, paddingRight?, paddingBottom?, paddingLeft?, justify?, align?,
 wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
-  absolutely positioned (use `box.absX/absY`).
+  absolutely positioned (use `box.absX/absY`). `primarySizing`/`counterSizing`
+  are **always** present when `layout` is (`fixed`\|`hug`) — the raw fields are
+  omit-when-default with opposite per-axis defaults, so absence is resolved here
+  rather than by each consumer.
 - **Responsive child fields:** `grow`, `alignSelf`, `positioning:"absolute"`,
   `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`.
 - **`box`** `{x,y,w,h,absX,absY}` — `x/y` relative to parent; `absX/absY`
@@ -399,12 +448,13 @@ directory together so the relative imports resolve.
 
 ### Decode & locate (pre-IR)
 
-| Script      | Usage                                                          | Purpose                                                     |
-| ----------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| `parse.mts` | `node cli/parse.mts <canvas.fig> <out.json>`                   | fig-kiwi → message.json                                     |
-| `tree.mts`  | `node cli/tree.mts <msg.json>`                                 | page/frame skeleton with guid keys                          |
-| `find.mts`  | `node cli/find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree)        |
-| `node.mts`  | `node cli/node.mts <msg.json> <guidKey> [field …]`             | raw single-node JSON (confirm a field before relying on it) |
+| Script                    | Usage                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parse.mts`               | `node cli/parse.mts <canvas.fig> <out.json>`                   | fig-kiwi → message.json                                                                                                                                                                                                                                                                                                                                                          |
+| `tree.mts`                | `node cli/tree.mts <msg.json>`                                 | page/frame skeleton with guid keys                                                                                                                                                                                                                                                                                                                                               |
+| `find.mts`                | `node cli/find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree)                                                                                                                                                                                                                                                                                                                             |
+| `node.mts`                | `node cli/node.mts <msg.json> <guidKey> [field …]`             | raw single-node JSON (confirm a field before relying on it)                                                                                                                                                                                                                                                                                                                      |
+| `normalize-assetrefs.mts` | `node cli/normalize-assetrefs.mts <msg.json> [out.json]`       | **diagnostic, not a pipeline step** — reports the published-library `assetRef` → local-guid re-addressing every `load()` already applies: keyed local assets, rewrites per binding-site field trail, and keys that name no node in the file. Zero rewrites means the export addresses by guid. `out.json` materialises the normalised message for something outside this harness |
 
 ### IR pipeline (the harness spine)
 
