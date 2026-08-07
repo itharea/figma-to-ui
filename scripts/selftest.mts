@@ -3229,6 +3229,113 @@ const bind = (node: string, field: string) => [{ node, field }];
   }
 }
 
+// ── naming: component identifiers cannot start a digit (#68) ────────────────
+// compIdent PascalCased without ever guarding the FIRST character, so a set named
+// "3D Card" emitted `export function 3DCard(props: 3DCardProps)` — a SyntaxError, i.e. the
+// whole generated folder failed to parse. Same defect class propIdent was given a guard for
+// in #49; the sweep below is what keeps the two helpers from diverging again.
+eq("compIdent: leading digit prefixed", compIdent("3D Card"), "Comp3DCard");
+eq("compIdent: digit after punctuation too", compIdent("2-up Grid"), "Comp2UpGrid");
+eq("compIdent: all-digit name", compIdent("404 Page"), "Comp404Page");
+// The prefix is a guard, not a rename: a name that already starts an identifier is
+// untouched, byte for byte, and the empty fallback keeps its own spelling.
+eq("compIdent: already-safe name unchanged", compIdent("Product Card"), "ProductCard");
+eq("compIdent: idempotent", compIdent(compIdent("3D Card")), "Comp3DCard");
+eq("compIdent: transliteration still precedes the guard", compIdent("3 öğütücü"), "Comp3Ogutucu");
+{
+  // The same end-to-end proof propIdent carries: whatever a Figma set is named, the emitted
+  // component identifier must be bindable — it is the `export function` name, the `<Comp/>`
+  // JSX tag, the named import a PARENT component references it by, and the `${Comp}Props`
+  // type. A reserved word cannot occur (PascalCase upper-cases the first letter of every
+  // word) but is swept anyway, so a future change to the casing rule is caught here.
+  const names = [
+    ...RESERVED_WORDS,
+    "3D Card",
+    "2-up Grid",
+    "404 Page",
+    "941",
+    "Product Card",
+    "",
+    "—",
+    "  ",
+    "a/b",
+    "öğütücü seçimi",
+    "iade talebi alındı",
+  ];
+  const bad = names.filter((n) => !isSafeIdent(compIdent(n)));
+  check("compIdent: arbitrary set names → bindable identifiers", bad.length === 0, bad.join(", "));
+}
+{
+  // …and the end-to-end half, because the identifier is emitted from four separate call
+  // sites (the `export function`, the `${Comp}Props` type, each variant component, and the
+  // named import a PARENT references it by) which must agree character-for-character. Drives
+  // the real CLI over a synthetic IR whose set is named "3D Card".
+  const codegenPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli", "codegen.mts");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-compident-"));
+  try {
+    const irDir = path.join(tmp, "ir");
+    fs.mkdirSync(path.join(irDir, "components"), { recursive: true });
+    fs.mkdirSync(path.join(irDir, "screens"), { recursive: true });
+    const box = { x: 0, y: 0, w: 100, h: 100 };
+    fs.writeFileSync(
+      path.join(irDir, "screens", "s.json"),
+      JSON.stringify({
+        id: "n_root",
+        path: "/",
+        guid: "1:0",
+        type: "frame",
+        name: "Screen",
+        box: { x: 0, y: 0, w: 400, h: 400 },
+        children: [
+          { id: "n_a", path: "/a", guid: "1:10", type: "frame", name: "Card", box, children: [] },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "manifest.json"),
+      JSON.stringify({ artifacts: { screens: ["screens/s.json"] } }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "components", "3d-card.json"),
+      JSON.stringify({
+        name: "3D Card",
+        guid: "1:1",
+        axes: { State: ["on"] },
+        variants: [{ guidKey: "1:10", props: { State: "on" }, rawName: "State=on", bindings: [] }],
+      }),
+    );
+    const outDir = path.join(tmp, "out");
+    const cg = spawnSync(
+      process.argv[0],
+      [codegenPath, irDir, "3D Card", "--framework", "web", "--out", outDir],
+      { encoding: "utf8" },
+    );
+    check("compIdent e2e: codegen exits 0", cg.status === 0, (cg.stderr ?? "").slice(-400));
+    const index = fs.readFileSync(path.join(outDir, "3d-card", "index.tsx"), "utf8");
+    const types = fs.readFileSync(path.join(outDir, "3d-card", "types.ts"), "utf8");
+    const exported = /export function (\w+)\(props: (\w+)Props\)/.exec(index);
+    check(
+      "compIdent e2e: the exported component is a legal identifier",
+      !!exported && isSafeIdent(exported[1]),
+      index.slice(0, 400),
+    );
+    eq("compIdent e2e: export and Props type agree", exported?.[1], exported?.[2]);
+    check(
+      "compIdent e2e: the Props type is declared under the same name",
+      types.includes(`export type ${exported?.[1]}Props = {`),
+      types.slice(0, 400),
+    );
+    // Traceability: the Figma name is lost by the munging, so the doc comment has to carry it.
+    check(
+      "compIdent e2e: the original Figma name rides along in a doc comment",
+      /\/\*\* Figma component set: "3D Card"\. \*\//.test(index),
+      index.slice(0, 600),
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // ── live fixtures (skip cleanly when no decode is reachable) ─────────────────
 const decodePath = process.argv[2] || "/tmp/figparse/message_new.json";
 if (fs.existsSync(decodePath)) {
@@ -3244,6 +3351,104 @@ if (fs.existsSync(decodePath)) {
   else console.error("  (live: 1273:19851 absent in decode — skipped)");
 } else {
   console.error(`  (live-fixture checks skipped — no decode at ${decodePath})`);
+}
+
+// ── screen IR: the hug/fill mapping is reachable from a screen, not just a scaffold ──
+//
+// `sizingLines()` was written for codegen, whose input is a COMPONENT node; the screens go
+// out as JSON for an assemble agent to read by hand, and `agents/assemble-screen.md` now
+// states the same per-axis rule and names that function as its normative implementation.
+// That pointer is only honest if the emitted screen file actually carries what the mapping
+// needs — both sizing axes on every auto-layout node, and `parentMode` on every child of one
+// (without it a filling child cannot say WHICH axis fills, and the agent falls back to the
+// box). So run the real mapping over the real emitted screen, not over hand-built nodes:
+// these assertions fail if a future change to build-ir stops emitting a field the prose in
+// the prompt tells an agent to read.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-screen-sizing-"));
+  try {
+    const build = spawnSync(
+      process.argv[0],
+      [path.join(here, "cli", "build-ir.mts"), fixture, "--scope", "all", "--out", tmp],
+      { encoding: "utf8" },
+    );
+    check("screen sizing: build-ir exits 0", build.status === 0, (build.stderr ?? "").slice(-400));
+    const card: IRNode = JSON.parse(
+      fs.readFileSync(path.join(tmp, "screens", "fixture-page", "card.json"), "utf8"),
+    );
+    const nodes: IRNode[] = [];
+    const walk = (n: IRNode) => {
+      nodes.push(n);
+      (n.children ?? []).forEach(walk);
+    };
+    walk(card);
+    const byName = (name: string) => nodes.find((n) => n.name === name)!;
+    const HUG_W = "width: 'fit-content', // hug";
+    const HUG_H = "height: 'fit-content', // hug";
+
+    // --- the fields the prompt tells an agent to read are all on the emitted node ---
+    const stacks = nodes.filter((n) => n.layout);
+    check("screen sizing: the screen has auto-layout nodes to test", stacks.length >= 3);
+    eq(
+      "screen sizing: every auto-layout node states BOTH axes",
+      stacks.filter((n) => !n.layout!.primarySizing || !n.layout!.counterSizing).map((n) => n.name),
+      [],
+    );
+    eq(
+      "screen sizing: every child of an auto-layout node carries parentMode",
+      stacks
+        .flatMap((n) => (n.children ?? []).map((c) => [c.name, c.parentMode ?? null] as const))
+        .filter(([, m]) => m == null)
+        .map(([name]) => name),
+      [],
+    );
+
+    // --- and the mapping over those nodes says hug/fill where the design does ---
+    // Card: a column whose primary (vertical) axis hugs — 96px is what its two children
+    // happened to measure, and emitting it is exactly the freeze #43 removed from codegen.
+    eq("screen sizing: a hugging column emits fit-content height", sizingLines(byName("Card")), [
+      "width: 240,",
+      HUG_H,
+    ]);
+    // Body: `alignSelf: 'stretch'` in a COLUMN parent fills the CROSS axis = width. Which
+    // axis that is is knowable only from parentMode; the child alone says "stretch".
+    eq("screen sizing: a stretched child omits the filled axis", sizingLines(byName("Body")), [
+      HUG_H,
+    ]);
+    // TEXT states the same intent in autoResize, and both spellings occur on this screen.
+    eq("screen sizing: TEXT autoResize HEIGHT hugs vertically", sizingLines(byName("Title")), [
+      "width: 208,",
+      HUG_H,
+    ]);
+    eq("screen sizing: TEXT autoResize WIDTH_AND_HEIGHT hugs both", sizingLines(byName("Label")), [
+      HUG_W,
+      HUG_H,
+    ]);
+    // The other direction: a node with no sizing intent still emits its measured box, so the
+    // rule narrows what gets frozen rather than dropping sizes wholesale.
+    eq("screen sizing: a plain node keeps its measured box", sizingLines(byName("Ribbon")), [
+      "width: 24,",
+      "height: 24,",
+    ]);
+    // Nothing on this screen may emit a pixel count on an axis the IR calls hug or fill: the
+    // whole tree, not just the nodes named above.
+    const frozen = nodes.filter((n) => {
+      const lines = sizingLines(n);
+      const hugs = n.layout?.primarySizing === "hug" || n.layout?.counterSizing === "hug";
+      const fills = !!(n.grow || n.alignSelf === "stretch") && !!n.parentMode;
+      const px = lines.filter((l) => /: \d/.test(l)).length;
+      return (hugs || fills) && px > 1; // at most ONE axis may still be a number
+    });
+    eq(
+      "screen sizing: no hugging/filling node freezes both axes",
+      frozen.map((n) => n.name),
+      [],
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 console.error(`\nselftest: ${pass} passed, ${fail} failed`);

@@ -370,12 +370,19 @@ function iconOverrideColor(guid: string): { hex: string; var: string | null } | 
 }
 
 // PascalCase glyph name from a node/instance name ("icons/Tabbar/HouseSimple" → "HouseSimple").
+// TOTAL, like compIdent: the two guards used to sit at the call site, which left the helper
+// itself able to return "" or a digit-leading stem — the same hole compIdent had (#68). A glyph
+// is routinely named "941" (the iOS 9:41 status-bar time) or nothing at all, and the stem is
+// emitted as an exported component name, so both cases take the `Glyph` prefix/fallback. Kept
+// separate from compIdent deliberately: it reads only the last "/" segment of a layer path, and
+// its prefix names what the identifier IS — folding the two together would rename every icon.
 function iconExportName(n: { name?: string | null }): string {
   const raw = (n.name ?? "").split("/").pop() ?? "";
-  return raw
+  const stem = raw
     .replace(/[^A-Za-z0-9]+/g, " ")
     .replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase())
     .replace(/\s/g, "");
+  return /^[A-Za-z_]/.test(stem) ? stem : `Glyph${stem}`;
 }
 
 // Extract geometry for a node and generate (or reuse) an owned icon component. Returns its
@@ -418,10 +425,7 @@ function ownIcon(
   // file (idempotent), different icon → different file (no clobber). It is the geometry
   // hash for a mono glyph and geometry+palette for a baked one — the local `iconTakenNames`
   // counter cannot disambiguate across invocations, so the identity must be in the hash.
-  let stem = iconExportName(n) || "Glyph";
-  // A glyph named e.g. "941" (the iOS 9:41 time) yields an invalid identifier start; prefix it.
-  if (!/^[A-Za-z_]/.test(stem)) stem = "Glyph" + stem;
-  const base = `${stem}_${plan.idHash}Icon`;
+  const base = `${iconExportName(n)}_${plan.idHash}Icon`;
   let Name = base,
     i = 2;
   while (iconTakenNames.has(Name)) Name = `${base}${i++}`;
@@ -1617,6 +1621,12 @@ ${todoBlock}`;
 
 function indexFile(): string {
   const reactImport = web ? `import * as React from 'react';` : `import * as React from 'react';`;
+  // Traceability, same contract as the per-prop `/** Figma: … */` comments: compIdent is
+  // lossy (punctuation and case are dropped, non-ASCII is transliterated, and a name that
+  // cannot START an identifier — "3D Card" — is prefixed), so the exported symbol is not
+  // always readable back to the design. Emitted unconditionally rather than only on a
+  // rename: an editor hover on the component should always name its Figma origin.
+  const compDoc = `/** Figma component set: "${commentSafe(comp.name ?? setName)}". */`;
   const variantImports = rendered
     .map((r) => `import { ${r.compName} } from './${r.fileSlug}';`)
     .join("\n");
@@ -1646,6 +1656,7 @@ ${variantImports}
 
 export type { ${Comp}Props };
 
+${compDoc}
 export function ${Comp}(props: ${Comp}Props) {${destructured ? `\n  const { ${destructured} } = props;` : ""}
   switch (${propKeyExpr}) {
 ${cases}
