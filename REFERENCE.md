@@ -347,8 +347,17 @@ present so files stay lean.
   `color.varGuid` = the variable guidKey, `color.match = "bound"`, and
   `color.hex` is the variable's RESOLVED value (never the stale cached
   `paint.color`). A literal (unbound) fill keeps `var:null`, `hex = paint.color`.
-  One shared resolver (`resolvePaintColor`) drives `color`, `style.fills[]`, and
-  `style.strokes[]` so all three stay consistent.
+  One shared resolver (`resolvePaintColor`) drives `color`, `stroke`,
+  `style.fills[]`, and `style.strokes[]` so all four stay consistent.
+- **Stroke (`stroke`)** — the node's OUTLINE, in the **same shape as `color`**
+  (`hex`/`token`/`match`/`var`/`varGuid`) and resolved from `strokePaints`
+  independently of the fill. Fill and stroke are two separate paint arrays and a
+  node may carry **both** (a near-white glyph with a dark outline so it reads on
+  photography), so `color` alone is not the node's colour — **read both**. Emitted
+  only when the node has a visible solid stroke paint. The outline's **weight** is
+  not duplicated here: `style.strokes[]` is built from the same paint array and is
+  always present whenever `stroke` is, so read `style.strokes[0].weight` (or
+  `style.borderWidths`) to tell a 2px outline from a hairline.
 - **`style?`** `{ fills?, cornerRadius?, strokes?, borderWidths?, effects?,
 opacity? }`:
   - `fills[]` — the COMPLETE **visible** paint list (hidden paints are dropped, so
@@ -389,10 +398,10 @@ styleName?, vars?, lineHeightPx, letterSpacingPx, conflicts[]}`. **Trust the
   codegen references the theme, not literals.
 
 This extraction is a pure function of the bytes and always runs (no `--theme`).
-With `--theme <p>`, each **unbound** `color.hex`/`font.size` also gets a code
-token **by value, within kind** (`color.{token,match}`,
-`font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`; bound colors stay
-`"bound"`). `issues.json`/`intent.json` are informational review notes (never a gate; there is no `decisions.json`).
+With `--theme <p>`, each **unbound** `color.hex`/`stroke.hex`/`font.size` also
+gets a code token **by value, within kind** (`color.{token,match}`,
+`stroke.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`;
+bound colors stay `"bound"`). `issues.json`/`intent.json` are informational review notes (never a gate; there is no `decisions.json`).
 
 ## 9. Pitfalls checklist
 

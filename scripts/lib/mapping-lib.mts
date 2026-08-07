@@ -52,8 +52,13 @@ export function mapNodeTokens(
   // A color BOUND to a Figma variable (match:"bound", var!=null) is GROUND TRUTH
   // from the bytes — value-matching applies to UNBOUND literals only, so never
   // clobber a bound color's token/match (A-variables / spec #3).
-  if (node.color && node.color.hex && node.color.var == null) {
-    apply(node.color, theme, "color", node.color.hex, confirms, rejects, "token", "match");
+  // `stroke` is the same IRColor shape and the same kind of design value as `color`
+  // (a filled-AND-outlined node carries two independent tokens), so it maps by the
+  // same rule — otherwise an outline's literal would never get a token.
+  for (const c of [node.color, node.stroke]) {
+    if (c && c.hex && c.var == null) {
+      apply(c, theme, "color", c.hex, confirms, rejects, "token", "match");
+    }
   }
   if (node.font && typeof node.font.size === "number") {
     apply(
