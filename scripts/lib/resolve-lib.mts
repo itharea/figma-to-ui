@@ -3,8 +3,10 @@
 // (Phase 7) reuses verbatim. NO top-level side effects — build-ir.mts imports it.
 //
 // Composition is pure: it follows the explicit symbolData.symbolOverrides[].
-// guidPath.guids path with zero ambiguity (determinism contract). Placeholder
-// *classification* is judgment and lives in describe-lib/reconcile-lib, not here.
+// guidPath.guids path with zero ambiguity (determinism contract), plus the equally
+// explicit component-property wiring (componentPropDefs / componentPropAssignments /
+// componentPropRefs). Placeholder *classification* is judgment and lives in
+// describe-lib/reconcile-lib, not here.
 import { load, key } from "./figma-index.mts";
 
 export type ResolvedNode = {
@@ -47,6 +49,61 @@ const FIELD_KEYS = [
   "textAlignVertical",
   "textAutoResize",
   "leadingTrim",
+  // The list above covers what a hand-authored override usually touches; the rest
+  // below are fields real exports override that it dropped. Every one was observed
+  // in a live symbolOverrides payload (on a 56-component library export: fillPaints
+  // 2038, size 243, styleIdForFill 104, targetAspectRatio 93, stackPositioning 37,
+  // parameterConsumptionMap 22, variableConsumptionMap 21, stackPrimarySizing 10,
+  // overriddenSymbolID 8, styleIdForText 5, styleIdForStrokeFill 1). Leaving a field
+  // out does not fail loudly — it silently renders the MASTER's value for an
+  // instance the designer had changed, which is why this went unnoticed.
+  //
+  // Shared paint / text styles (styleIdFor*) re-point a node at a different style;
+  // the *ConsumptionMap pair re-binds its design variables (colour, spacing, radius,
+  // typography) — both change the resolved value, so both must ride along.
+  "styleIdForFill",
+  "styleIdForStrokeFill",
+  "styleIdForText",
+  "variableConsumptionMap",
+  "parameterConsumptionMap",
+  // Auto-layout: an instance may re-size, re-pad, re-space or lift a child out of
+  // the flow (stackPositioning=ABSOLUTE) without touching the master. Names match
+  // how screens-lib reads them (layoutOf / childLayoutOf).
+  "stackPrimarySizing",
+  "stackCounterSizing",
+  "stackPositioning",
+  "stackMode",
+  "stackSpacing",
+  "stackCounterSpacing",
+  "stackHorizontalPadding",
+  "stackVerticalPadding",
+  "stackPaddingRight",
+  "stackPaddingBottom",
+  "stackPrimaryAlignItems",
+  "stackCounterAlignItems",
+  "stackChildPrimaryGrow",
+  "stackChildAlignSelf",
+  "stackWrap",
+  "targetAspectRatio",
+  // Per-corner radii + per-side borders (frames with independent corners/sides carry
+  // these INSTEAD of the scalar cornerRadius/strokeWeight already listed above). Both
+  // families are gated on their independence flag by the readers — cornerRadiusOf on
+  // rectangleCornerRadiiIndependent, borderWidthsOf on borderStrokeWeightsIndependent
+  // — so the flags must travel with the weights, or an override that switches a node
+  // to (or away from) independent sides is read against the wrong branch.
+  "rectangleTopLeftCornerRadius",
+  "rectangleTopRightCornerRadius",
+  "rectangleBottomLeftCornerRadius",
+  "rectangleBottomRightCornerRadius",
+  "rectangleCornerRadiiIndependent",
+  "borderTopWeight",
+  "borderBottomWeight",
+  "borderLeftWeight",
+  "borderRightWeight",
+  "borderStrokeWeightsIndependent",
+  // Instance swap (icon substitution). Applied as a plain field here; the
+  // recomposeSwapped post-pass below rebuilds the subtree from the swapped master.
+  "overriddenSymbolID",
 ] as const;
 
 const DEPTH_CAP = 24;
@@ -154,10 +211,131 @@ function resolveInstanceInto(
     r.children.push(buildNode(index, c, `${path}/${key(c.guid)}`, instKey, nextVisited, depth + 1));
   }
 
-  // Apply this instance's overrides onto the freshly-composed subtree.
+  // Component PROPERTIES — Figma's modern override mechanism, entirely distinct from
+  // symbolOverrides. The master declares `componentPropDefs` (TEXT / BOOL /
+  // INSTANCE_SWAP / VARIANT) with a default; nodes inside it opt in via
+  // `componentPropRefs: [{defID, componentPropNodeField}]`; the instance supplies
+  // values via `componentPropAssignments`. None of this was read before, so
+  // prop-driven copy fell back to the master default and prop-driven show/hide never
+  // applied — the "text overrides are missing" symptom.
+  //
+  // Defaults first, then this instance's assignments (assignments win). Note that for
+  // a master that belongs to a component SET, its own componentPropDefs entries are
+  // stubs `{id, parentPropDefId}` — the human name/type/default live on the SET
+  // frame's def, in a different id namespace (see components-lib's NAMESPACE JOIN
+  // note). So this seeding loop yields null for set members and the assignments below
+  // are the only value source, which is correct: an unassigned prop leaves the master
+  // node's own field untouched, and that field already holds the default.
+  const propValues = new Map<string, any>();
+  for (const d of master.componentPropDefs ?? []) {
+    if (d?.id) propValues.set(key(d.id), d.varValue?.value ?? d.initialValue ?? null);
+  }
+  for (const a of inst.componentPropAssignments ?? []) {
+    if (a?.defID) propValues.set(key(a.defID), a.varValue?.value ?? a.value ?? null);
+  }
+  if (propValues.size) applyComponentProps(r, propValues);
+
+  // Apply this instance's overrides onto the freshly-composed subtree. Deliberately
+  // AFTER the props pass: an explicit symbolOverride is the designer's last word and
+  // must win over the value a property supplied for the same node/field.
   for (const o of inst.symbolData.symbolOverrides ?? []) {
     applyOverride(r, o);
   }
+
+  // An instance swap (from a prop or an override) re-points a nested INSTANCE at a
+  // different master AFTER its subtree was already composed from the old one.
+  // Re-compose those subtrees so the rendered children come from the master actually
+  // in use.
+  recomposeSwapped(index, r, nextVisited, depth + 1);
+}
+
+// Read each component-prop value into the concrete node field it drives:
+// TEXT_DATA → textData, VISIBLE → visible, OVERRIDDEN_SYMBOL_ID → instance swap.
+// `propValues` is keyed by def guidKey; a node opts in through its componentPropRefs.
+// Walks the whole composed subtree because a ref can sit at any depth inside the
+// master, including inside a nested instance that forwards the prop.
+function applyComponentProps(r: ResolvedNode, propValues: Map<string, any>) {
+  (function walk(n: ResolvedNode) {
+    for (const ref of (n as any).componentPropRefs ?? []) {
+      if (!ref?.defID) continue;
+      const v = propValues.get(key(ref.defID));
+      if (v === undefined || v === null) continue;
+      switch (ref.componentPropNodeField) {
+        case "TEXT_DATA": {
+          // The value arrives as textDataValue (the varValue shape) or textValue (the
+          // initialValue shape); both carry `characters`. Only apply when it really
+          // has a string, so a malformed/empty payload leaves the master default.
+          const td = v.textDataValue ?? v.textValue ?? v;
+          if (td && typeof td.characters === "string") {
+            const prev = (n as any).textData;
+            // Preserve the master's rich-text metadata (styleOverrideTable / lines)
+            // and swap only what the prop carries, so prop-driven copy keeps its
+            // per-run styling instead of collapsing to a bare string.
+            (n as any).textData = { ...(prev ?? {}), ...td };
+            n.hasTextOverride = true;
+            n.masterDefaultText = undefined; // supplied by a prop → not a master default
+            ((n.overrideApplied ??= {}) as any).textData = {
+              from: prev,
+              to: (n as any).textData,
+            };
+          }
+          break;
+        }
+        case "VISIBLE": {
+          const b = v.boolValue;
+          if (typeof b === "boolean") {
+            ((n.overrideApplied ??= {}) as any).visible = { from: (n as any).visible, to: b };
+            (n as any).visible = b;
+          }
+          break;
+        }
+        case "OVERRIDDEN_SYMBOL_ID": {
+          // Trap: the two value shapes nest the guid DIFFERENTLY. varValue carries
+          // `{symbolIdValue: {guid: {sessionID, localID}}}` while initialValue carries
+          // `{guidValue: {sessionID, localID}}`. Reading `v.symbolIdValue` therefore
+          // yields `{guid}`, not the guid, and key() on it produces
+          // `unresolved: "remote master undefined:undefined"`. Unwrap the extra level.
+          const sid = v.symbolIdValue?.guid ?? v.guidValue ?? v.alias?.guid ?? v.guid;
+          if (sid?.sessionID !== undefined) (n as any).overriddenSymbolID = sid;
+          break;
+        }
+      }
+    }
+    for (const c of n.children ?? []) walk(c);
+  })(r);
+}
+
+// Post-pass: any node whose `overriddenSymbolID` (from a prop or an override) names a
+// different master than the one its children were composed from gets its subtree
+// rebuilt from the swapped master, so the rendered children come from the icon/component
+// actually in use rather than the one the master happened to place.
+function recomposeSwapped(
+  index: Index,
+  r: ResolvedNode,
+  visited: Set<string>,
+  depth: number,
+): void {
+  (function walk(n: ResolvedNode) {
+    const swap = (n as any).overriddenSymbolID;
+    const current = (n as any).symbolData?.symbolID;
+    if (swap && current && key(swap) !== key(current)) {
+      // Point the node itself at the swapped master BEFORE recomposing, so the swap is
+      // IDEMPOTENT. resolveInstanceInto reads the master back off symbolData.symbolID,
+      // so a node still advertising its ORIGINAL symbolID would (a) recompose from the
+      // master it was supposed to be swapped away from and (b) still match this branch
+      // afterwards — and since resolveInstanceInto ends by calling this pass again,
+      // that repeats with a wider `visited` set each time until the cycle guard trips
+      // and emits unresolved: "cycle". This pass also re-runs at every enclosing
+      // instance as the recursion unwinds; rewriting symbolID first makes every later
+      // run see swap === current and fall through to the children.
+      (n as any).symbolData = { ...(n as any).symbolData, symbolID: swap };
+      n.children = [];
+      delete (n as any).unresolved; // stale verdict from the pre-swap composition
+      resolveInstanceInto(index, n as any, n, n.path, visited, depth);
+      return; // resolveInstanceInto already recomposes swaps inside the new subtree
+    }
+    for (const c of n.children ?? []) walk(c);
+  })(r);
 }
 
 // Find a node addressed by an override guidPath segment anywhere in `node`'s

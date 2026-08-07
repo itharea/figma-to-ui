@@ -182,6 +182,23 @@ box.y=20 < lh=36 → size likely ~16` when a declared line-height cannot fit the
   (path of guids into the master, possibly nested through inner instances) plus
   the overridden fields (`textData`, `fillPaints`, `size`, `visible`, …). This is
   where per-instance text lives.
+- …and apply the instance's **component properties**, the second (modern) override
+  channel: `componentPropDefs` on the master carry the defaults,
+  `componentPropAssignments` on the instance carry the supplied values, and each
+  consuming node names the field it drives via `componentPropRefs:
+[{defID, componentPropNodeField}]` — `TEXT_DATA` → `textData`, `VISIBLE` →
+  `visible`, `OVERRIDDEN_SYMBOL_ID` → swap this instance's master. Props are applied
+  **before** `symbolOverrides`, so an explicit override on the same node wins.
+  Prop-driven copy and show/hide are invisible in `symbolOverrides` — an instance can
+  look override-free and still render different text.
+
+An `OVERRIDDEN_SYMBOL_ID` prop (or override) re-points a nested instance at a
+different master _after_ its subtree was composed from the old one, so the resolver
+re-composes that subtree from the master actually in use. Two shape traps in this
+payload: the swap guid nests one level deeper on `varValue`
+(`{symbolIdValue:{guid}}`) than on `initialValue` (`{guidValue}`); and the swap must
+rewrite the node's own `symbolData.symbolID` so re-composition is idempotent (the
+post-pass re-runs at every enclosing instance).
 
 ```sh
 node cli/raw.mts overrides $WORK/msg-<name>.json <screen-guidKey>          # raw override list
@@ -195,7 +212,8 @@ tree, so instances no longer dead-end at `instanceOf=`; it tags overridden text
 `raw.mts dump --resolve` does the same in the per-screen dump (the default dump
 stays raw/fast).
 
-**Designer-intent signal:** an instance with _no_ `textData` override renders the
+**Designer-intent signal:** an instance with _no_ `textData` override and _no_ text
+property supplying that node renders the
 master's placeholder text (e.g. every CTA showing the master's default label =
 copy never decided). Detect this and **ask the user instead of shipping
 placeholders**.
