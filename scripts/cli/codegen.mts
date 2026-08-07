@@ -28,7 +28,7 @@ import * as path from "path";
 import { type IRNode, imagePlacement, type IRFill } from "../lib/screens-lib.mts";
 import { mapValue, deriveLogicals, proposePropApi, type Logical } from "../lib/components-lib.mts";
 import { disambiguateJustify } from "../lib/reconcile-lib.mts";
-import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
+import { cssVarName, tsAccessor, resolveMode } from "../lib/theme-lib.mts";
 import { overlap, hasSignificantNonAdjacentOverlap, sizingLines } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
 import {
@@ -173,11 +173,19 @@ const svgArg = flag("--svg") ?? flag("--message");
 const msgPath = svgArg ?? manifest.source?.path;
 const svgIndex = msgPath && fs.existsSync(msgPath) ? load(msgPath) : null;
 // Mode coherence guard (the single style decision): build-ir + theme-gen must share --mode.
+// Compared through resolveMode, not string equality, for the same reason build-ir and theme-gen
+// resolve rather than match: the harness threads ONE `--mode <M>` through all three, and a slug
+// or a differently-cased spelling of the mode the IR was genuinely built at would otherwise fire
+// a "rebuild the IR" warning about a pipeline that is in fact coherent. A warning either way —
+// codegen reads the IR as already built and cannot re-pin it, so the manifest is the truth here.
 const modeArg = flag("--mode");
-if (modeArg && manifest.activeMode && modeArg !== manifest.activeMode)
-  console.error(
-    `⚠ codegen --mode "${modeArg}" ≠ manifest.activeMode "${manifest.activeMode}" — rebuild IR + theme with the same mode`,
-  );
+if (modeArg && manifest.activeMode) {
+  const manifestModes: string[] = manifest.modes ?? [manifest.activeMode];
+  if (resolveMode(manifestModes, modeArg).mode !== manifest.activeMode)
+    console.error(
+      `⚠ codegen --mode "${modeArg}" ≠ manifest.activeMode "${manifest.activeMode}" — rebuild IR + theme with the same mode`,
+    );
+}
 
 // variable guid → token name, to resolve icon colour overrides read straight from the raw
 // message (the IR drops deep-node colour overrides on icons — see iconOverrideColor).
@@ -362,12 +370,19 @@ function iconOverrideColor(guid: string): { hex: string; var: string | null } | 
 }
 
 // PascalCase glyph name from a node/instance name ("icons/Tabbar/HouseSimple" → "HouseSimple").
+// TOTAL, like compIdent: the two guards used to sit at the call site, which left the helper
+// itself able to return "" or a digit-leading stem — the same hole compIdent had (#68). A glyph
+// is routinely named "941" (the iOS 9:41 status-bar time) or nothing at all, and the stem is
+// emitted as an exported component name, so both cases take the `Glyph` prefix/fallback. Kept
+// separate from compIdent deliberately: it reads only the last "/" segment of a layer path, and
+// its prefix names what the identifier IS — folding the two together would rename every icon.
 function iconExportName(n: { name?: string | null }): string {
   const raw = (n.name ?? "").split("/").pop() ?? "";
-  return raw
+  const stem = raw
     .replace(/[^A-Za-z0-9]+/g, " ")
     .replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase())
     .replace(/\s/g, "");
+  return /^[A-Za-z_]/.test(stem) ? stem : `Glyph${stem}`;
 }
 
 // Extract geometry for a node and generate (or reuse) an owned icon component. Returns its
@@ -410,10 +425,7 @@ function ownIcon(
   // file (idempotent), different icon → different file (no clobber). It is the geometry
   // hash for a mono glyph and geometry+palette for a baked one — the local `iconTakenNames`
   // counter cannot disambiguate across invocations, so the identity must be in the hash.
-  let stem = iconExportName(n) || "Glyph";
-  // A glyph named e.g. "941" (the iOS 9:41 time) yields an invalid identifier start; prefix it.
-  if (!/^[A-Za-z_]/.test(stem)) stem = "Glyph" + stem;
-  const base = `${stem}_${plan.idHash}Icon`;
+  const base = `${iconExportName(n)}_${plan.idHash}Icon`;
   let Name = base,
     i = 2;
   while (iconTakenNames.has(Name)) Name = `${base}${i++}`;
@@ -1621,6 +1633,12 @@ ${todoBlock}`;
 
 function indexFile(): string {
   const reactImport = web ? `import * as React from 'react';` : `import * as React from 'react';`;
+  // Traceability, same contract as the per-prop `/** Figma: … */` comments: compIdent is
+  // lossy (punctuation and case are dropped, non-ASCII is transliterated, and a name that
+  // cannot START an identifier — "3D Card" — is prefixed), so the exported symbol is not
+  // always readable back to the design. Emitted unconditionally rather than only on a
+  // rename: an editor hover on the component should always name its Figma origin.
+  const compDoc = `/** Figma component set: "${commentSafe(comp.name ?? setName)}". */`;
   const variantImports = rendered
     .map((r) => `import { ${r.compName} } from './${r.fileSlug}';`)
     .join("\n");
@@ -1650,6 +1668,7 @@ ${variantImports}
 
 export type { ${Comp}Props };
 
+${compDoc}
 export function ${Comp}(props: ${Comp}Props) {${destructured ? `\n  const { ${destructured} } = props;` : ""}
   switch (${propKeyExpr}) {
 ${cases}

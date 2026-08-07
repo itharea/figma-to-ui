@@ -132,8 +132,10 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
 - **Every other mode still ships**, as a `.mode-<slug>` block emitted after `:root` — switching
   is opting a subtree into the class. Omit `--mode` and the catalog's own primary mode roots.
 - Mode names are free text (spaces, slashes), so `--mode` also accepts the name
-  case-insensitively or as its slug (the one the `.mode-<slug>` class advertises). A name that
-  matches **no** mode is a hard error listing the real ones — it never quietly roots the default.
+  case-insensitively or as its slug (the one the `.mode-<slug>` class advertises). **All three
+  CLIs match it identically**, so one spelling threads through the whole pipeline. A name that
+  matches **no** mode is a hard error listing the real ones — `build-ir` and `theme-gen` both
+  exit `2` rather than quietly building at the catalog's default.
 - **Duplicate variable names are settled by a live-use census**, not by whichever came first in
   the file: theme-gen counts how many non-`VARIABLE` nodes reference each variable guid, gives
   the most-referenced one the canonical name, and drops a same-named duplicate only when it has
@@ -203,6 +205,11 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
   Props still read against the design. Variant _values_, which become the component's public
   value union, are transliterated to ASCII rather than stripped, so a non-English file keeps
   readable option values.
+- **The component's own name is sanitised the same way.** The exported symbol is the PascalCase
+  of the set's name, so a set whose name cannot _start_ an identifier — anything beginning with a
+  digit — takes a `Comp` prefix rather than emitting an `export function` that does not parse.
+  Names that already begin with a letter are unchanged, and the set's Figma name is emitted as a
+  doc comment on the export.
 
 The scaffold is **faithful but verbose — raw material, not the finished component.** One file per
 variant on purpose: Figma variants often have different frame structures; collapsing them to CSS
@@ -286,7 +293,11 @@ screen IR path, and out file), the shared elevated components dir, and the theme
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
 rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `color` **and** `stroke` — a node can
 be filled and outlined at once — plus `absX/absY` for absolute children). It
-binds variable-backed values to the theme and changes no resolved value.
+binds variable-backed values to the theme and changes no resolved value. Size is read **per axis**
+from `layout.primarySizing`/`counterSizing` (mapped to width/height through `layout.mode`) and from
+the child's `grow`/`alignSelf` against `parentMode` — hug is `'fit-content'`, a filled axis is
+omitted, and `box` is the number only where the axis is fixed. Freezing a hugging or filling axis
+to its measured box is the same defect as in the scaffold, one layer up.
 
 **Brownfield?** Build with `build-ir … --theme <path>` and map fig values to repo tokens **by value,
 never by name**; respect intentional divergence. A by-value mismatch is surfaced as a `// REVIEW`

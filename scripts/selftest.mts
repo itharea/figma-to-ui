@@ -48,6 +48,7 @@ import {
   topoOrder,
   emitTheme,
   resolveMode,
+  sameModeRequest,
   variableUseCensus,
   type ThemeVar,
 } from "./lib/theme-lib.mts";
@@ -3034,6 +3035,309 @@ const bind = (node: string, field: string) => [{ node, field }];
   }
 }
 
+// ── build-ir: --mode resolves like theme-gen's, and a miss is a hard error (#69) ─
+//
+// `theme-gen` resolves `--mode` in three tiers (exact → case-insensitive → slug) and exits 2 on a
+// miss. `build-ir` tested `modes.includes(modeArg)` and fell back to the catalog's primary behind
+// one warning line, so ONE flag value threaded through the pipeline could mean two different modes
+// — `--mode app-freetypeface` building the theme at the requested mode and the IR at the default.
+// The IR is the worse half: `activeMode` pins EVERY variable-bound value and is stamped into the
+// manifest, so the wrong mode propagates into every component and screen while the build exits 0.
+//
+// Both CLIs now call the SAME theme-lib matcher, and the assertions below are written to fail if
+// they ever stop agreeing rather than to restate either one's implementation.
+
+// The tolerant match, over mode names shaped like Figma's (free text, spaces and slashes) — the
+// tier the fixture's own "Light"/"Dark" cannot exercise, because their slug IS their lowercase.
+{
+  const modes = ["App / freetypeface", "Default"];
+  eq("mode: exact spelling resolves", resolveMode(modes, "App / freetypeface").mode, modes[0]);
+  eq("mode: the advertised slug resolves", resolveMode(modes, "app-freetypeface").mode, modes[0]);
+  eq(
+    "mode: case-folded spelling resolves",
+    resolveMode(modes, "APP / FREETYPEFACE").mode,
+    modes[0],
+  );
+  eq("mode: an unknown name never falls back", resolveMode(modes, "Nope").mode, null);
+
+  // The staleness identity an incremental rebuild consults. It compares the RESOLVED mode, so a
+  // re-run that spells the built mode differently is a no-op rather than a wasted rebuild — and,
+  // because the source hash already matched when it is asked, it can never reuse an IR that was
+  // pinned to a different mode.
+  const prev = { modes, activeMode: modes[0], requestedMode: "App / freetypeface" };
+  check(
+    "stale: the same mode by slug is not a new build",
+    sameModeRequest(prev, "app-freetypeface"),
+  );
+  check(
+    "stale: the same mode case-folded is not a new build",
+    sameModeRequest(prev, "APP / FREETYPEFACE"),
+  );
+  check("stale: a DIFFERENT mode rebuilds", !sameModeRequest(prev, "Default"));
+  check("stale: an unknown mode never reuses the cache", !sameModeRequest(prev, "Nope"));
+  check(
+    "stale: dropping --mode rebuilds (the primary is not known here)",
+    !sameModeRequest(prev, ""),
+  );
+
+  // Omitting --mode is its own identity in both directions: `requestedMode` is provenance, and
+  // the primary can only be computed from the variables — the work this check exists to skip.
+  const plain = { modes, activeMode: modes[1], requestedMode: null };
+  check("stale: no --mode then no --mode is a no-op", sameModeRequest(plain, ""));
+  check("stale: naming the primary explicitly still rebuilds", !sameModeRequest(plain, "Default"));
+
+  // Fail-safe corners: a manifest written before `modes` existed, and one that recorded no
+  // active mode at all. Both must rebuild rather than match a null against a null.
+  check(
+    "stale: a manifest without a mode catalog rebuilds",
+    !sameModeRequest({ activeMode: modes[0], requestedMode: modes[0] }, "App / freetypeface"),
+  );
+  check(
+    "stale: a null activeMode never matches an unknown request",
+    !sameModeRequest({ modes: [], activeMode: null, requestedMode: "x" }, "Nope"),
+  );
+}
+
+// End to end over the committed decode fixture (modes: Light, Dark): what the CLIs actually do.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-mode-"));
+  const run = (script: string, args: string[]) =>
+    spawnSync(process.argv[0], [path.join(here, "cli", script), ...args], { encoding: "utf8" });
+  const buildIR = (out: string, mode?: string) =>
+    run("build-ir.mts", [
+      fixture,
+      "--scope",
+      "all",
+      "--out",
+      out,
+      ...(mode ? ["--mode", mode] : []),
+    ]);
+  try {
+    const irDir = path.join(tmp, "ir");
+    const readManifest = (dir: string) =>
+      JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+
+    // A case-folded spelling used to miss entirely and pin the IR to "Light".
+    const folded = buildIR(irDir, "dark");
+    check(
+      "build-ir: a case-folded --mode exits 0",
+      folded.status === 0,
+      (folded.stderr ?? "").slice(-400),
+    );
+    eq("build-ir: …and pins the IR to the mode asked for", readManifest(irDir).activeMode, "Dark");
+    eq("build-ir: the raw flag is kept as provenance", readManifest(irDir).requestedMode, "dark");
+
+    // Staleness identity: a second spelling of the SAME mode is the no-op it should be…
+    const respell = buildIR(irDir, "Dark");
+    eq(
+      "build-ir: another spelling of the built mode is a no-op",
+      JSON.parse(respell.stdout ?? "{}").noop,
+      true,
+    );
+    // …while a genuinely different mode still rebuilds, cache or no cache.
+    const other = buildIR(irDir, "Light");
+    check("build-ir: a different mode is not a no-op", !JSON.parse(other.stdout ?? "{}").noop);
+    eq("build-ir: …and re-pins the IR", readManifest(irDir).activeMode, "Light");
+    check(
+      "build-ir: the mode built at is never reused for another",
+      !JSON.parse(buildIR(irDir, "Dark").stdout ?? "{}").noop,
+    );
+
+    // An unknown mode is a caller error: exit 2, the real modes listed, nothing written. The
+    // defect was that this exited 0 having silently built a whole IR at the wrong mode.
+    const before = readManifest(irDir).activeMode;
+    const bad = buildIR(irDir, "Nope");
+    eq("build-ir: an unmatched --mode exits 2", bad.status, 2);
+    check(
+      "build-ir: …reporting the modes that do exist",
+      /--mode "Nope" is unknown/.test(bad.stderr ?? "") && /\[Light, Dark\]/.test(bad.stderr ?? ""),
+      (bad.stderr ?? "").slice(-300),
+    );
+    eq("build-ir: …and leaves the previous IR untouched", readManifest(irDir).activeMode, before);
+
+    // Omitting --mode is unchanged: the catalog's primary, no requestedMode, re-run is a no-op.
+    const plainDir = path.join(tmp, "ir-plain");
+    const plain = buildIR(plainDir);
+    check("build-ir: no --mode exits 0", plain.status === 0, (plain.stderr ?? "").slice(-400));
+    eq("build-ir: no --mode still roots the primary", readManifest(plainDir).activeMode, "Light");
+    eq("build-ir: no --mode records no request", readManifest(plainDir).requestedMode, null);
+    eq(
+      "build-ir: re-running with no --mode is still a no-op",
+      JSON.parse(buildIR(plainDir).stdout ?? "{}").noop,
+      true,
+    );
+
+    // The anti-drift assertion the issue asks for: for every spelling, build-ir and theme-gen
+    // reach the SAME verdict — accepted or rejected — and the accepted ones land on the same mode.
+    // Compared as observable CLI behaviour, so a second matcher reintroduced in either one fails.
+    let n = 0;
+    for (const [spelling, expect] of [
+      ["Dark", "Dark"],
+      ["dark", "Dark"],
+      ["DARK", "Dark"],
+      ["Light", "Light"],
+      ["Nope", null],
+      ["mode-dark", null], // the CSS class, not the mode: a near-miss must stay a miss in both
+    ] as [string, string | null][]) {
+      const b = buildIR(path.join(tmp, `x${n++}`), spelling);
+      const t = run("theme-gen.mts", [
+        plainDir,
+        "--framework",
+        "web",
+        "--no-census",
+        "--mode",
+        spelling,
+      ]);
+      check(
+        `cross-CLI: build-ir and theme-gen agree that "${spelling}" is ${expect ? "a mode" : "not a mode"}`,
+        (b.status === 0) === (t.status === 0) && (b.status === 0) === (expect !== null),
+        `build-ir ${b.status} / theme-gen ${t.status}`,
+      );
+      if (expect === null) {
+        eq(`cross-CLI: "${spelling}" is exit 2 in both`, [b.status, t.status], [2, 2]);
+        continue;
+      }
+      eq(
+        `cross-CLI: build-ir pins "${spelling}" to ${expect}`,
+        readManifest(path.join(tmp, `x${n - 1}`)).activeMode,
+        expect,
+      );
+      // theme-gen's verdict is observable in WHICH mode's values reached :root.
+      const root = /:root \{([^}]*)\}/.exec(t.stdout ?? "")?.[1] ?? "";
+      const wantHex = expect === "Dark" ? "#1a1a1a" : "#ffffff";
+      check(
+        `cross-CLI: theme-gen roots "${spelling}" at ${expect}`,
+        root.includes(`--color-surface-card: ${wantHex};`),
+        root,
+      );
+    }
+
+    // codegen is the third `--mode` entry point. It cannot re-pin anything — it reads the IR as
+    // built — so its flag is only a coherence guard, but it compared by string equality too, which
+    // made it cry wolf about a pipeline threaded with a perfectly valid spelling of its own mode.
+    const cgOut = path.join(tmp, "cg");
+    const coherence = (mode: string) =>
+      run("codegen.mts", [plainDir, "Chip", "--framework", "web", "--out", cgOut, "--mode", mode])
+        .stderr ?? "";
+    const warned = (s: string) => /codegen --mode .* ≠ manifest\.activeMode/.test(s);
+    check("codegen: the mode the IR was built at does not warn", !warned(coherence("Light")));
+    check("codegen: …nor does another spelling of it", !warned(coherence("light")));
+    check("codegen: a genuinely different mode still warns", warned(coherence("Dark")));
+    check("codegen: a name that is no mode at all still warns", warned(coherence("Nope")));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── naming: component identifiers cannot start a digit (#68) ────────────────
+// compIdent PascalCased without ever guarding the FIRST character, so a set named
+// "3D Card" emitted `export function 3DCard(props: 3DCardProps)` — a SyntaxError, i.e. the
+// whole generated folder failed to parse. Same defect class propIdent was given a guard for
+// in #49; the sweep below is what keeps the two helpers from diverging again.
+eq("compIdent: leading digit prefixed", compIdent("3D Card"), "Comp3DCard");
+eq("compIdent: digit after punctuation too", compIdent("2-up Grid"), "Comp2UpGrid");
+eq("compIdent: all-digit name", compIdent("404 Page"), "Comp404Page");
+// The prefix is a guard, not a rename: a name that already starts an identifier is
+// untouched, byte for byte, and the empty fallback keeps its own spelling.
+eq("compIdent: already-safe name unchanged", compIdent("Product Card"), "ProductCard");
+eq("compIdent: idempotent", compIdent(compIdent("3D Card")), "Comp3DCard");
+eq("compIdent: transliteration still precedes the guard", compIdent("3 öğütücü"), "Comp3Ogutucu");
+{
+  // The same end-to-end proof propIdent carries: whatever a Figma set is named, the emitted
+  // component identifier must be bindable — it is the `export function` name, the `<Comp/>`
+  // JSX tag, the named import a PARENT component references it by, and the `${Comp}Props`
+  // type. A reserved word cannot occur (PascalCase upper-cases the first letter of every
+  // word) but is swept anyway, so a future change to the casing rule is caught here.
+  const names = [
+    ...RESERVED_WORDS,
+    "3D Card",
+    "2-up Grid",
+    "404 Page",
+    "941",
+    "Product Card",
+    "",
+    "—",
+    "  ",
+    "a/b",
+    "öğütücü seçimi",
+    "iade talebi alındı",
+  ];
+  const bad = names.filter((n) => !isSafeIdent(compIdent(n)));
+  check("compIdent: arbitrary set names → bindable identifiers", bad.length === 0, bad.join(", "));
+}
+{
+  // …and the end-to-end half, because the identifier is emitted from four separate call
+  // sites (the `export function`, the `${Comp}Props` type, each variant component, and the
+  // named import a PARENT references it by) which must agree character-for-character. Drives
+  // the real CLI over a synthetic IR whose set is named "3D Card".
+  const codegenPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli", "codegen.mts");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-compident-"));
+  try {
+    const irDir = path.join(tmp, "ir");
+    fs.mkdirSync(path.join(irDir, "components"), { recursive: true });
+    fs.mkdirSync(path.join(irDir, "screens"), { recursive: true });
+    const box = { x: 0, y: 0, w: 100, h: 100 };
+    fs.writeFileSync(
+      path.join(irDir, "screens", "s.json"),
+      JSON.stringify({
+        id: "n_root",
+        path: "/",
+        guid: "1:0",
+        type: "frame",
+        name: "Screen",
+        box: { x: 0, y: 0, w: 400, h: 400 },
+        children: [
+          { id: "n_a", path: "/a", guid: "1:10", type: "frame", name: "Card", box, children: [] },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "manifest.json"),
+      JSON.stringify({ artifacts: { screens: ["screens/s.json"] } }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "components", "3d-card.json"),
+      JSON.stringify({
+        name: "3D Card",
+        guid: "1:1",
+        axes: { State: ["on"] },
+        variants: [{ guidKey: "1:10", props: { State: "on" }, rawName: "State=on", bindings: [] }],
+      }),
+    );
+    const outDir = path.join(tmp, "out");
+    const cg = spawnSync(
+      process.argv[0],
+      [codegenPath, irDir, "3D Card", "--framework", "web", "--out", outDir],
+      { encoding: "utf8" },
+    );
+    check("compIdent e2e: codegen exits 0", cg.status === 0, (cg.stderr ?? "").slice(-400));
+    const index = fs.readFileSync(path.join(outDir, "3d-card", "index.tsx"), "utf8");
+    const types = fs.readFileSync(path.join(outDir, "3d-card", "types.ts"), "utf8");
+    const exported = /export function (\w+)\(props: (\w+)Props\)/.exec(index);
+    check(
+      "compIdent e2e: the exported component is a legal identifier",
+      !!exported && isSafeIdent(exported[1]),
+      index.slice(0, 400),
+    );
+    eq("compIdent e2e: export and Props type agree", exported?.[1], exported?.[2]);
+    check(
+      "compIdent e2e: the Props type is declared under the same name",
+      types.includes(`export type ${exported?.[1]}Props = {`),
+      types.slice(0, 400),
+    );
+    // Traceability: the Figma name is lost by the munging, so the doc comment has to carry it.
+    check(
+      "compIdent e2e: the original Figma name rides along in a doc comment",
+      /\/\*\* Figma component set: "3D Card"\. \*\//.test(index),
+      index.slice(0, 600),
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // ── text decoration: underline/strike-through survives into the IR (#70) ─────
 //
 // Nothing in the skill read `textDecoration` at all — `grep` came back empty across
@@ -3414,6 +3718,104 @@ if (fs.existsSync(decodePath)) {
   else console.error("  (live: 1273:19851 absent in decode — skipped)");
 } else {
   console.error(`  (live-fixture checks skipped — no decode at ${decodePath})`);
+}
+
+// ── screen IR: the hug/fill mapping is reachable from a screen, not just a scaffold ──
+//
+// `sizingLines()` was written for codegen, whose input is a COMPONENT node; the screens go
+// out as JSON for an assemble agent to read by hand, and `agents/assemble-screen.md` now
+// states the same per-axis rule and names that function as its normative implementation.
+// That pointer is only honest if the emitted screen file actually carries what the mapping
+// needs — both sizing axes on every auto-layout node, and `parentMode` on every child of one
+// (without it a filling child cannot say WHICH axis fills, and the agent falls back to the
+// box). So run the real mapping over the real emitted screen, not over hand-built nodes:
+// these assertions fail if a future change to build-ir stops emitting a field the prose in
+// the prompt tells an agent to read.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-screen-sizing-"));
+  try {
+    const build = spawnSync(
+      process.argv[0],
+      [path.join(here, "cli", "build-ir.mts"), fixture, "--scope", "all", "--out", tmp],
+      { encoding: "utf8" },
+    );
+    check("screen sizing: build-ir exits 0", build.status === 0, (build.stderr ?? "").slice(-400));
+    const card: IRNode = JSON.parse(
+      fs.readFileSync(path.join(tmp, "screens", "fixture-page", "card.json"), "utf8"),
+    );
+    const nodes: IRNode[] = [];
+    const walk = (n: IRNode) => {
+      nodes.push(n);
+      (n.children ?? []).forEach(walk);
+    };
+    walk(card);
+    const byName = (name: string) => nodes.find((n) => n.name === name)!;
+    const HUG_W = "width: 'fit-content', // hug";
+    const HUG_H = "height: 'fit-content', // hug";
+
+    // --- the fields the prompt tells an agent to read are all on the emitted node ---
+    const stacks = nodes.filter((n) => n.layout);
+    check("screen sizing: the screen has auto-layout nodes to test", stacks.length >= 3);
+    eq(
+      "screen sizing: every auto-layout node states BOTH axes",
+      stacks.filter((n) => !n.layout!.primarySizing || !n.layout!.counterSizing).map((n) => n.name),
+      [],
+    );
+    eq(
+      "screen sizing: every child of an auto-layout node carries parentMode",
+      stacks
+        .flatMap((n) => (n.children ?? []).map((c) => [c.name, c.parentMode ?? null] as const))
+        .filter(([, m]) => m == null)
+        .map(([name]) => name),
+      [],
+    );
+
+    // --- and the mapping over those nodes says hug/fill where the design does ---
+    // Card: a column whose primary (vertical) axis hugs — 96px is what its two children
+    // happened to measure, and emitting it is exactly the freeze #43 removed from codegen.
+    eq("screen sizing: a hugging column emits fit-content height", sizingLines(byName("Card")), [
+      "width: 240,",
+      HUG_H,
+    ]);
+    // Body: `alignSelf: 'stretch'` in a COLUMN parent fills the CROSS axis = width. Which
+    // axis that is is knowable only from parentMode; the child alone says "stretch".
+    eq("screen sizing: a stretched child omits the filled axis", sizingLines(byName("Body")), [
+      HUG_H,
+    ]);
+    // TEXT states the same intent in autoResize, and both spellings occur on this screen.
+    eq("screen sizing: TEXT autoResize HEIGHT hugs vertically", sizingLines(byName("Title")), [
+      "width: 208,",
+      HUG_H,
+    ]);
+    eq("screen sizing: TEXT autoResize WIDTH_AND_HEIGHT hugs both", sizingLines(byName("Label")), [
+      HUG_W,
+      HUG_H,
+    ]);
+    // The other direction: a node with no sizing intent still emits its measured box, so the
+    // rule narrows what gets frozen rather than dropping sizes wholesale.
+    eq("screen sizing: a plain node keeps its measured box", sizingLines(byName("Ribbon")), [
+      "width: 24,",
+      "height: 24,",
+    ]);
+    // Nothing on this screen may emit a pixel count on an axis the IR calls hug or fill: the
+    // whole tree, not just the nodes named above.
+    const frozen = nodes.filter((n) => {
+      const lines = sizingLines(n);
+      const hugs = n.layout?.primarySizing === "hug" || n.layout?.counterSizing === "hug";
+      const fills = !!(n.grow || n.alignSelf === "stretch") && !!n.parentMode;
+      const px = lines.filter((l) => /: \d/.test(l)).length;
+      return (hugs || fills) && px > 1; // at most ONE axis may still be a number
+    });
+    eq(
+      "screen sizing: no hugging/filling node freezes both axes",
+      frozen.map((n) => n.name),
+      [],
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 console.error(`\nselftest: ${pass} passed, ${fail} failed`);

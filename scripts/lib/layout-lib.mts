@@ -96,6 +96,13 @@ function sizingModes(n: IRNode): { w: SizingMode; h: SizingMode } {
 // hug is spelled `fit-content`, NOT `auto`: on a block-level box `width: auto` means
 // FILL, which is wrong in exactly the case that matters. A zero measurement emits
 // nothing, as before — a 0-px box is a decode artefact, not a design intent.
+//
+// This function is also the NORMATIVE statement of the mapping for the two agent prompts,
+// which restate it in prose because they write code by hand rather than calling in:
+// `agents/assemble-screen.md` (deriving it from the screen IR) and `agents/elevate.md`
+// (preserving what codegen already emitted). They drifted apart once already — an assemble
+// agent freezing every axis to `box` undid this per-axis logic one layer up — so if the
+// mapping changes here, change both prompts in the same commit.
 export function sizingLines(n: IRNode): string[] {
   const box = n.box;
   if (!box) return [];
