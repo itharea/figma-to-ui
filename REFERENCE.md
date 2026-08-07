@@ -229,6 +229,12 @@ standalone logos/illustrations. Vector shapes index into `message.blobs`:
   transform is dropped (it becomes the viewBox origin).
 - `windingRule: "ODD"` → `fill-rule="evenodd"`, else `nonzero`.
 - Fill color from `fillPaints[0].color`; multiply node × paint opacities.
+- `node.mask === true` marks a **clip region, not paint** — the node and its whole subtree are
+  skipped. (Descending into one exports the clip shape as ordinary artwork: SVG-imported
+  drawings carry a mask whose only child is an opaque black rectangle the size of the frame,
+  which then paints over everything behind it.) The clip is not re-emitted as a `<clipPath>`,
+  which is exact when the mask reveals a full-bounds rectangle; any other reveal shape is still
+  skipped but warns on stderr, so its art exporting uncropped is visible rather than silent.
 
 ```sh
 node cli/export-svg.mts $WORK/msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
