@@ -1,5 +1,7 @@
 // svg-lib.mts — pure vector-geometry extraction shared by export-svg.mts (the CLI)
-// and codegen.mts (internal icon export). No side effects, no process/argv/fs.
+// and codegen.mts (internal icon export). No process/argv/fs; the only output is the
+// returned geometry, plus a stderr warning for the one case we cannot represent (a mask
+// whose reveal is not a full-bounds rectangle — see `walk`).
 //
 // A .fig vector stores its outline in `fillGeometry`/`strokeGeometry` blobs:
 //   blob byte stream = [uint8 opcode][float32 LE args…]
@@ -290,6 +292,46 @@ function parseMatrix(s: string): Mat {
   return [v[0], v[2], v[4], v[1], v[3], v[5]] as unknown as Mat;
 }
 
+// Tolerance for the mask-shape test below. Path coords are already rounded to 2dp by
+// decodePath, so anything under half a hundredth of a unit is quantisation noise.
+const RECT_EPS = 0.01;
+
+// Is `d`, once `mat` is applied, an axis-aligned rectangle — and if so, what box does it cover?
+// This is the shape test behind the mask diagnostic in `extractGeometry`: a mask that reveals a
+// plain full-bounds rectangle can be dropped outright, anything else is a real clip we cannot
+// currently honour. Straight edges only — a curve command means a rounded corner or a freeform
+// outline, and neither reveals the full box. The four corners are checked in the TRANSFORMED
+// frame, so a rect rotated by a multiple of 90° still qualifies while one rotated by 45° does not.
+function axisAlignedRect(d: string, mat: Mat): BBox | null {
+  const toks = d.match(/[MLCQZ]|-?\d*\.?\d+(?:e-?\d+)?/gi) ?? [];
+  const pts: [number, number][] = [];
+  for (let i = 0; i < toks.length;) {
+    const c = toks[i++];
+    if (c === "M" || c === "L") {
+      const x = parseFloat(toks[i++]),
+        y = parseFloat(toks[i++]);
+      pts.push([mat[0] * x + mat[1] * y + mat[2], mat[3] * x + mat[4] * y + mat[5]]);
+    } else if (c !== "Z") return null;
+  }
+  // Four corners, with the closing point optionally repeated (`M a L b L c L d L a Z`).
+  if (pts.length === 5 && Math.hypot(pts[4][0] - pts[0][0], pts[4][1] - pts[0][1]) < RECT_EPS)
+    pts.pop();
+  if (pts.length !== 4) return null;
+  const minX = Math.min(...pts.map((p) => p[0])),
+    maxX = Math.max(...pts.map((p) => p[0])),
+    minY = Math.min(...pts.map((p) => p[1])),
+    maxY = Math.max(...pts.map((p) => p[1]));
+  if (maxX - minX < RECT_EPS || maxY - minY < RECT_EPS) return null; // degenerate: a line
+  const corners = new Set<string>();
+  for (const [x, y] of pts) {
+    const cx = Math.abs(x - minX) < RECT_EPS ? 0 : Math.abs(x - maxX) < RECT_EPS ? 1 : -1;
+    const cy = Math.abs(y - minY) < RECT_EPS ? 0 : Math.abs(y - maxY) < RECT_EPS ? 1 : -1;
+    if (cx < 0 || cy < 0) return null; // a point off the bounding box ⇒ not a rectangle
+    corners.add(`${cx}${cy}`);
+  }
+  return corners.size === 4 ? { minX, minY, maxX, maxY } : null;
+}
+
 // Extract the geometry of the node at `guidKey`, following symbolData.symbolID into
 // masters exactly like the legacy export-svg walk. Pure: reads only from `index`.
 export function extractGeometry(index: SvgIndex, guidKey: string): SvgGeometry {
@@ -358,10 +400,68 @@ export function extractGeometry(index: SvgIndex, guidKey: string): SvgGeometry {
   let natW = Math.ceil(rootNode0?.size?.x ?? 0),
     natH = Math.ceil(rootNode0?.size?.y ?? 0);
 
+  // Does a mask's subtree contain an axis-aligned rectangle that already covers the whole
+  // frame? That is the one case where dropping the mask outright (see `walk`) is lossless: the
+  // reveal is everything, so there is nothing left to clip. Any rectangle in the subtree is
+  // enough — a mask reveals the UNION of its shapes, so one full-bounds rect makes the rest
+  // irrelevant. Mirrors `walk`'s transform composition and symbol descent so the box is
+  // measured in the same coordinate frame the geometry would have been emitted in.
+  const maskCoversFrame = (k: string, mat: Mat, frame: { w: number; h: number }): boolean => {
+    let covers = false;
+    const visit = (kk: string, m: Mat) => {
+      const n = byKey.get(kk);
+      if (!n || n.visible === false || covers) return;
+      for (const g of [...(n.fillGeometry ?? []), ...(n.strokeGeometry ?? [])]) {
+        const bb = axisAlignedRect(decodePath(blobs, g.commandsBlob), m);
+        if (
+          bb &&
+          bb.minX <= RECT_EPS &&
+          bb.minY <= RECT_EPS &&
+          bb.maxX >= frame.w - RECT_EPS &&
+          bb.maxY >= frame.h - RECT_EPS
+        ) {
+          covers = true;
+          return;
+        }
+      }
+      const descend = (ck: string) => {
+        const cn = byKey.get(ck);
+        if (cn) visit(ck, mul(m, nodeMat(cn)));
+      };
+      if (n.symbolData?.symbolID)
+        for (const c of children.get(key(n.symbolData.symbolID)) ?? []) descend(key(c.guid));
+      for (const c of children.get(kk) ?? []) descend(key(c.guid));
+    };
+    visit(k, mat);
+    return covers;
+  };
+
   const walk = (k: string, mat: Mat, isRoot: boolean, frame: { w: number; h: number }) => {
     const n = byKey.get(k);
     if (!n || n.visible === false) return;
     const m = isRoot ? I : mul(mat, nodeMat(n)); // root transform drops → becomes the viewBox origin
+    // A MASK node's subtree is a CLIP REGION, not paint. Figma's SVG importer wraps pasted
+    // artwork in a clip-path group → a mask node (`mask: true`) whose only child is the clip
+    // rectangle, filled opaque black. Walking into it emitted that rectangle as ordinary
+    // geometry — an opaque black rect the exact size of the frame, painted over everything
+    // behind it (observed on an illustration set: path 0 the real ground, path 1 an identical
+    // black rect on top). The mask shape must never be drawn; skip the node and its subtree.
+    //
+    // Not drawing the clip also means not APPLYING it. That is lossless only when the mask
+    // reveals a full-bounds rectangle — which is exactly what that importer emits, and what a
+    // consumer would re-crop at its own frame anyway. A mask that is a real shape (a
+    // non-rectangular reveal, or a rect smaller than the frame) needs a genuine <clipPath>,
+    // which this walker does not model: the art it was meant to crop comes out UNCLIPPED.
+    // Warn rather than fail silently, so the case surfaces the first time someone exports one.
+    if (n.mask === true) {
+      if (!maskCoversFrame(k, m, frame))
+        console.error(
+          `⚠ svg-lib: mask ${k}${n.name ? ` ("${n.name}")` : ""} is not a full-bounds rectangle ` +
+            `over the ${frame.w}×${frame.h} frame — skipped WITHOUT applying its clip, so the ` +
+            `art it masks is exported unclipped (<clipPath> emission is not implemented)`,
+        );
+      return;
+    }
     if (n.type !== "FRAME" && n.type !== "SECTION") {
       emit(n, m);
       if (frame.w > natW) natW = frame.w;
