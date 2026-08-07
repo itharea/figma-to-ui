@@ -286,7 +286,11 @@ screen IR path, and out file), the shared elevated components dir, and the theme
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
 rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `color` **and** `stroke` — a node can
 be filled and outlined at once — plus `absX/absY` for absolute children). It
-binds variable-backed values to the theme and changes no resolved value.
+binds variable-backed values to the theme and changes no resolved value. Size is read **per axis**
+from `layout.primarySizing`/`counterSizing` (mapped to width/height through `layout.mode`) and from
+the child's `grow`/`alignSelf` against `parentMode` — hug is `'fit-content'`, a filled axis is
+omitted, and `box` is the number only where the axis is fixed. Freezing a hugging or filling axis
+to its measured box is the same defect as in the scaffold, one layer up.
 
 **Brownfield?** Build with `build-ir … --theme <path>` and map fig values to repo tokens **by value,
 never by name**; respect intentional divergence. A by-value mismatch is surfaced as a `// REVIEW`

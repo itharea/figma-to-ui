@@ -543,7 +543,9 @@ so deterministic logic is written once and never drifts: `figma-index.mts`,
 `naming.mts`, `resolve-lib.mts`, `screens-lib.mts`, `components-lib.mts`,
 `reconcile-lib.mts`, `tokens-lib.mts`, `mapping-lib.mts`, `theme-lib.mts`,
 `intent-lib.mts`, `ir-lib.mts`, `raster-lib.mts`, `describe-lib.mts`,
-`svg-lib.mts`. Run the regression suite with `npm test` (`selftest.mts`).
+`svg-lib.mts`, `layout-lib.mts` (whose `sizingLines()` is the normative per-axis
+hug/fill/fixed mapping — the agent prompts restate it, so keep them in step).
+Run the regression suite with `npm test` (`selftest.mts`).
 
 `scripts/fixtures/decode-fixture.json` is a small **synthetic, committed, decode-shaped**
 message (no `.fig`, no local artifact) that `selftest.mts` drives through the real pipeline —

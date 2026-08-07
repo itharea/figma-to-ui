@@ -3049,5 +3049,103 @@ if (fs.existsSync(decodePath)) {
   console.error(`  (live-fixture checks skipped — no decode at ${decodePath})`);
 }
 
+// ── screen IR: the hug/fill mapping is reachable from a screen, not just a scaffold ──
+//
+// `sizingLines()` was written for codegen, whose input is a COMPONENT node; the screens go
+// out as JSON for an assemble agent to read by hand, and `agents/assemble-screen.md` now
+// states the same per-axis rule and names that function as its normative implementation.
+// That pointer is only honest if the emitted screen file actually carries what the mapping
+// needs — both sizing axes on every auto-layout node, and `parentMode` on every child of one
+// (without it a filling child cannot say WHICH axis fills, and the agent falls back to the
+// box). So run the real mapping over the real emitted screen, not over hand-built nodes:
+// these assertions fail if a future change to build-ir stops emitting a field the prose in
+// the prompt tells an agent to read.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-screen-sizing-"));
+  try {
+    const build = spawnSync(
+      process.argv[0],
+      [path.join(here, "cli", "build-ir.mts"), fixture, "--scope", "all", "--out", tmp],
+      { encoding: "utf8" },
+    );
+    check("screen sizing: build-ir exits 0", build.status === 0, (build.stderr ?? "").slice(-400));
+    const card: IRNode = JSON.parse(
+      fs.readFileSync(path.join(tmp, "screens", "fixture-page", "card.json"), "utf8"),
+    );
+    const nodes: IRNode[] = [];
+    const walk = (n: IRNode) => {
+      nodes.push(n);
+      (n.children ?? []).forEach(walk);
+    };
+    walk(card);
+    const byName = (name: string) => nodes.find((n) => n.name === name)!;
+    const HUG_W = "width: 'fit-content', // hug";
+    const HUG_H = "height: 'fit-content', // hug";
+
+    // --- the fields the prompt tells an agent to read are all on the emitted node ---
+    const stacks = nodes.filter((n) => n.layout);
+    check("screen sizing: the screen has auto-layout nodes to test", stacks.length >= 3);
+    eq(
+      "screen sizing: every auto-layout node states BOTH axes",
+      stacks.filter((n) => !n.layout!.primarySizing || !n.layout!.counterSizing).map((n) => n.name),
+      [],
+    );
+    eq(
+      "screen sizing: every child of an auto-layout node carries parentMode",
+      stacks
+        .flatMap((n) => (n.children ?? []).map((c) => [c.name, c.parentMode ?? null] as const))
+        .filter(([, m]) => m == null)
+        .map(([name]) => name),
+      [],
+    );
+
+    // --- and the mapping over those nodes says hug/fill where the design does ---
+    // Card: a column whose primary (vertical) axis hugs — 96px is what its two children
+    // happened to measure, and emitting it is exactly the freeze #43 removed from codegen.
+    eq("screen sizing: a hugging column emits fit-content height", sizingLines(byName("Card")), [
+      "width: 240,",
+      HUG_H,
+    ]);
+    // Body: `alignSelf: 'stretch'` in a COLUMN parent fills the CROSS axis = width. Which
+    // axis that is is knowable only from parentMode; the child alone says "stretch".
+    eq("screen sizing: a stretched child omits the filled axis", sizingLines(byName("Body")), [
+      HUG_H,
+    ]);
+    // TEXT states the same intent in autoResize, and both spellings occur on this screen.
+    eq("screen sizing: TEXT autoResize HEIGHT hugs vertically", sizingLines(byName("Title")), [
+      "width: 208,",
+      HUG_H,
+    ]);
+    eq("screen sizing: TEXT autoResize WIDTH_AND_HEIGHT hugs both", sizingLines(byName("Label")), [
+      HUG_W,
+      HUG_H,
+    ]);
+    // The other direction: a node with no sizing intent still emits its measured box, so the
+    // rule narrows what gets frozen rather than dropping sizes wholesale.
+    eq("screen sizing: a plain node keeps its measured box", sizingLines(byName("Ribbon")), [
+      "width: 24,",
+      "height: 24,",
+    ]);
+    // Nothing on this screen may emit a pixel count on an axis the IR calls hug or fill: the
+    // whole tree, not just the nodes named above.
+    const frozen = nodes.filter((n) => {
+      const lines = sizingLines(n);
+      const hugs = n.layout?.primarySizing === "hug" || n.layout?.counterSizing === "hug";
+      const fills = !!(n.grow || n.alignSelf === "stretch") && !!n.parentMode;
+      const px = lines.filter((l) => /: \d/.test(l)).length;
+      return (hugs || fills) && px > 1; // at most ONE axis may still be a number
+    });
+    eq(
+      "screen sizing: no hugging/filling node freezes both axes",
+      frozen.map((n) => n.name),
+      [],
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 console.error(`\nselftest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
