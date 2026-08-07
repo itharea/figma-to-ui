@@ -17,7 +17,7 @@ import {
   disambiguateJustify,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
-import { cornerRadiusOf } from "./lib/screens-lib.mts";
+import { buildLayout, cornerRadiusOf } from "./lib/screens-lib.mts";
 import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
 import {
   cssVarName,
@@ -336,6 +336,85 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   // Uniform cornerRadius fallback, and the empty case.
   eq("corner uniform fallback → number", cornerRadiusOf({ cornerRadius: 12 }), 12);
   eq("corner none → undefined", cornerRadiusOf({}), undefined);
+}
+
+// ── screens-lib: buildLayout sizing defaults (the two axes default OPPOSITELY) ──
+{
+  // stackPrimarySizing/stackCounterSizing are omit-when-default, so ABSENT is a real
+  // value: primary absent ⇒ hug, counter absent ⇒ fixed. All four combinations, on a
+  // row — the fallback must depend on the FIELD, never on presence alone.
+  eq("sizing both absent → hug / fixed", buildLayout({ stackMode: "HORIZONTAL" }), {
+    mode: "row",
+    primarySizing: "hug",
+    counterSizing: "fixed",
+  });
+  eq(
+    "sizing primary FIXED, counter absent → fixed / fixed",
+    buildLayout({ stackMode: "HORIZONTAL", stackPrimarySizing: "FIXED" }),
+    { mode: "row", primarySizing: "fixed", counterSizing: "fixed" },
+  );
+  eq(
+    "sizing primary absent, counter RESIZE_TO_FIT → hug / hug",
+    buildLayout({ stackMode: "HORIZONTAL", stackCounterSizing: "RESIZE_TO_FIT" }),
+    { mode: "row", primarySizing: "hug", counterSizing: "hug" },
+  );
+  eq(
+    "sizing both written → fixed / hug",
+    buildLayout({
+      stackMode: "HORIZONTAL",
+      stackPrimarySizing: "FIXED",
+      stackCounterSizing: "RESIZE_TO_FIT",
+    }),
+    { mode: "row", primarySizing: "fixed", counterSizing: "hug" },
+  );
+  // The implicit-size variant is still a hug on either axis.
+  eq(
+    "sizing RESIZE_TO_FIT_WITH_IMPLICIT_SIZE → hug / hug",
+    buildLayout({
+      stackMode: "HORIZONTAL",
+      stackPrimarySizing: "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE",
+      stackCounterSizing: "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE",
+    }),
+    { mode: "row", primarySizing: "hug", counterSizing: "hug" },
+  );
+  // Primary/counter are the STACK's own axes: the mapping is identical for a column,
+  // so the same raw bytes must not flip meaning with stackMode.
+  eq("sizing column both absent → hug / fixed", buildLayout({ stackMode: "VERTICAL" }), {
+    mode: "column",
+    primarySizing: "hug",
+    counterSizing: "fixed",
+  });
+  eq(
+    "sizing column both written → fixed / hug",
+    buildLayout({
+      stackMode: "VERTICAL",
+      stackPrimarySizing: "FIXED",
+      stackCounterSizing: "RESIZE_TO_FIT",
+    }),
+    { mode: "column", primarySizing: "fixed", counterSizing: "hug" },
+  );
+  // Regression guard: sizing is always emitted, but every other field keeps its
+  // omit-when-absent behaviour, and a non-stack node still gets no layout block at all.
+  eq(
+    "layout keeps omit-when-absent for gap/padding/justify/align/wrap",
+    buildLayout({
+      stackMode: "HORIZONTAL",
+      stackSpacing: 8,
+      stackVerticalPadding: 4,
+      stackPrimaryAlignItems: "SPACE_BETWEEN",
+      stackWrap: "WRAP",
+    }),
+    {
+      mode: "row",
+      primarySizing: "hug",
+      counterSizing: "fixed",
+      gap: 8,
+      paddingTop: 4,
+      justify: "space-between",
+      wrap: true,
+    },
+  );
+  eq("layout absent stackMode → null", buildLayout({ stackMode: "NONE" }), null);
 }
 
 // ── resolve-lib: hand-built index guards (a real .fig cannot author these) ───

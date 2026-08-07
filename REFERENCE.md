@@ -102,9 +102,22 @@ about undecided content.
 | `stackVerticalPadding`, `stackHorizontalPadding`, `stackPaddingBottom`, `stackPaddingRight` | `paddingTop`, `paddingLeft`, `paddingBottom`, `paddingRight` (yes — the first two are **top/left**)                                                                                                                                 |
 | `stackPrimaryAlignItems`                                                                    | `justifyContent` (`MIN`/`CENTER`/`MAX`/`SPACE_EVENLY`/`SPACE_BETWEEN`). Codegen/render disambiguate `SPACE_EVENLY`→`SPACE_BETWEEN` by **resolved child geometry** (in-flow children flush at both main-axis ends → `space-between`) |
 | `stackCounterAlignItems`                                                                    | `alignItems`                                                                                                                                                                                                                        |
-| `stackPrimarySizing` / `stackCounterSizing`                                                 | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug`                                           |
+| `stackPrimarySizing` / `stackCounterSizing`                                                 | container self-sizing on main/cross axis: `FIXED` → fixed `width`/`height`; `RESIZE_TO_FIT…` → **hug** (auto, content-driven). IR `layout.primarySizing`/`counterSizing` = `fixed`\|`hug` (see the sizing-defaults note below)      |
 | `stackWrap: "WRAP"`                                                                         | `flexWrap: wrap`. IR `layout.wrap = true`                                                                                                                                                                                           |
 | absent/`NONE`                                                                               | absolute positioning via child `transform`                                                                                                                                                                                          |
+
+**Sizing defaults — the two axes default OPPOSITELY.** `stackPrimarySizing` and
+`stackCounterSizing` are written only when they hold a NON-default value, so an
+absent field is a real value, not "unknown":
+
+| field                | absent means              | value ever written |
+| -------------------- | ------------------------- | ------------------ |
+| `stackPrimarySizing` | `RESIZE_TO_FIT` → **hug** | `FIXED`            |
+| `stackCounterSizing` | `FIXED` → **fixed**       | `RESIZE_TO_FIT…`   |
+
+The IR therefore resolves both axes and **always** emits
+`layout.primarySizing`/`counterSizing`; treating an absent primary as `fixed`
+silently freezes every hugging frame at whatever size it happened to have.
 
 **Per-child sizing & constraints** (on the child node, not the container):
 
@@ -297,10 +310,13 @@ hex?, var?, varGuid?, stops?:[{position,hex}], imageHash?, opacity?}`.
     `strokes[].weight` is kept.
   - `effects[]` — `{type, hex, offsetX, offsetY, radius, spread?}`
     (DROP_SHADOW/INNER_SHADOW/*_BLUR). `opacity` only when < 1.
-- **`layout?`** `{mode:"row"|"column", gap?, paddingTop?, paddingRight?,
-paddingBottom?, paddingLeft?, justify?, align?, primarySizing?, counterSizing?,
+- **`layout?`** `{mode:"row"|"column", primarySizing, counterSizing, gap?,
+paddingTop?, paddingRight?, paddingBottom?, paddingLeft?, justify?, align?,
 wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
-  absolutely positioned (use `box.absX/absY`).
+  absolutely positioned (use `box.absX/absY`). `primarySizing`/`counterSizing`
+  are **always** present when `layout` is (`fixed`\|`hug`) — the raw fields are
+  omit-when-default with opposite per-axis defaults, so absence is resolved here
+  rather than by each consumer.
 - **Responsive child fields:** `grow`, `alignSelf`, `positioning:"absolute"`,
   `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`.
 - **`box`** `{x,y,w,h,absX,absY}` — `x/y` relative to parent; `absX/absY`
