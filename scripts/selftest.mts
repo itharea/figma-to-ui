@@ -1756,6 +1756,180 @@ const bind = (node: string, field: string) => [{ node, field }];
   );
 }
 
+// ── codegen --images: raster refs resolve against the MODULE, not the page ───
+// The emission lives in the CLI itself (nodeStyleBody + variantFile close over the parsed
+// flags), so this drives the real binary over a SYNTHETIC IR + images dir and asserts on the
+// emitted variant files. Covers both halves of the defect: the document-relative URL, and
+// the `background` shorthand sitting next to the `backgroundImage` longhand — React patches
+// only the keys whose values changed, so re-applying the shorthand on a variant change
+// silently resets background-image to none.
+{
+  const codegenPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli", "codegen.mts");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-codegen-"));
+  try {
+    // Two rasters whose content hashes share a long prefix: the import identifier derived
+    // from a hash-named file has to stay unique (and a valid identifier) even then.
+    const hashA = "aaaaaaaaaaaa1111";
+    const hashB = "aaaaaaaaaaaa2222";
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // magic bytes only
+    const imagesDir = path.join(tmp, "images");
+    fs.mkdirSync(imagesDir, { recursive: true });
+    fs.writeFileSync(path.join(imagesDir, hashA), png); // extension-less, as the .fig stores it
+    fs.writeFileSync(path.join(imagesDir, hashB), png);
+
+    const irDir = path.join(tmp, "ir");
+    fs.mkdirSync(path.join(irDir, "components"), { recursive: true });
+    fs.mkdirSync(path.join(irDir, "screens"), { recursive: true });
+    const box = (w: number, h: number) => ({ x: 0, y: 0, w, h });
+    // variant "photo": root carries a solid fill AND an image fill (the shorthand trap),
+    // its child carries a second, distinct image fill (the identifier-collision case).
+    const child = {
+      id: "n_photo",
+      path: "/photo",
+      guid: "1:11",
+      type: "frame",
+      name: "Photo",
+      box: box(100, 60),
+      style: { fills: [{ type: "image", imageHash: hashB }] },
+      children: [],
+    };
+    const photoVariant = {
+      id: "n_a",
+      path: "/a",
+      guid: "1:10",
+      type: "frame",
+      name: "Tile",
+      box: box(100, 100),
+      style: {
+        fills: [
+          { type: "solid", hex: "#ff0000" },
+          { type: "image", imageHash: hashA },
+        ],
+      },
+      children: [child],
+    };
+    // variant "plain": a solid fill and nothing else — the regression guard.
+    const plainVariant = {
+      id: "n_b",
+      path: "/b",
+      guid: "1:20",
+      type: "frame",
+      name: "Tile",
+      box: box(100, 100),
+      style: { fills: [{ type: "solid", hex: "#00ff00" }] },
+      children: [],
+    };
+    fs.writeFileSync(
+      path.join(irDir, "screens", "s.json"),
+      JSON.stringify({
+        id: "n_root",
+        path: "/",
+        guid: "1:0",
+        type: "frame",
+        name: "Screen",
+        box: box(400, 400),
+        children: [photoVariant, plainVariant],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "manifest.json"),
+      JSON.stringify({ artifacts: { screens: ["screens/s.json"] } }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "components", "tile.json"),
+      JSON.stringify({
+        name: "Tile",
+        guid: "1:1",
+        axes: { State: ["photo", "plain"] },
+        variants: [
+          { guidKey: "1:10", props: { State: "photo" }, rawName: "State=photo", bindings: [] },
+          { guidKey: "1:20", props: { State: "plain" }, rawName: "State=plain", bindings: [] },
+        ],
+      }),
+    );
+
+    const run = (out: string, extra: string[]) =>
+      spawnSync(
+        process.argv[0],
+        [
+          codegenPath,
+          irDir,
+          "Tile",
+          "--framework",
+          "web",
+          "--out",
+          out,
+          "--images",
+          imagesDir,
+          ...extra,
+        ],
+        { encoding: "utf8" },
+      );
+    const read = (out: string, file: string) => {
+      const p = path.join(out, "tile", file);
+      return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+    };
+
+    const outBundler = path.join(tmp, "out-bundler");
+    const rb = run(outBundler, []);
+    check("codegen --images: run exits 0", rb.status === 0, (rb.stderr ?? "").slice(-300));
+    const photoFile = read(outBundler, "photo.tsx");
+    const plainFile = read(outBundler, "plain.tsx");
+
+    check(
+      "codegen --images: image fill emits a static import, not a page-relative url",
+      /^import asset_aaaaaaaaaaaa from '\.\/assets\/aaaaaaaaaaaa1111\.png';$/m.test(photoFile) &&
+        !/url\('\.\/assets\//.test(photoFile),
+      photoFile.slice(0, 400),
+    );
+    check(
+      "codegen --images: backgroundImage reads the bundler-resolved url",
+      photoFile.includes("backgroundImage: `url(${assetUrl(asset_aaaaaaaaaaaa)})`,"),
+      photoFile.slice(0, 400),
+    );
+    check(
+      "codegen --images: the url helper accepts a string OR a .src record",
+      /typeof a === 'string' \? a : a\.src/.test(photoFile),
+      photoFile.slice(0, 400),
+    );
+    {
+      const idents = [...photoFile.matchAll(/^import (\S+) from '\.\/assets\/(\S+)';$/gm)].map(
+        (m) => m[1],
+      );
+      eq("codegen --images: one import per distinct raster", idents.length, 2);
+      check(
+        "codegen --images: colliding hash prefixes get distinct valid identifiers",
+        new Set(idents).size === idents.length &&
+          idents.every((i) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(i)),
+        idents.join(", "),
+      );
+    }
+    check(
+      "codegen: image + solid fill emits backgroundColor, never the background shorthand",
+      /backgroundColor: '#ff0000',/.test(photoFile) && !/\bbackground:/.test(photoFile),
+      photoFile.slice(0, 400),
+    );
+    check(
+      "codegen: a solid-only fill still emits the web background shorthand",
+      /\bbackground: '#00ff00',/.test(plainFile),
+      plainFile.slice(0, 400),
+    );
+
+    const outCss = path.join(tmp, "out-css");
+    const rc = run(outCss, ["--asset-base", "/static/img/"]);
+    check("codegen --asset-base: run exits 0", rc.status === 0, (rc.stderr ?? "").slice(-300));
+    const cssPhoto = read(outCss, "photo.tsx");
+    check(
+      "codegen --asset-base: literal url under the configured base, no import",
+      cssPhoto.includes(`backgroundImage: "url('/static/img/aaaaaaaaaaaa1111.png')",`) &&
+        !/from '\.\/assets\//.test(cssPhoto),
+      cssPhoto.slice(0, 400),
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // ── assetref-lib: published-library assetRef bindings → local guids ──────────
 // A .fig that subscribes to its own published library addresses every binding by
 // `{assetRef:{key,version}}`; every resolver in lib/ reads `.guid`. These build both
