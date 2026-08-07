@@ -112,7 +112,23 @@ Variables are the design tokens — turn the catalog into a typed theme (`theme.
 > **Decision point — mode.** If `--list-modes` shows more than one mode, **ask the user which
 > mode to style at**, then thread that one mode through everything:
 > `build-ir … --mode <M>` (re-build), `theme-gen … --mode <M>`, and `codegen … --mode <M>`. The
-> chosen mode becomes `:root` / `defaultMode`. One mode ⇒ no question; just proceed.
+> chosen mode is **rooted**: its values are what `:root` / `defaultMode` carry. One mode ⇒ no
+> question; just proceed.
+
+- **Every other mode still ships**, as a `.mode-<slug>` block emitted after `:root` — switching
+  is opting a subtree into the class. Omit `--mode` and the catalog's own primary mode roots.
+- Mode names are free text (spaces, slashes), so `--mode` also accepts the name
+  case-insensitively or as its slug (the one the `.mode-<slug>` class advertises). A name that
+  matches **no** mode is a hard error listing the real ones — it never quietly roots the default.
+- **Duplicate variable names are settled by a live-use census**, not by whichever came first in
+  the file: theme-gen counts how many non-`VARIABLE` nodes reference each variable guid, gives
+  the most-referenced one the canonical name, and drops a same-named duplicate only when it has
+  **zero** references and nothing aliases it — reporting every drop on stderr. (A superseded
+  variable left behind under a live one's name is a real and silent hazard; renumbering a scale
+  in place is enough to cause it.) Ties break on the guid, later-created first. The census reads
+  the decode recorded in `manifest.source.path`; point it elsewhere with `--census <msg.json>` or
+  turn it off with `--no-census` — without it nothing is dropped and duplicates are suffixed
+  (`--x-2`) as before.
 
 ## Step 4 — Components: the faithful scaffold (+ owned icons)
 
@@ -139,10 +155,13 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
 - **`--svg msg-<name>.json` makes icons an internal, deterministic step.** Codegen exports each
   vector's geometry into a **deduplicated owned icon component** under `<out>/icons/` (the
   `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value.
-  Icons are shared by GEOMETRY, so a shared icon never bakes a default colour: a mono glyph
-  takes a **required `color` prop** (`currentColor` + the resolved token) and every call site
-  passes its own. A multi-fill glyph does bake, so its resolved palette is part of its identity
-  — same shape in two different ramps ⇒ two icons, not one. Instance-swap
+  A glyph's PAINT COUNT decides how: one paint ⇒ mono, more than one ⇒ baked. A glyph that is
+  **both filled and outlined** counts as two paints (IR `color` + `stroke`), so it is not mono
+  and the outline survives instead of being flattened into the fill. Icons are shared by
+  GEOMETRY, so a shared icon never bakes a default colour: a mono glyph takes a
+  **required `color` prop** (`currentColor` + the resolved token) and every call site passes
+  its own. A multi-paint glyph does bake, so its resolved palette is part of its identity —
+  same shape in two different ramps ⇒ two icons, not one. Instance-swap
   slots render `{icon ?? <DefaultGlyph/>}`. No `export-svg` placeholder boxes, no manual re-map.
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
   `--svg` explicitly.) A set whose variants carry no `prop=value` names has no variant axes, so
@@ -150,7 +169,26 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
   there (never one drawing of the entire sheet) and flags it — name the variants in Figma to get
   a real variant API.
 - **`--images $WORK/ex/images`** extracts raster fills into `<slug>/assets/` and wires real
-  references (web `backgroundImage` / rn `<Image>`).
+  references (web `backgroundImage` / rn `<Image>`), honouring each paint's own
+  `imageScaleMode` — `FILL`→`cover`, `FIT`→`contain`, `STRETCH`→`100% 100%`, `TILE`→`repeat`.
+  A placement CSS can't express (a `STRETCH` crop matrix, a `TILE` scaling factor) is
+  approximated and gets a `// TODO`. Web emits a **static import per raster** and reads back the
+  URL the bundler resolved — a document-relative `url('./assets/…')` inside an inline style
+  resolves against the _page_, not the module, so it 404s on every route that is not at the
+  directory root. The generated file normalises the two bundler shapes itself (a URL string from
+  webpack/Vite/Parcel, a `.src` record from Next.js), so it needs no runtime dependency and no
+  loader config.
+- **`--asset-base <prefix>`** switches that reference to a literal `url('<prefix>/<file>')` for a
+  target with no module graph (plain CSS, a CDN origin, a static `public/` dir). Pass it only
+  when the consumer serves the assets itself — the bundler import is the default because it is
+  the form that stays correct without knowing where the app is mounted.
+- **Prop names are sanitised identifiers; variant values are transliterated.** A Figma axis or
+  component prop named with a space, punctuation or a JavaScript reserved word is emitted as a
+  legal camelCase identifier (reserved words take a `Prop` suffix, and two names that sanitise
+  alike stay distinct) — the original Figma name rides along in a doc comment so the generated
+  Props still read against the design. Variant _values_, which become the component's public
+  value union, are transliterated to ASCII rather than stripped, so a non-English file keeps
+  readable option values.
 
 The scaffold is **faithful but verbose — raw material, not the finished component.** One file per
 variant on purpose: Figma variants often have different frame structures; collapsing them to CSS
@@ -210,7 +248,9 @@ dir, IR component JSON, out file) and the shared theme note. The codegen scaffol
 source of truth: it refactors form (opaque keys → semantic names, N near-identical variant files →
 one prop-driven component, repeated subtrees → shared sub-components, variant axes → props)
 **without changing a single resolved value** (geometry, padding, gap, radius, colour token,
-typography, borders, effects, absolute position, the variant→structure map). It resolves every
+typography, borders, effects, absolute position, the variant→structure map) — a `'fit-content'`
+axis, or one the scaffold omits, is a resolved value too (the designer's hug / fill), never a
+missing number. It resolves every
 `// TODO` and ships zero. Icons already arrive wired as `<NameIcon size color/>` — it preserves
 them. When the same subtree recurs across members of a group, it is extracted once and shared —
 this changes only where the code lives, never a resolved value.
@@ -230,7 +270,8 @@ write `$WORK/groups-assemble.json` with `kind: "assemble"`).
 screen IR path, and out file), the shared elevated components dir, and the theme note. It walks
 `ir-<name>/screens/<page>/<screen>.json`, renders every component **instance through the elevated
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
-rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `absX/absY` for absolute children). It
+rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `color` **and** `stroke` — a node can
+be filled and outlined at once — plus `absX/absY` for absolute children). It
 binds variable-backed values to the theme and changes no resolved value.
 
 **Brownfield?** Build with `build-ir … --theme <path>` and map fig values to repo tokens **by value,

@@ -11,8 +11,8 @@
 // (geometry-16 over declared-28, placeholder classification) — it sets `source`/
 // `*Source` and populates `conflicts[]`, and is NEVER presented as ground truth.
 // Token slots
-// (`color.{token,match}`, `font.{sizeToken,sizeMatch}`) stay null here; Phase 8's
-// --theme fills them.
+// (`color.{token,match}`, `stroke.{token,match}`, `font.{sizeToken,sizeMatch}`) stay
+// null here; Phase 8's --theme fills them.
 import * as crypto from "crypto";
 import { colorStr, key, mul, nodeMat, type Mat } from "./figma-index.mts";
 import {
@@ -80,10 +80,13 @@ export type IRFont = {
   letterSpacingRaw: { value: number; units: string };
   conflicts: Conflict[];
 };
-// `var`/`varGuid`: the design-system token a fill is BOUND to via a Figma variable
+// `var`/`varGuid`: the design-system token a paint is BOUND to via a Figma variable
 // alias (paint.colorVar). This is GROUND TRUTH from the bytes (not value-matching):
 // when set, `match` is "bound". `token`/`match` value-matching (Phase 8 --theme)
 // stays for UNBOUND literals only. `hex` is always the resolved concrete value.
+// The SAME shape carries the node's fill (IRNode.color) and its stroke
+// (IRNode.stroke) — they are two independent paint arrays in the bytes and a node
+// may populate both, so neither may stand in for the other.
 export type IRColor = {
   hex: string | null;
   token: string | null;
@@ -167,6 +170,12 @@ export type IRFill = {
   varGuid?: string | null; // the variable guidKey, else absent/null
   stops?: { position: number; hex: string }[]; // gradient
   imageHash?: string; // image: hash bytes → hex (filename in images/, §7)
+  // image PLACEMENT — how the raster sits in the box. Carried because the four
+  // Figma modes are not interchangeable and the IR is the only place an emitter
+  // can learn which one a paint asked for (see imagePlacement for the CSS map).
+  scaleMode?: string; // imageScaleMode verbatim: FILL | FIT | STRETCH | TILE
+  scalingFactor?: number; // TILE only: multiple of the raster's INTRINSIC size
+  imageTransform?: unknown; // STRETCH + non-null = Figma's "Crop"; the 2×3 matrix verbatim
   opacity?: number; // paint opacity when < 1
 };
 export type IRStroke = {
@@ -213,8 +222,10 @@ export type IRStyle = {
 // IRLayout carries the auto-layout CONTAINER picture. sizing & wrap describe how the
 // container sizes itself on each axis and whether it wraps. fig→CSS sizing map:
 //   stackPrimarySizing/stackCounterSizing "FIXED" → "fixed" (CSS: a real width/height),
-//   "RESIZE_TO_FIT…"/"RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" → "hug" (CSS: width/height:auto,
-//   i.e. content-driven). stackWrap "WRAP" → wrap:true (CSS flex-wrap:wrap).
+//   "RESIZE_TO_FIT…"/"RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" → "hug" (content-driven; codegen
+//   spells it fit-content, NOT auto — auto means fill on a block-level box).
+//   Both are stated RELATIVE to `mode`: for a row the primary axis is horizontal, for a
+//   column it is vertical. stackWrap "WRAP" → wrap:true (CSS flex-wrap:wrap).
 // primarySizing/counterSizing are REQUIRED (always emitted, unlike every other optional
 // field here): the raw fields are omit-when-default, so an absent one is a real value and
 // not "unknown". Resolving it once here is the only place that knows the two axes default
@@ -259,6 +270,16 @@ export type IRNode = {
   text?: IRTextField;
   font?: IRFont;
   color?: IRColor;
+  // The node's OUTLINE, in the same IRColor shape as `color` — a companion, never a
+  // replacement. Figma stores fill and stroke in two independent paint arrays and a
+  // node may carry BOTH (a near-white glyph with a dark outline so it reads on
+  // photography); collapsing the node to one colour silently drops the outline, and
+  // the surviving fill looks plausible enough to pass review. Emitted only when the
+  // node has a visible solid stroke paint. The stroke's WEIGHT/align/cap/join/dash are
+  // NOT duplicated here — `style.strokes[]` is built from the same paint array and is
+  // always present whenever this is, so read `style.strokes[0].weight` (or
+  // `style.borderWidths`) to tell a 2px outline from a hairline.
+  stroke?: IRColor;
   box: IRBox;
   style?: IRStyle;
   layout?: IRLayout;
@@ -272,6 +293,11 @@ export type IRNode = {
   maxW?: number;
   maxH?: number;
   aspectRatio?: number; // targetAspectRatio x/y
+  // The PARENT's auto-layout direction, stamped onto the child by toIR. `grow` and
+  // `alignSelf` are stated relative to the PARENT's axes ("fill along its primary /
+  // counter axis"), so which CSS axis they size cannot be known from the child alone.
+  // Absent when the parent has no auto-layout (nothing fills an absolute parent).
+  parentMode?: "row" | "column";
   autoResize?: string | null;
   styleRuns?: number;
   unresolved?: string;
@@ -314,15 +340,40 @@ function firstSolidFill(node: any): any | null {
   return null;
 }
 
-// Build the IRColor for a node from its first visible solid fill, via the shared
-// resolvePaintColor resolver. When that fill is BOUND to a variable
-// (paint.colorVar ALIAS resolving in `varIndex`), `hex` is the bound variable's
-// RESOLVED value (GROUND TRUTH — never the stale cached literal), var/varGuid are
-// set and match="bound". A literal fill keeps `hex`=colorStr(paint.color), var/
-// varGuid null and match null (Phase 8 --theme value-matching fills token/match
-// for literals).
+// Build the IRColor for a node from its first visible solid FILL (see paintToIRColor
+// for the resolution + provenance rules).
 function buildColor(node: any, varIndex: VarIndex): IRColor {
-  const p = firstSolidFill(node);
+  return paintToIRColor(firstSolidFill(node), varIndex);
+}
+
+// First visible solid STROKE paint (the node's own outline paint) — firstSolidFill's
+// twin over `strokePaints`. The two arrays are independent in the bytes: a node can
+// be filled, outlined, or both, so the stroke must be read on its own and never
+// inferred from the fill.
+function firstSolidStroke(node: any): any | null {
+  const strokes: any[] = node.strokePaints ?? [];
+  for (const p of strokes) {
+    if (p?.visible === false) continue;
+    if (p?.type === "SOLID" && p.color) return p;
+  }
+  return null;
+}
+
+// Build the IRColor for a node's OUTLINE from its first visible solid stroke paint.
+// Same resolver, same provenance rules as buildColor — a stroke bound to a variable
+// is just as much a design token as a fill, and `style.strokes[]` already proves it
+// resolves; this only lifts it to the node level where consumers read colour.
+function buildStroke(node: any, varIndex: VarIndex): IRColor {
+  return paintToIRColor(firstSolidStroke(node), varIndex);
+}
+
+// One paint → the node-level IRColor, via the shared resolvePaintColor. When the
+// paint is BOUND to a variable (paint.colorVar ALIAS resolving in `varIndex`), `hex`
+// is the bound variable's RESOLVED value (GROUND TRUTH — never the stale cached
+// literal), var/varGuid are set and match="bound". A literal paint keeps
+// `hex`=colorStr(paint.color), var/varGuid null and match null (Phase 8 --theme
+// value-matching fills token/match for literals). No paint → an all-null IRColor.
+function paintToIRColor(p: any | null, varIndex: VarIndex): IRColor {
   if (!p) return { hex: null, token: null, match: null, var: null, varGuid: null };
   const c = resolvePaintColor(p, varIndex);
   return {
@@ -342,7 +393,12 @@ function buildColor(node: any, varIndex: VarIndex): IRColor {
 
 // One fillPaint → IRFill (or null to drop a non-visible / unrecognized paint).
 // SOLID carries hex + bound var (Phase A resolver); GRADIENT_* carries stops[];
-// IMAGE carries imageHash. paint.opacity (< 1) is preserved.
+// IMAGE carries imageHash + its placement. paint.opacity (< 1) is preserved.
+//
+// The `visible === false` drop here is load-bearing beyond tidiness: it is what makes
+// style.fills[] a VISIBLE-paint list, so every downstream "first image fill" is really
+// "first visible image fill". Nodes do stack image paints with a hidden first entry —
+// picking paints[0] off the raw node would extract the wrong raster.
 function fillToIR(p: any, varIndex: VarIndex): IRFill | null {
   if (!p || p.visible === false) return null;
   const op = typeof p.opacity === "number" && p.opacity < 1 ? { opacity: p.opacity } : {};
@@ -369,9 +425,95 @@ function fillToIR(p: any, varIndex: VarIndex): IRFill | null {
       : typeof h === "string"
         ? h
         : undefined;
-    return { type: "image", ...(imageHash ? { imageHash } : {}), ...op };
+    // Placement is per-paint and must survive into the IR verbatim — see IRFill.
+    // scalingFactor is meaningful only for TILE, so it is emitted only there (blocks
+    // stay omitted when they carry nothing); imageTransform only when non-null, which
+    // is exactly the signal that STRETCH means "Crop" rather than a plain stretch.
+    const scaleMode = typeof p.imageScaleMode === "string" ? p.imageScaleMode : undefined;
+    const tile =
+      scaleMode === "TILE" && typeof p.scalingFactor === "number"
+        ? { scalingFactor: p.scalingFactor }
+        : {};
+    return {
+      type: "image",
+      ...(imageHash ? { imageHash } : {}),
+      ...(scaleMode ? { scaleMode } : {}),
+      ...tile,
+      ...(p.imageTransform != null ? { imageTransform: p.imageTransform } : {}),
+      ...op,
+    };
   }
   return null;
+}
+
+// An image paint's placement, in the vocabulary the emitters need. Figma's four
+// imageScaleMode values are NOT interchangeable, and a scaffold that assumes one of
+// them silently mis-renders the other three: STRETCH rasters emitted as FILL get
+// scaled by the larger ratio and cropped by a DIFFERENT amount per source aspect, so
+// a grid of tiles that should look uniform does not. (Observed on a 20-variant photo
+// set: 14 STRETCH + 4 FILL visible paints, sources 2842×1880 to 2604×1144 — the FILL
+// ones looked fine only because their sources happened to be square, which is what
+// made the breakage look arbitrary.)
+//
+// fig → CSS background-size / RN <Image resizeMode>:
+//   FILL    → cover       / cover    — cover the box, crop the overflow
+//   FIT     → contain     / contain  — fit inside the box, letterbox the rest
+//   STRETCH → 100% 100%   / stretch  — distort to the box exactly (aspect NOT kept)
+//   TILE    → auto+repeat / repeat   — the raster at intrinsic size, repeated
+//
+// Two cases CANNOT be expressed in CSS and come back with a `note` the emitter turns
+// into a TODO rather than a silent wrong value:
+//   • STRETCH with a NON-null imageTransform is Figma's "Crop" — a 2×3 placement
+//     matrix, not a plain stretch. `100% 100%` would distort it, so it is approximated
+//     as `cover` (fills the box without distorting: the closest single-declaration
+//     reading of a crop) and flagged for hand re-cropping.
+//   • TILE's scalingFactor is a multiple of the raster's INTRINSIC size, and CSS has
+//     no such unit (percentages resolve against the element box, not the image). The
+//     size is left `auto` — exactly right at factor 1 — and the factor is reported.
+// An ABSENT mode falls back to cover: that is Figma's own default for a new image
+// paint, and the behaviour every emitter had before placement was read at all. An
+// unrecognized mode falls back the same way but is flagged.
+export type ImagePlacement = {
+  size: string; // CSS background-size
+  repeat: string; // CSS background-repeat
+  position: string; // CSS background-position
+  resizeMode: string; // React Native <Image resizeMode>
+  note?: string; // set when the mapping is approximate — emit it, never swallow it
+};
+export function imagePlacement(fill: IRFill): ImagePlacement {
+  const cover = (): ImagePlacement => ({
+    size: "cover",
+    repeat: "no-repeat",
+    position: "center",
+    resizeMode: "cover",
+  });
+  const mode = fill.scaleMode;
+  if (!mode || mode === "FILL") return cover();
+  if (mode === "FIT")
+    return { size: "contain", repeat: "no-repeat", position: "center", resizeMode: "contain" };
+  if (mode === "STRETCH") {
+    if (fill.imageTransform != null)
+      return {
+        ...cover(),
+        note: "STRETCH with a crop matrix (imageTransform) — no CSS equivalent; approximated as cover, re-crop by hand if the framing is off",
+      };
+    return { size: "100% 100%", repeat: "no-repeat", position: "center", resizeMode: "stretch" };
+  }
+  if (mode === "TILE") {
+    const f = fill.scalingFactor;
+    return {
+      size: "auto",
+      repeat: "repeat",
+      position: "top left",
+      resizeMode: "repeat",
+      ...(typeof f === "number" && f !== 1
+        ? {
+            note: `TILE scalingFactor ${f} — CSS has no multiple-of-intrinsic-size unit; background-size left auto, set an explicit px size from the source dimensions`,
+          }
+        : {}),
+    };
+  }
+  return { ...cover(), note: `unknown imageScaleMode "${mode}" — defaulted to cover` };
 }
 
 // Per-corner radii → uniform number when all four agree, else the {tl,tr,br,bl}
@@ -853,6 +995,14 @@ function toIR(
     if (color.hex) node.color = color;
   }
 
+  // The node's outline, resolved INDEPENDENTLY of its fill and attached ALONGSIDE
+  // `color` (never instead of it) — runs on every node type, TEXT included, so a
+  // filled-and-outlined glyph round-trips both paints instead of reporting a
+  // plausible-looking fill and dropping the stroke. Omitted when the node has no
+  // visible solid stroke paint, so lean files stay lean.
+  const stroke = buildStroke(n as any, varIndex);
+  if (stroke.hex) node.stroke = stroke;
+
   // Full box-styling + auto-layout (B-style-layout / spec #2) on EVERY node type
   // (TEXT included — a text node can carry effects/opacity). Blocks are omitted
   // when absent so files stay lean.
@@ -875,7 +1025,13 @@ function toIR(
   for (const c of n.children ?? []) {
     if ((c as any).visible === false) continue;
     const childAcc = mul(acc, nodeMat(c as any));
-    node.children.push(toIR(c, childAcc, appFamilyOf, varIndex, typeStyles));
+    const child = toIR(c, childAcc, appFamilyOf, varIndex, typeStyles);
+    // Stamp the PARENT's stack direction on the child. A child's grow/alignSelf say
+    // "fill along the parent's primary / counter axis" — which CSS axis that is can
+    // only be known from the parent, so a consumer reading a child in isolation
+    // (codegen) cannot otherwise tell fill-width from fill-height.
+    if (layout?.mode) child.parentMode = layout.mode;
+    node.children.push(child);
   }
   return node;
 }
@@ -920,11 +1076,16 @@ export function provenanceViolations(node: IRNode, acc: string[] = []): string[]
   if (node.text) {
     if (node.text.source == null) acc.push(`${node.id}: text.source missing`);
   }
-  if (node.color) {
-    if (!("match" in node.color)) acc.push(`${node.id}: color.match missing`);
-    if (!("token" in node.color)) acc.push(`${node.id}: color.token missing`);
-    if (!("var" in node.color)) acc.push(`${node.id}: color.var missing`);
-    if (!("varGuid" in node.color)) acc.push(`${node.id}: color.varGuid missing`);
+  // `color` and `stroke` are the same shape and carry the same provenance keys.
+  for (const [field, c] of [
+    ["color", node.color],
+    ["stroke", node.stroke],
+  ] as const) {
+    if (!c) continue;
+    if (!("match" in c)) acc.push(`${node.id}: ${field}.match missing`);
+    if (!("token" in c)) acc.push(`${node.id}: ${field}.token missing`);
+    if (!("var" in c)) acc.push(`${node.id}: ${field}.var missing`);
+    if (!("varGuid" in c)) acc.push(`${node.id}: ${field}.varGuid missing`);
   }
   for (const c of node.children) provenanceViolations(c, acc);
   return acc;

@@ -25,11 +25,11 @@
 //   (--out is an output DIRECTORY; <out>/<slug>/ is written, a file summary to stderr.)
 import * as fs from "fs";
 import * as path from "path";
-import type { IRNode } from "../lib/screens-lib.mts";
-import { mapValue, deriveLogicals, type Logical } from "../lib/components-lib.mts";
+import { type IRNode, imagePlacement, type IRFill } from "../lib/screens-lib.mts";
+import { mapValue, deriveLogicals, proposePropApi, type Logical } from "../lib/components-lib.mts";
 import { disambiguateJustify } from "../lib/reconcile-lib.mts";
 import { cssVarName, tsAccessor } from "../lib/theme-lib.mts";
-import { overlap, hasSignificantNonAdjacentOverlap } from "../lib/layout-lib.mts";
+import { overlap, hasSignificantNonAdjacentOverlap, sizingLines } from "../lib/layout-lib.mts";
 import { load, colorStr } from "../lib/figma-index.mts";
 import {
   extractGeometry,
@@ -38,14 +38,14 @@ import {
   isVariantSheet,
   type IconColor,
 } from "../lib/svg-lib.mts";
-import { slugify, compIdent, kebab } from "../lib/naming.mts";
+import { slugify, compIdent, axisPropNames } from "../lib/naming.mts";
 
 const argv = process.argv.slice(2);
 const dir = argv[0];
 const setName = argv[1];
 if (!dir || !setName || setName.startsWith("--"))
   throw new Error(
-    "usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>]",
+    "usage: codegen.mts <ir-dir> <set-name> [--out <dir>] [--framework rn|web] [--theme-import <module>] [--images <dir>] [--asset-base <prefix>]",
   );
 const flag = (n: string) => {
   const i = argv.indexOf(n);
@@ -56,6 +56,12 @@ const outDir = flag("--out");
 // When given (with --out), codegen EXTRACTS each referenced image fill into the component
 // folder's assets/ and emits a real src reference instead of a placeholder TODO.
 const imagesDir = flag("--images");
+// Where a PLAIN-CSS consumer serves the extracted rasters from (e.g. "/static/img", a CDN
+// origin). Given ⇒ web emits a literal `url('<base>/<file>')` under that prefix; absent ⇒
+// the bundler form (a static import + its resolved URL), which is the only form that keeps
+// working on a route that is not at the directory root. Never guessed: a plain-CSS target
+// has no module graph to resolve against, so the base has to come from the caller.
+const assetBase = flag("--asset-base");
 const framework = (flag("--framework") ?? "rn").toLowerCase();
 if (framework !== "rn" && framework !== "web")
   throw new Error(`--framework must be rn|web (got "${framework}")`);
@@ -120,6 +126,12 @@ if (!comp) {
 // --- axes / default variant ---------------------------------------------------
 const axes: Record<string, string[]> = comp.axes ?? {};
 const axisNames = Object.keys(axes);
+// Axis name → the prop identifier the generated component exposes. ONE map, consulted by
+// every emitter (the Props type, the destructure in index.tsx, the dispatcher key, and the
+// attrs a PARENT passes on the nested-reference path) — they must agree
+// character-for-character. A Figma axis is free to be named "item count" or "in", neither
+// of which is a legal identifier; axisPropNames sanitises and de-dupes.
+const axisProp = axisPropNames(axisNames);
 // A component with NO detected variants (a heuristic single-frame component — e.g.
 // `stroke-hint` detected a bordered frame, no variant axis) still IS a component: treat
 // the set frame itself as one default variant rendered from its own subtree, instead of
@@ -246,10 +258,41 @@ function assetRef(hash: string | undefined): string | null {
   assetCache.set(hash, file);
   return file;
 }
-const imageHashOf = (n: IRNode): string | undefined => {
-  const f = (n.style?.fills ?? []).find((x: any) => x.type === "image" && x.imageHash);
-  return f ? ((f as any).imageHash as string) : undefined;
-};
+// The import identifier a written asset binds to in a variant file. The files are
+// content-hash named ("06cc1aa3….png"), so the basename can never be used raw — it is not a
+// valid JS identifier, and truncating it invites two rasters collapsing onto one binding.
+// Derived from the basename (same raster → same identifier in every file it appears in, so
+// the output is byte-stable across runs) and disambiguated against the names already issued.
+const assetIdents = new Map<string, string>(); // written basename → import identifier
+const assetIdentsTaken = new Set<string>();
+function assetIdent(file: string): string {
+  const hit = assetIdents.get(file);
+  if (hit) return hit;
+  const stem = path.basename(file, path.extname(file)).replace(/[^A-Za-z0-9]+/g, "");
+  const base = `asset_${stem.slice(0, 12) || "raster"}`;
+  let name = base,
+    i = 2;
+  while (assetIdentsTaken.has(name)) name = `${base}_${i++}`;
+  assetIdentsTaken.add(name);
+  assetIdents.set(file, name);
+  return name;
+}
+// The literal URL for the plain-CSS target: the configured base joined to the basename.
+const assetBaseUrl = (file: string) => `${(assetBase ?? "").replace(/\/+$/, "")}/${file}`;
+
+// nodeStyleBody is module-level (the per-instance override path shares it), but the import
+// line an extracted raster implies belongs to the variant FILE currently being rendered.
+// renderVariant parks its collector here for the duration of its own walk — the renders are
+// sequential and never nested, so exactly one sink is live at a time.
+let assetImportSink: Map<string, string> | null = null;
+
+// The node's raster fill — the ONE selector both emitters (web backgroundImage, rn
+// <Image>) use, so they can never disagree about which paint won. "First" is safe
+// because style.fills[] is already a VISIBLE-paint list (fillToIR drops visible:false),
+// and that matters: nodes do stack image paints with a hidden first entry, and picking
+// paints[0] off the raw node would extract the wrong raster.
+const imageFillOf = (n: IRNode): IRFill | undefined =>
+  (n.style?.fills ?? []).find((x) => x.type === "image" && x.imageHash);
 function variantComponentName(v: any): string {
   const k = variantPropKey(v);
   const camel = k
@@ -268,7 +311,7 @@ const propKeyExpr =
     ? `'${defaultKey}'`
     : axisNames.length === 1
       ? "variant"
-      : axisNames.map((a) => kebab(a)).join(" + '/' + ");
+      : axisNames.map((a) => axisProp.get(a)!).join(" + '/' + ");
 
 // Name of the per-instance ROOT style-override prop for a component. Defaults
 // to the idiomatic `style`, but a Figma variant axis can literally be named "Style" (→ a
@@ -279,7 +322,7 @@ function styleOverridePropName(c: any): string {
   const taken = new Set<string>();
   const axNames = Object.keys(c.axes ?? {});
   if (axNames.length === 1) taken.add("variant");
-  else for (const a of axNames) taken.add(kebab(a));
+  else for (const id of axisPropNames(axNames).values()) taken.add(id);
   for (const l of deriveLogicals(c).logicals) taken.add(l.name);
   for (const cand of ["style", "rootStyle", "styleOverride", "rootStyleOverride"])
     if (!taken.has(cand)) return cand;
@@ -456,6 +499,30 @@ function collectVectorFills(n: IRNode): { hex: string; var: string | null }[] {
   return out;
 }
 
+// Every DISTINCT paint a vector subtree draws with — its fills PLUS its strokes. A
+// glyph can be filled AND outlined (a near-white heart with a dark outline), and
+// svg-lib renders the pre-outlined strokeGeometry as a second baked fill, so counting
+// fills alone calls such a glyph "mono" and recolours its outline to the fill —
+// exactly the colour the design chose it NOT to be. `IRNode.stroke` is the node-level
+// outline companion to `color`; both are resolved (variable-bound) values.
+// Order-preserved, deduped by hex|var across the two paint kinds.
+function collectVectorPaints(n: IRNode): { hex: string; var: string | null }[] {
+  const out = collectVectorFills(n);
+  const seen = new Set(out.map((p) => `${p.hex}|${p.var ?? ""}`));
+  (function walk(m: IRNode) {
+    const s = m.stroke;
+    if (s?.hex) {
+      const k = `${s.hex}|${s.var ?? ""}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push({ hex: s.hex, var: s.var ?? null });
+      }
+    }
+    for (const c of m.children ?? []) walk(c);
+  })(n);
+  return out;
+}
+
 // One node's style object body (container/box fields). web|rn share most fields.
 // `only` (optional) restricts emission to the listed override field names (a subset
 // of FIELD_KEYS): codegen passes it to build a per-instance ROOT style OVERRIDE for a
@@ -465,13 +532,20 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
   const lines: string[] = [];
   const s = n.style;
   const want = (f: string) => !only || only.has(f);
-  // size: emit when fixed (a hug/grow child sizes itself; still record for faithful sizing).
-  if (want("size") && n.box) {
-    if (n.box.w) lines.push(`width: ${n.box.w},`);
-    if (n.box.h) lines.push(`height: ${n.box.h},`);
-  }
+  // size: honour Figma's per-axis sizing MODE (hug / fill / fixed) instead of always
+  // freezing the measured bbox. Freezing turns every hug into a magic number, so a
+  // longer label clips and a fill child stops tracking its parent.
+  if (want("size")) lines.push(...sizingLines(n));
   // background = first solid fill (bound var wins as a token comment).
   if (want("fillPaints")) {
+    // An image fill on the SAME node forces the `backgroundColor` LONGHAND for the solid
+    // fill. React patches only the style keys whose VALUES changed between renders, so a
+    // variant change that alters the fill re-applies the `background` SHORTHAND — which
+    // resets background-image to `none` — and does NOT re-set backgroundImage, because that
+    // key did not change. The raster then vanishes on interaction, and only on interaction.
+    // Read outside the `!only && web` gate below on purpose: a per-instance root override
+    // carrying the shorthand would wipe the referenced child's image the same way.
+    const imgFill = imageFillOf(n);
     const fill = s?.fills?.find((f) => f.type === "solid" && f.hex);
     if (fill) {
       const ref = colorRef(
@@ -483,7 +557,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
         `${n.name} background`,
         push,
       );
-      lines.push(`${web ? "background" : "backgroundColor"}: ${ref},`);
+      lines.push(`${web && !imgFill ? "background" : "backgroundColor"}: ${ref},`);
     }
     // image fill: with --images, EXTRACT the raster fill into
     // assets/ and emit a real backgroundImage reference; without it, leave a placeholder
@@ -491,16 +565,29 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
     // WEB only here — rn can't hold an image in a View style, so emit() renders an <Image>
     // (handled there). Skipped in override mode (`only`): an image override is flagged by
     // the caller's instance-override TODO, not inlined into a `style={{…}}` prop.
-    const imgFill =
-      !only && web && s?.fills?.find((f) => f.type === "image" && (f as any).imageHash);
-    if (imgFill) {
-      const hash = (imgFill as any).imageHash as string;
+    if (!only && web && imgFill) {
+      const hash = imgFill.imageHash as string;
+      // background-size/-repeat come from the paint's own imageScaleMode — a STRETCH
+      // raster forced to `cover` is cropped by a different amount per source aspect.
+      const place = imagePlacement(imgFill);
+      if (place.note) push(`image fill "${n.name}" (${n.guid}) — ${place.note}`);
       const file = assetRef(hash);
       if (file) {
-        lines.push(`backgroundImage: "url('./assets/${file}')",`);
-        lines.push(`backgroundSize: 'cover',`);
-        lines.push(`backgroundPosition: 'center',`);
-        lines.push(`backgroundRepeat: 'no-repeat',`);
+        // A document-relative `url('./assets/x.png')` in an INLINE style resolves against
+        // the page URL, not the module, so it 404s on every route that is not at the
+        // directory root. The bundler form imports the asset and reads back the URL the
+        // bundler resolved (and picks up content hashing / image optimisation with it);
+        // the plain-CSS form needs a real base path, which only the caller knows.
+        if (assetBase !== undefined) {
+          lines.push(`backgroundImage: "url('${assetBaseUrl(file)}')",`);
+        } else {
+          const ident = assetIdent(file);
+          assetImportSink?.set(ident, file);
+          lines.push(`backgroundImage: \`url(\${assetUrl(${ident})})\`,`);
+        }
+        lines.push(`backgroundSize: '${place.size}',`);
+        lines.push(`backgroundPosition: '${place.position}',`);
+        lines.push(`backgroundRepeat: '${place.repeat}',`);
       } else {
         push(
           `image fill "${n.name}" (${n.guid}) hash ${hash.slice(0, 8)}… — pass --images <dir> to extract + wire the src`,
@@ -510,7 +597,7 @@ function nodeStyleBody(n: IRNode, push: (m: string) => void, only?: Set<string>)
         lines.push(
           `// TODO: image — backgroundImage: "url('./assets/${hash.slice(0, 16)}…')" (re-run codegen with --images)`,
         );
-        lines.push(`backgroundSize: 'cover',`);
+        lines.push(`backgroundSize: '${place.size}',`);
       }
     }
   }
@@ -761,8 +848,10 @@ function isSingleIconWrapper(n: IRNode): boolean {
   return kids.length === 1 && isVectorOnly(kids[0]);
 }
 
-// `overlap()` / `hasSignificantNonAdjacentOverlap()` live in layout-lib.mts (pure +
-// unit-tested). Strict bbox intersection: touching edges (==) do NOT count.
+// `overlap()` / `hasSignificantNonAdjacentOverlap()` / `sizingLines()` live in
+// layout-lib.mts (pure + unit-tested; this file runs its CLI at import time, so nothing
+// defined here is reachable from selftest). Strict bbox intersection: touching edges
+// (==) do NOT count.
 
 // Does THIS container position its children absolutely?
 //   #7: a non-auto-layout container (no layout) positions children absolutely.
@@ -811,17 +900,20 @@ function componentReference(
 ): string {
   refImports.set(entry.Comp, entry.slug);
 
-  // variant-selecting attrs — mirrors the meta component's Props (single-axis →
-  // `variant`; multi-axis → one kebab-named prop per axis). Values use the SAME
-  // mapValue() the union type is built from (parity with components-lib).
+  // variant-selecting attrs — mirrors the REFERENCED component's Props (single-axis →
+  // `variant`; multi-axis → one prop per axis, under the same sanitised identifier its own
+  // Props type declares). Values use the SAME mapValue() the union type is built from
+  // (parity with components-lib).
   const rax: Record<string, string[]> = entry.comp.axes ?? {};
   const axNames = Object.keys(rax);
+  const refAxisProp = axisPropNames(axNames);
   const vprops: Record<string, string> = entry.variant?.props ?? {};
   let attrs = "";
   if (entry.variant && axNames.length === 1) {
     attrs += ` variant="${mapValue(String(vprops[axNames[0]] ?? ""))}"`;
   } else if (entry.variant && axNames.length > 1) {
-    for (const a of axNames) attrs += ` ${kebab(a)}="${mapValue(String(vprops[a] ?? ""))}"`;
+    for (const a of axNames)
+      attrs += ` ${refAxisProp.get(a)}="${mapValue(String(vprops[a] ?? ""))}"`;
   }
 
   // guid → resolved IR node for the instance subtree. Invisible nodes were dropped in
@@ -912,6 +1004,7 @@ type VariantRender = {
   usedProps: Set<string>; // logical prop names this variant references
   refImports: Map<string, string>; // referenced child component: Comp identifier → file slug
   iconImports: Map<string, string>; // owned icon component: identifier → file (in ../icons)
+  assetImports: Map<string, string>; // extracted raster: identifier → basename (in ./assets)
   usesStyleProp: boolean; // root merges the `style` override prop → destructure it
   rnImageUsed: boolean; // an rn <Image> was emitted → import it
   todos: string[];
@@ -945,6 +1038,7 @@ function renderVariant(v: any): VariantRender {
   const usedProps = new Set<string>();
   const refImports = new Map<string, string>(); // nested child components referenced here
   const iconImports = new Map<string, string>(); // owned icons referenced here (../icons/<file>)
+  const assetImports = new Map<string, string>(); // extracted rasters referenced here (./assets/…)
   let usesStyleProp = false; // set when the root node merges the `style` override prop
   let rnImageUsed = false; // set when an rn <Image> is emitted for an extracted fill
 
@@ -982,6 +1076,7 @@ function renderVariant(v: any): VariantRender {
       usedProps,
       refImports,
       iconImports,
+      assetImports,
       usesStyleProp,
       rnImageUsed,
       todos,
@@ -1161,9 +1256,13 @@ function renderVariant(v: any): VariantRender {
     // rn: a View style can't hold a background image, so render an absolute-fill <Image>
     // BEHIND the children (web set backgroundImage in the style above). Needs --images to
     // extract the asset; without it, flag the node so nothing is silently dropped.
+    // resizeMode comes from the paint's imageScaleMode — RN's vocabulary maps 1:1.
     if (!web) {
-      const ih = imageHashOf(n);
-      if (ih) {
+      const imgFill = imageFillOf(n);
+      const ih = imgFill?.imageHash;
+      if (imgFill && ih) {
+        const place = imagePlacement(imgFill);
+        if (place.note) push(`image fill "${n.name}" (${n.guid}) — ${place.note}`);
         const file = assetRef(ih);
         if (file) {
           rnImageUsed = true;
@@ -1172,7 +1271,7 @@ function renderVariant(v: any): VariantRender {
             key: ik,
             body: "position: 'absolute',\ntop: 0,\nleft: 0,\nright: 0,\nbottom: 0,",
           });
-          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="cover" />`;
+          const imgEl = `${"  ".repeat(depth + 1)}<Image source={require('./assets/${file}')} style={styles.${ik}} resizeMode="${place.resizeMode}" />`;
           inner = inner ? `${imgEl}\n${inner}` : imgEl;
         } else {
           push(
@@ -1229,8 +1328,8 @@ function renderVariant(v: any): VariantRender {
     let defaultEl = "null";
     if (defSym) {
       const defNode = findNodeByGuid(defSym);
-      const defFills = defNode ? collectVectorFills(defNode) : [];
-      // Icon colour: the default symbol's own resolved fill(s) if it has any, ELSE the
+      const defFills = defNode ? collectVectorPaints(defNode) : [];
+      // Icon colour: the default symbol's own resolved paint(s) if it has any, ELSE the
       // CONTEXTUAL colour this slot is recoloured to (read from the slot instance's
       // override — e.g. a filled button paints its icon praline-50). Without this a mono
       // icon renders the wrong colour (dark icon on a dark button).
@@ -1294,12 +1393,14 @@ function renderVariant(v: any): VariantRender {
     // (override-aware) resolved fills — a mono icon gets currentColor + the resolved token
     // (fixes the baked-master-fill defect). The sized wrapper still flex-centres the glyph;
     // absolute placement / root-style merge ride on it exactly as before.
-    const fills = collectVectorFills(n);
-    // Icon colour: a single resolved fill (override-aware) wins; else the instance's raw
+    const fills = collectVectorPaints(n);
+    // Icon colour: a single resolved paint (override-aware) wins; else the instance's raw
     // fill/stroke colour override (the common case — icons are recoloured via an override
     // the IR drops). This IS the source of truth the shared icon must be driven by: the
     // geometry is master-only (and its baked paints are the master's, possibly stale), so
     // whatever this call site resolved has to reach the component as a prop or a palette.
+    // A filled-AND-outlined glyph contributes two paints (IR `color` + `stroke`) ⇒ NOT mono
+    // ⇒ svg-lib bakes both, so the outline survives instead of being flattened into the fill.
     const override = iconOverrideColor(n.guid);
     const iconColor = fills.length === 1 ? fills[0] : override;
     const resolved: IconColor[] = fills.length ? fills : override ? [override] : [];
@@ -1333,7 +1434,7 @@ function renderVariant(v: any): VariantRender {
     // (b) no geometry source (no --svg/--out) → keep the export-svg placeholder so the user
     //     knows to pass it.
     const fillNote = fills.length
-      ? ` fills:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
+      ? ` paints:[${fills.map((f) => `${f.hex}${f.var ? ` ${f.var}` : ""}`).join(", ")}]`
       : "";
     const size = `${n.box?.w ?? "?"}×${n.box?.h ?? "?"}`;
     push(
@@ -1343,7 +1444,9 @@ function renderVariant(v: any): VariantRender {
     return wrapConditional(el, binds, depth, n);
   }
 
+  assetImportSink = assetImports;
   const jsx = emit(subtree, 0, false);
+  assetImportSink = null;
   return {
     v,
     propKey,
@@ -1354,6 +1457,7 @@ function renderVariant(v: any): VariantRender {
     usedProps,
     refImports,
     iconImports,
+    assetImports,
     usesStyleProp,
     rnImageUsed,
     todos,
@@ -1370,14 +1474,39 @@ for (const r of rendered) allTodos.push(...r.todos);
 // === FILE EMISSION ============================================================
 const reactNodeUsed = logicals.some((l) => l.role === "slot");
 
+// A doc-comment payload can carry an arbitrary Figma name; a literal "*/" inside it would
+// close the comment early and break the file.
+const commentSafe = (s: string) => s.replace(/\*\//g, "* /");
+
 // Props type body (shared by index + types.ts). Variant union first, then the
 // collapsed non-variant props (all optional). Each prop keeps its Figma name.
 function propsTypeBody(): string {
   const lines: string[] = [];
-  if (comp.propApi) lines.push(`  ${comp.propApi};`);
+  // Recomputed from comp.axes rather than read from comp.propApi: the stored string is
+  // baked at build-ir time, so an IR built by an older build-ir would pin BOTH an
+  // unsanitised axis identifier and a stale value union, while the dispatcher's switch
+  // cases below are computed live from mapValue — the two would silently disagree.
+  const propApi = axisNames.length ? proposePropApi({ axes, variants: [] }) : "";
+  if (propApi) {
+    // Traceability: the emitted identifier is not always the Figma axis name (an axis may
+    // be called "item count", or "in"), and a single-axis set is exposed as `variant`
+    // regardless of its axis name — record the mapping so the generated component can be
+    // read against the design it came from.
+    const renamed = axisNames
+      .filter((a) => axisProp.get(a) !== a)
+      .map((a) => `${a} → ${axisProp.get(a)}`);
+    const axisDoc =
+      axisNames.length === 1
+        ? `Figma axis: ${axisNames[0]} → variant`
+        : renamed.length
+          ? `Figma axes: ${renamed.join(", ")}`
+          : "";
+    if (axisDoc) lines.push(`  /** ${commentSafe(axisDoc)} */`);
+    lines.push(`  ${propApi};`);
+  }
   for (const l of logicals) {
     const fig = l.figNames.join(" + ");
-    lines.push(`  /** Figma: ${fig} */`);
+    lines.push(`  /** Figma: ${commentSafe(fig)} */`);
     lines.push(`  ${l.name}?: ${l.tsType};`);
   }
   // Per-instance ROOT style override, merged onto the component's root node.
@@ -1434,6 +1563,13 @@ function variantFile(r: VariantRender): string {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([Name, file]) => `import { ${Name} } from '../icons/${file}';`)
     .join("\n");
+  // extracted rasters → ONE static import per asset, from this component folder's own
+  // assets/. The import is what makes the reference module-relative: the bundler rewrites it
+  // to the URL the asset is actually served from, wherever the route lives.
+  const assetImportLines = [...r.assetImports.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([ident, file]) => `import ${ident} from './assets/${file}';`)
+    .join("\n");
   const rnImports = ["View", "Text", "StyleSheet", ...(r.rnImageUsed ? ["Image"] : [])].join(", ");
   const imports =
     (web
@@ -1441,7 +1577,15 @@ function variantFile(r: VariantRender): string {
       : `import * as React from 'react';\nimport { ${rnImports} } from 'react-native';`) +
     (usesTheme ? `\nimport { theme, defaultMode } from '${themeImport}';` : "") +
     (refImportLines ? `\n${refImportLines}` : "") +
-    (iconImportLines ? `\n${iconImportLines}` : "");
+    (iconImportLines ? `\n${iconImportLines}` : "") +
+    (assetImportLines ? `\n${assetImportLines}` : "");
+  // Bundlers disagree on what a static image import EVALUATES to: webpack/Vite/Parcel hand
+  // back the URL string, Next.js hands back a StaticImageData record whose `.src` holds it.
+  // A two-line local normaliser covers both with no runtime dependency and no build config,
+  // and it is declared above `styles` because that object literal calls it at module scope.
+  const assetHelper = r.assetImports.size
+    ? `\n// A static image import is the url string (webpack/Vite/Parcel) or a static-image\n// record carrying it on .src (Next.js StaticImageData) — accept both.\ntype AssetImport = string | { src: string };\nconst assetUrl = (a: AssetImport): string => (typeof a === 'string' ? a : a.src);\n`
+    : "";
   const todoBlock = r.todos.length
     ? "\n// === TODO (this variant — unconfirmed values) ===\n" +
       r.todos.map((t) => `// TODO: ${t}`).join("\n") +
@@ -1452,7 +1596,7 @@ function variantFile(r: VariantRender): string {
 // per-node style/layout/font/text; bound nodes consume props. Review every // TODO.
 ${imports}
 import type { ${Comp}Props } from './types';
-
+${assetHelper}
 export function ${r.compName}(${destructure(r.usedProps, r.usesStyleProp)}: ${Comp}Props) {
   return (
 ${ind(r.jsx, 4)}
@@ -1478,7 +1622,7 @@ function indexFile(): string {
       ? ""
       : axisNames.length === 1
         ? "variant"
-        : axisNames.map(kebab).join(", ");
+        : axisNames.map((a) => axisProp.get(a)!).join(", ");
   const reviewBlock = allTodos.length
     ? "\n// === REVIEW (all open TODOs, attributed to the variant) ===\n" +
       allTodos.map((t) => `// TODO: ${t}`).join("\n") +

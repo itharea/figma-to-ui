@@ -7,8 +7,8 @@
 // is reachable (argv[2], else /tmp/figparse/message_new.json) and skip cleanly
 // otherwise. Exits non-zero on any failure. Not imported by anything.
 import * as fs from "fs";
+import { load, key, I, type Mat } from "./lib/figma-index.mts";
 import * as os from "os";
-import { load, key } from "./lib/figma-index.mts";
 import { normalizeAssetRefs } from "./lib/assetref-lib.mts";
 import {
   letterSpacingToPx,
@@ -19,9 +19,23 @@ import {
   disambiguateJustify,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
-import { buildLayout, cornerRadiusOf } from "./lib/screens-lib.mts";
+import {
+  cornerRadiusOf,
+  buildScreen,
+  provenanceViolations,
+  type VarIndex,
+  imagePlacement,
+  type IRFill,
+  buildLayout,
+  type IRNode,
+} from "./lib/screens-lib.mts";
+import {
+  overlap,
+  overlapArea,
+  hasSignificantNonAdjacentOverlap,
+  sizingLines,
+} from "./lib/layout-lib.mts";
 import { assembleTypography } from "./lib/ir-lib.mts";
-import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
 import {
   cssVarName,
   treePath,
@@ -30,6 +44,8 @@ import {
   literalFor,
   topoOrder,
   emitTheme,
+  resolveMode,
+  variableUseCensus,
   type ThemeVar,
 } from "./lib/theme-lib.mts";
 import { spawnSync } from "child_process";
@@ -42,8 +58,18 @@ import {
   planIcon,
   isVariantSheet,
 } from "./lib/svg-lib.mts";
-import { deriveLogicals } from "./lib/components-lib.mts";
-import { slugify, uniqueSlug, kebab, camel, compIdent } from "./lib/naming.mts";
+import { deriveLogicals, mapValue, proposePropApi } from "./lib/components-lib.mts";
+import {
+  slugify,
+  uniqueSlug,
+  kebab,
+  camel,
+  compIdent,
+  propIdent,
+  axisPropNames,
+  isSafeIdent,
+  RESERVED_WORDS,
+} from "./lib/naming.mts";
 
 let pass = 0;
 let fail = 0;
@@ -86,6 +112,90 @@ eq("camel single word lowercased", camel("Icon"), "icon");
 eq("camel empty → prop", camel("—"), "prop");
 eq("compIdent → PascalCase", compIdent("product-card collections"), "ProductCardCollections");
 eq("compIdent empty → Component", compIdent(""), "Component");
+
+// ── naming: Latin transliteration (#49) ─────────────────────────────────────
+// slugify/kebab used to DROP non-ASCII rather than fold it, and their output is not
+// internal — kebab feeds mapValue, i.e. the public value union of a generated component,
+// and slugify names the files. Whole words were being lost ("öğütücü" → "tc"/"").
+for (const [fig, want] of [
+  ["öğütücü", "ogutucu"],
+  ["sütlaç", "sutlac"],
+  ["güllaç", "gullac"],
+  ["trileçe", "trilece"],
+  ["keşfet", "kesfet"],
+  ["açık", "acik"],
+  ["hazırlanıyor", "hazirlaniyor"],
+  ["iade talebi alındı", "iade-talebi-alindi"],
+] as const) {
+  eq(`slugify transliterates "${fig}"`, slugify(fig), want);
+  eq(`kebab transliterates "${fig}"`, kebab(fig), want);
+}
+// General Latin, not one language: strokes and ligatures have no NFKD decomposition.
+eq("slugify folds strokes + ligatures", slugify("Straße Æther Łódź"), "strasse-aether-lodz");
+eq("compIdent transliterates", compIdent("öğütücü seçimi"), "OgutucuSecimi");
+eq("mapValue folds a non-ASCII variant value", mapValue("Hazırlanıyor"), "hazirlaniyor");
+eq("mapValue keeps its synonyms", mapValue("L"), "large");
+
+// ── naming: identifier sanitisation (#49) ───────────────────────────────────
+// An axis / prop name reaches the emitted scaffold as a bare identifier — in the Props
+// type, in the destructuring pattern, and in the dispatcher's switch key. "item count"
+// (kebab → "item-count") and "in" (reserved) both made the file fail to PARSE.
+eq("propIdent: space → camelCase", propIdent("item count"), "itemCount");
+eq("propIdent: reserved word suffixed", propIdent("in"), "inProp");
+eq("propIdent: reserved word (class)", propIdent("class"), "classProp");
+eq("propIdent: leading digit prefixed", propIdent("941"), "prop941");
+eq("propIdent: already-safe name unchanged", propIdent("actionText"), "actionText");
+eq("propIdent: idempotent", propIdent(propIdent("item count")), "itemCount");
+eq("propIdent: transliterates", propIdent("Öğütücü tipi"), "ogutucuTipi");
+eq("propIdent: unnameable → prop", propIdent("—"), "prop");
+{
+  // The cheap end-to-end proof the scaffold parses: every emitted identifier must be
+  // bindable. Sweep the whole reserved set plus the shapes seen in real exports.
+  const names = [
+    ...RESERVED_WORDS,
+    "item count",
+    "941",
+    "—",
+    "a/b",
+    "iade talebi alındı",
+    "Öğütücü",
+    "  ",
+    "Size / L",
+  ];
+  const bad = names.filter((n) => !isSafeIdent(propIdent(n)));
+  check("propIdent: arbitrary names → bindable identifiers", bad.length === 0, bad.join(", "));
+}
+{
+  // Collision safety: two distinct axes that sanitise alike must NOT merge — merging
+  // drops an axis from the type while the dispatcher still composes both values.
+  const m = axisPropNames(["item count", "item-count", "in"]);
+  eq(
+    "axisPropNames: collision → suffixed, never merged",
+    [...m.values()],
+    ["itemCount", "itemCount2", "inProp"],
+  );
+  eq("axisPropNames: keyed by the raw axis name", m.get("item-count"), "itemCount2");
+}
+{
+  const api = proposePropApi({
+    axes: { type: ["kahve", "seki"], "item count": ["more than 3", "less than 4", "1"] },
+    variants: [],
+  });
+  eq(
+    "proposePropApi: axis with a space → a legal identifier",
+    api,
+    "type: 'kahve' | 'seki'; itemCount: 'more-than-3' | 'less-than-4' | '1'",
+  );
+  const keys = proposePropApi({ axes: { in: ["a"], "item count": ["b"] }, variants: [] })
+    .split(";")
+    .map((s) => s.split(":")[0].trim());
+  check("proposePropApi: every declared key is bindable", keys.every(isSafeIdent), keys.join(", "));
+}
+eq(
+  "proposePropApi: single axis is still `variant`",
+  proposePropApi({ axes: { "item count": ["öğütücü", "sütlaç"] }, variants: [] }),
+  "variant: 'ogutucu' | 'sutlac'",
+);
 
 // ── reconcile-lib: placeholder classifier (string half) ────────────────
 eq(
@@ -306,6 +416,128 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   );
 }
 
+// ── layout-lib: sizingLines — hug/fill/fixed per CSS axis ────────────────────
+{
+  // Synthetic IR nodes: a 200×40 box, varied only in the sizing fields under test.
+  const node = (p: Partial<IRNode>): IRNode => ({
+    id: "n_0",
+    path: "/Page/Frame",
+    guid: "1:1",
+    type: "frame",
+    name: "Frame",
+    box: { x: 0, y: 0, w: 200, h: 40, absX: 0, absY: 0 },
+    children: [],
+    ...p,
+  });
+  const HUG_W = "width: 'fit-content', // hug";
+  const HUG_H = "height: 'fit-content', // hug";
+
+  // A ROW stack's PRIMARY axis is horizontal, its COUNTER axis vertical…
+  eq(
+    "sizing row hug/fixed → hug width, fixed height",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "hug", counterSizing: "fixed" } })),
+    [HUG_W, "height: 40,"],
+  );
+  eq(
+    "sizing row fixed/hug → fixed width, hug height",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "fixed", counterSizing: "hug" } })),
+    ["width: 200,", HUG_H],
+  );
+  // …and a COLUMN stack's is the other way round.
+  eq(
+    "sizing column hug/fixed → hug height, fixed width",
+    sizingLines(node({ layout: { mode: "column", primarySizing: "hug", counterSizing: "fixed" } })),
+    ["width: 200,", HUG_H],
+  );
+  eq(
+    "sizing column fixed/hug → hug width, fixed height",
+    sizingLines(node({ layout: { mode: "column", primarySizing: "fixed", counterSizing: "hug" } })),
+    [HUG_W, "height: 40,"],
+  );
+  // Both axes fixed → the measured box, exactly as before the fix (regression guard).
+  eq(
+    "sizing row fixed/fixed → measured box",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "fixed", counterSizing: "fixed" } })),
+    ["width: 200,", "height: 40,"],
+  );
+
+  // FILL: `grow` fills along the PARENT's primary axis, `alignSelf:'stretch'` across its
+  // counter one — so which CSS axis is dropped depends on parentMode, not on the node.
+  eq(
+    "sizing grow in a row parent → width omitted",
+    sizingLines(node({ grow: 1, parentMode: "row" })),
+    ["height: 40,"],
+  );
+  eq(
+    "sizing grow in a column parent → height omitted",
+    sizingLines(node({ grow: 1, parentMode: "column" })),
+    ["width: 200,"],
+  );
+  eq(
+    "sizing stretch in a row parent → height omitted",
+    sizingLines(node({ alignSelf: "stretch", parentMode: "row" })),
+    ["width: 200,"],
+  );
+  eq(
+    "sizing stretch in a column parent → width omitted",
+    sizingLines(node({ alignSelf: "stretch", parentMode: "column" })),
+    ["height: 40,"],
+  );
+  // grow + stretch in the same parent fills BOTH axes → nothing to emit.
+  eq(
+    "sizing grow + stretch → both axes omitted",
+    sizingLines(node({ grow: 1, alignSelf: "stretch", parentMode: "row" })),
+    [],
+  );
+  // Fill outranks the node's OWN mode: a hugging row told to grow must not emit hug.
+  eq(
+    "sizing fill outranks own hug",
+    sizingLines(
+      node({
+        layout: { mode: "row", primarySizing: "hug", counterSizing: "fixed" },
+        grow: 1,
+        parentMode: "row",
+      }),
+    ),
+    ["height: 40,"],
+  );
+  // No parentMode ⇒ the parent is not auto-layout, so nothing fills: keep the box.
+  eq("sizing grow without parentMode → measured box", sizingLines(node({ grow: 1 })), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  // A plain node with no auto-layout keeps its measured box (unchanged behaviour).
+  eq("sizing no layout → measured box", sizingLines(node({})), ["width: 200,", "height: 40,"]);
+  // A zero measurement stays omitted, as it always was.
+  eq(
+    "sizing zero height omitted",
+    sizingLines(node({ box: { x: 0, y: 0, w: 200, h: 0, absX: 0, absY: 0 } })),
+    ["width: 200,"],
+  );
+
+  // TEXT nodes state the same intent in autoResize.
+  const text = (autoResize: string | null) => node({ type: "text", name: "Label", autoResize });
+  eq("sizing text autoResize HEIGHT → fixed width, hug height", sizingLines(text("HEIGHT")), [
+    "width: 200,",
+    HUG_H,
+  ]);
+  eq("sizing text autoResize WIDTH_AND_HEIGHT → hug both", sizingLines(text("WIDTH_AND_HEIGHT")), [
+    HUG_W,
+    HUG_H,
+  ]);
+  eq("sizing text autoResize NONE → fixed both", sizingLines(text("NONE")), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  eq("sizing text autoResize absent → fixed both", sizingLines(text(null)), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  // A node whose IR carries no box at all (defensive: the field is schema-required, but
+  // sizingLines must never emit `width: undefined`).
+  eq("sizing missing box → nothing", sizingLines(node({ box: undefined as any })), []);
+}
+
 // ── screens-lib: cornerRadiusOf (independent per-corner) ──
 {
   // Independent corners, only the left pair set (slider fill 1153:1957): TR/BR absent
@@ -345,6 +577,207 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   // Uniform cornerRadius fallback, and the empty case.
   eq("corner uniform fallback → number", cornerRadiusOf({ cornerRadius: 12 }), 12);
   eq("corner none → undefined", cornerRadiusOf({}), undefined);
+}
+
+// ── screens-lib: fill and stroke are independent node paints (both survive) ──
+{
+  // A node's fill and its stroke live in two SEPARATE paint arrays; collapsing the
+  // node to one colour drops whichever loses, and the survivor looks plausible.
+  // `bound` binds the paint to a variable, so `hex` must come from the variable's
+  // RESOLVED value — never the (deliberately wrong here) cached literal.
+  const paint = (v: number, bound?: [number, number]) => ({
+    type: "SOLID",
+    visible: true,
+    color: { r: v, g: v, b: v, a: 1 },
+    ...(bound
+      ? {
+          colorVar: {
+            value: { alias: { guid: { sessionID: bound[0], localID: bound[1] } } },
+            dataType: "ALIAS",
+            resolvedDataType: "COLOR",
+          },
+        }
+      : {}),
+  });
+  const ir = (fields: any, varIndex: VarIndex = new Map()) =>
+    buildScreen(
+      {
+        guid: "1:10",
+        path: "1:10",
+        type: "VECTOR",
+        name: "glyph",
+        size: { x: 24, y: 24 },
+        children: [],
+        ...fields,
+      },
+      I,
+      {},
+      varIndex,
+    );
+
+  // regression guard: a fill-only node is untouched — same `color`, no `stroke` key.
+  const fillOnly = ir({ fillPaints: [paint(1)] });
+  eq("paints: fill-only node keeps its color", fillOnly.color?.hex, "#ffffff");
+  eq("paints: fill-only node emits no stroke", fillOnly.stroke, undefined);
+
+  // stroke-only (an outline glyph): the stroke is the node's only colour.
+  const strokeOnly = ir({ strokePaints: [paint(0.5)], strokeWeight: 2 });
+  eq("paints: stroke-only node emits no color", strokeOnly.color, undefined);
+  eq("paints: stroke-only node carries the stroke hex", strokeOnly.stroke?.hex, "#808080");
+
+  // the defect: filled AND outlined, each bound to its OWN token. Both must survive
+  // with their own hex and var — the fill must not stand in for the stroke.
+  const varIndex: VarIndex = new Map([
+    ["9:1", { name: "Color/surface/base", value: "#ffffff" }],
+    ["9:2", { name: "Color/border/strong", value: "#333333" }],
+  ]);
+  const both = ir(
+    {
+      fillPaints: [paint(0, [9, 1])], // cached literals are stale; the vars win
+      strokePaints: [paint(0, [9, 2])],
+      strokeWeight: 2,
+      strokeAlign: "CENTER",
+    },
+    varIndex,
+  );
+  eq(
+    "paints: filled+outlined keeps the fill",
+    [both.color?.hex, both.color?.var],
+    ["#ffffff", "Color/surface/base"],
+  );
+  eq(
+    "paints: filled+outlined keeps the stroke",
+    [both.stroke?.hex, both.stroke?.var],
+    ["#333333", "Color/border/strong"],
+  );
+  eq("paints: a bound stroke is match:bound", both.stroke?.match, "bound");
+  eq("paints: stroke provenance keys match color's", provenanceViolations(both), []);
+  // weight is NOT duplicated onto the node — a 2px outline vs a hairline is read off
+  // style.strokes[], which is built from the same paint array and always accompanies it.
+  eq("paints: stroke weight readable from style.strokes", both.style?.strokes?.[0]?.weight, 2);
+
+  // visibility: an invisible stroke paint is ignored, and a visible one stacked
+  // behind it still wins (paint arrays are stacks, not single slots).
+  const hidden = ir({ fillPaints: [paint(1)], strokePaints: [{ ...paint(0), visible: false }] });
+  eq("paints: invisible stroke paint is ignored", hidden.stroke, undefined);
+  eq("paints: invisible stroke does not disturb the fill", hidden.color?.hex, "#ffffff");
+  const stacked = ir({ strokePaints: [{ ...paint(0), visible: false }, paint(0.5)] });
+  eq("paints: first VISIBLE stroke paint wins", stacked.stroke?.hex, "#808080");
+}
+
+// ── screens-lib: image fill placement (imageScaleMode → background-size) ─────
+{
+  const img = (extra: Partial<IRFill> = {}): IRFill => ({
+    type: "image",
+    imageHash: "ab",
+    ...extra,
+  });
+  const css = (f: IRFill) => {
+    const p = imagePlacement(f);
+    return [p.size, p.repeat, p.resizeMode];
+  };
+  // The four modes are NOT interchangeable: emitting them all as `cover` scales a
+  // STRETCH raster by the larger ratio and crops the overflow by a different amount
+  // per source aspect (a 20-variant photo set: 14 STRETCH + 4 FILL visible paints).
+  eq("image FILL → cover", css(img({ scaleMode: "FILL" })), ["cover", "no-repeat", "cover"]);
+  eq("image FIT → contain", css(img({ scaleMode: "FIT" })), ["contain", "no-repeat", "contain"]);
+  eq("image STRETCH → 100% 100%", css(img({ scaleMode: "STRETCH" })), [
+    "100% 100%",
+    "no-repeat",
+    "stretch",
+  ]);
+  eq("image TILE → repeat + intrinsic size", css(img({ scaleMode: "TILE" })), [
+    "auto",
+    "repeat",
+    "repeat",
+  ]);
+  eq(
+    "image TILE anchors top-left",
+    imagePlacement(img({ scaleMode: "TILE" })).position,
+    "top left",
+  );
+  // Regression guard: the previously-correct inputs must not move. An ABSENT mode keeps
+  // the historical `cover` (Figma's own default for a new image paint) and stays silent.
+  eq("image no mode → cover (unchanged)", css(img()), ["cover", "no-repeat", "cover"]);
+  eq("image no mode → no TODO note", imagePlacement(img()).note, undefined);
+  eq("image FILL → no TODO note", imagePlacement(img({ scaleMode: "FILL" })).note, undefined);
+  eq("image STRETCH → no TODO note", imagePlacement(img({ scaleMode: "STRETCH" })).note, undefined);
+  // The three cases CSS cannot express must come back flagged, never silently wrong.
+  // STRETCH + a non-null imageTransform is Figma's "Crop" (a 2×3 placement matrix), so
+  // `100% 100%` would distort it — approximated as cover and reported.
+  const crop = imagePlacement(
+    img({
+      scaleMode: "STRETCH",
+      imageTransform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    }),
+  );
+  eq("image STRETCH+crop matrix → cover", crop.size, "cover");
+  check("image STRETCH+crop matrix → flagged", /crop matrix/.test(crop.note ?? ""), crop.note);
+  const tiled = imagePlacement(img({ scaleMode: "TILE", scalingFactor: 0.5 }));
+  eq("image TILE factor ≠ 1 → size still auto", tiled.size, "auto");
+  check("image TILE factor ≠ 1 → flagged", /scalingFactor 0\.5/.test(tiled.note ?? ""), tiled.note);
+  eq(
+    "image TILE factor 1 → no note",
+    imagePlacement(img({ scaleMode: "TILE", scalingFactor: 1 })).note,
+    undefined,
+  );
+  const unknown = imagePlacement(img({ scaleMode: "SOMETHING_NEW" }));
+  eq("image unknown mode → cover default", unknown.size, "cover");
+  check(
+    "image unknown mode → flagged",
+    /unknown imageScaleMode/.test(unknown.note ?? ""),
+    unknown.note,
+  );
+}
+
+// ── screens-lib: stacked image paints — the VISIBLE one wins ────────────────
+{
+  // Nodes do carry stacked image paints whose first entry is hidden. style.fills[] is a
+  // VISIBLE-paint list, so every emitter's "first image fill" is the first VISIBLE one —
+  // taking fillPaints[0] off the raw node would extract the wrong raster (and the wrong
+  // scale mode with it).
+  const IDENT: Mat = [1, 0, 0, 1, 0, 0];
+  const rect = (fillPaints: any[]): any => ({
+    guid: "1:1",
+    path: "Root",
+    name: "photo",
+    type: "RECTANGLE",
+    size: { x: 100, y: 60 },
+    transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    fillPaints,
+    children: [],
+  });
+  const stacked = buildScreen(
+    rect([
+      { type: "IMAGE", visible: false, image: { hash: "aaaa" }, imageScaleMode: "FILL" },
+      { type: "IMAGE", image: { hash: "bbbb" }, imageScaleMode: "STRETCH" },
+    ]),
+    IDENT,
+  );
+  eq("stacked paints: hidden fill dropped", stacked.style?.fills?.length, 1);
+  eq("stacked paints: the VISIBLE raster wins", stacked.style?.fills?.[0].imageHash, "bbbb");
+  eq("stacked paints: the VISIBLE mode wins", stacked.style?.fills?.[0].scaleMode, "STRETCH");
+  // Placement fields are pass-throughs, emitted only where they mean something:
+  // scalingFactor for TILE, imageTransform only when non-null.
+  const tile = buildScreen(
+    rect([{ type: "IMAGE", image: { hash: "cccc" }, imageScaleMode: "TILE", scalingFactor: 0.25 }]),
+    IDENT,
+  );
+  eq("IMAGE paint → placement carried into the IR", tile.style?.fills?.[0], {
+    type: "image",
+    imageHash: "cccc",
+    scaleMode: "TILE",
+    scalingFactor: 0.25,
+  });
+  const plain = buildScreen(
+    rect([{ type: "IMAGE", image: { hash: "dddd" }, imageScaleMode: "FILL", scalingFactor: 0.25 }]),
+    IDENT,
+  );
+  eq("non-TILE paint drops the meaningless scalingFactor", plain.style?.fills?.[0], {
+    type: "image",
+    imageHash: "dddd",
+    scaleMode: "FILL",
+  });
 }
 
 // ── screens-lib: buildLayout sizing defaults (the two axes default OPPOSITELY) ──
@@ -1048,6 +1481,171 @@ const tv = (
   );
 }
 
+// ── theme-lib: --mode roots the REQUESTED mode (synthetic two-mode catalog) ──
+// A variable present in both modes: rooting must pick the requested mode's value, and every
+// other mode must survive as a switchable class emitted AFTER :root (equal specificity).
+const dual = (name: string, guid: string, a: string, b: string): ThemeVar => ({
+  id: `token:${guid}`,
+  name,
+  set: "S",
+  type: "STRING",
+  modes: { "Mode 1": a, "Brand / alt": b },
+  guid,
+  defaultMode: "Mode 1",
+});
+{
+  const vars = [dual("Typography/family/heading", "f1", "Alpha", "Beta")];
+  const base = emitTheme(vars, { framework: "web" });
+  check(
+    "emit web: no --mode keeps the collection default rooted",
+    /:root \{\n  --typography-family-heading: Alpha;/.test(base.code),
+    base.code,
+  );
+  check(
+    "emit web: no --mode still emits the other mode as a class",
+    base.code.includes(".mode-brand-alt {"),
+    base.code,
+  );
+  const picked = emitTheme(vars, { framework: "web", activeMode: "Brand / alt" });
+  check(
+    "emit web: --mode roots the REQUESTED mode",
+    /:root \{\n  --typography-family-heading: Beta;/.test(picked.code),
+    picked.code,
+  );
+  check(
+    "emit web: the unrooted mode is still emitted as a class",
+    /\.mode-mode-1 \{\n  --typography-family-heading: Alpha;/.test(picked.code),
+    picked.code,
+  );
+  check(
+    "emit web: the class block comes AFTER :root so the opt-in can win",
+    picked.code.indexOf(":root {") < picked.code.indexOf(".mode-mode-1 {"),
+    picked.code,
+  );
+  const rn = emitTheme(vars, { framework: "rn", activeMode: "Brand / alt" });
+  check(
+    "emit rn: --mode drives defaultMode, both modes kept",
+    rn.code.includes("export const defaultMode = 'Brand / alt'") &&
+      rn.code.includes("'Mode 1': (() =>"),
+    rn.code,
+  );
+  // a mode name is free text: the slug the CSS advertises must select it back.
+  eq(
+    "resolveMode by slug",
+    resolveMode(["Mode 1", "Brand / alt"], "brand-alt").mode,
+    "Brand / alt",
+  );
+  eq("resolveMode case-insensitive", resolveMode(["Mode 1"], "mode 1").mode, "Mode 1");
+  const miss = resolveMode(["Mode 1", "Brand / alt"], "Nope");
+  eq(
+    "resolveMode unknown reports, never falls back",
+    [miss.mode, (miss as any).reason],
+    [null, "unknown"],
+  );
+  const unknown = emitTheme(vars, { framework: "web", activeMode: "Nope" });
+  check(
+    "emit web: an unmatched mode warns instead of silently rooting the default",
+    unknown.warnings.some((w) => /requested mode "Nope" is unknown/.test(w)),
+    JSON.stringify(unknown.warnings),
+  );
+}
+
+// ── theme-lib: live-use census settles duplicate names ──
+// A renumbered scale can leave superseded variables behind under the SAME name; reference
+// count from non-VARIABLE nodes is the only thing in the bytes that tells them apart.
+{
+  const g = (s: number, l: number) => ({ sessionID: s, localID: l });
+  const nodes = [
+    // the two same-named variables themselves — a VARIABLE never votes for another variable
+    { guid: g(1, 128), type: "VARIABLE", name: "T/size/xs" },
+    { guid: g(129, 3353), type: "VARIABLE", name: "T/size/xs" },
+    // a text style binding the live one (deep FONT_STYLE-shaped nesting) …
+    {
+      guid: g(5, 1),
+      type: "TEXT",
+      variableConsumptionMap: {
+        entries: [
+          {
+            variableField: "FONT_SIZE",
+            variableData: { value: { alias: { guid: g(129, 3353) } } },
+          },
+        ],
+      },
+    },
+    // … and a paint binding it too (the other binding shape).
+    {
+      guid: g(5, 2),
+      type: "FRAME",
+      fillPaints: [{ colorVar: { value: { alias: { guid: g(129, 3353) } } } }],
+    },
+  ];
+  const census = variableUseCensus(nodes);
+  eq("census counts every binding shape", census.get("129:3353"), 2);
+  eq("census: the superseded variable has zero references", census.get("1:128"), undefined);
+
+  const dead = tv("T/size/xs", "FLOAT", "14", "1:128");
+  const live = tv("T/size/xs", "FLOAT", "16", "129:3353");
+  // DECLARATION ORDER MUST NOT MATTER — the whole defect was that it did.
+  const orders: [string, ThemeVar[]][] = [
+    ["dead first", [dead, live]],
+    ["live first", [live, dead]],
+  ];
+  for (const [label, vars] of orders) {
+    const web = emitTheme(vars, { framework: "web", uses: census });
+    check(
+      `census (${label}): the live variable takes the canonical name`,
+      web.code.includes("--t-size-xs: 16"),
+      web.code,
+    );
+    check(
+      `census (${label}): the zero-reference duplicate is dropped, not suffixed`,
+      !web.code.includes("--t-size-xs-2"),
+      web.code,
+    );
+    eq(
+      `census (${label}): the drop is reported`,
+      web.dropped.map((d) => [d.name, d.guid, d.keptGuid]),
+      [["T/size/xs", "1:128", "129:3353"]],
+    );
+  }
+  // no census → nothing is dropped, but the tie-break is the guid (later-created wins),
+  // never array order: both orderings must agree.
+  const a = emitTheme([dead, live], { framework: "web" });
+  const b = emitTheme([live, dead], { framework: "web" });
+  check(
+    "no census: tie breaks on guid, not declaration order",
+    a.code.includes("--t-size-xs: 16") && b.code.includes("--t-size-xs: 16"),
+    a.code + b.code,
+  );
+  check(
+    "no census: the duplicate is kept and suffixed (nothing lost)",
+    a.dropped.length === 0 && a.code.includes("--t-size-xs-2: 14"),
+    a.code,
+  );
+  check(
+    "no census: the suffixing still warns",
+    a.warnings.some((w) => /name collision/.test(w)),
+    JSON.stringify(a.warnings),
+  );
+  // a duplicate that ANOTHER variable aliases is live even with zero direct references.
+  const aliased = tv("T/size/s", "FLOAT", "18", "2:1");
+  const usedTwin = tv("T/size/s", "FLOAT", "20", "3:1");
+  const referrer = tv("T/size/alias", "FLOAT", "18", "4:1", "2:1");
+  const guarded = emitTheme([aliased, usedTwin, referrer], {
+    framework: "web",
+    uses: new Map([
+      ["3:1", 4],
+      ["4:1", 1],
+    ]),
+  });
+  eq("census: an alias target is never dropped", guarded.dropped.length, 0);
+  check(
+    "census: the referenced twin still takes the canonical name",
+    guarded.code.includes("--t-size-s: 20") && guarded.code.includes("--t-size-s-2: 18"),
+    guarded.code,
+  );
+}
+
 // ── components-lib: deriveLogicals prop model (synthetic) ──
 // Pure transform over synthetic ComponentProp[]; no decode / IR-artifact dependency.
 const bind = (node: string, field: string) => [{ node, field }];
@@ -1171,6 +1769,51 @@ const bind = (node: string, field: string) => [{ node, field }];
     JSON.stringify(lg),
   );
 }
+{
+  // #49 — a component prop is free to be named `in`. It lands in a destructuring pattern
+  // (`function X({ header, in })`), which is a SyntaxError, so the prop model must
+  // sanitise; two props that sanitise alike must still stay distinct.
+  const { logicals } = deriveLogicals({
+    props: [
+      {
+        name: "in",
+        rawName: "in",
+        kind: "text",
+        defKey: "t5",
+        default: null,
+        bindings: bind("N5", "characters"),
+      },
+      {
+        name: "In",
+        rawName: "In",
+        kind: "instanceSwap",
+        defKey: "s5",
+        default: null,
+        bindings: bind("N6", "symbolId"),
+      },
+      {
+        name: "item count",
+        rawName: "item count",
+        kind: "text",
+        defKey: "t6",
+        default: "2",
+        bindings: bind("N7", "characters"),
+      },
+    ],
+  });
+  eq(
+    "deriveLogicals: reserved name suffixed, collision de-duped",
+    logicals.map((l) => l.name),
+    ["inProp", "inProp2", "itemCount"],
+  );
+  const bad = logicals.filter((l) => !isSafeIdent(l.name)).map((l) => l.name);
+  check("deriveLogicals: every emitted prop name is bindable", bad.length === 0, bad.join(", "));
+  check(
+    "deriveLogicals: raw Figma names kept for traceability",
+    logicals.every((l) => l.figNames.length > 0),
+    JSON.stringify(logicals.map((l) => l.figNames)),
+  );
+}
 
 // ── svg-lib: geometry extraction + recolor + dedup-by-shape (internal icons) ─
 {
@@ -1239,6 +1882,36 @@ const bind = (node: string, field: string) => [{ node, field }];
     "svg: rn mono icon = react-native-svg + fill={color}",
     /react-native-svg/.test(rnMono) && /fill=\{color\}/.test(rnMono),
     rnMono.slice(0, 160),
+  );
+
+  // A glyph that is BOTH filled and outlined: the pre-outlined strokeGeometry is a
+  // second baked paint, so the extraction yields two distinct fills and the emitted
+  // component must keep BOTH. Driving it mono (the old fills-only paint count) would
+  // recolour the outline to the fill via currentColor and lose the outline entirely.
+  const outlined: any = {
+    guid: { sessionID: 1, localID: 1 },
+    type: "VECTOR",
+    visible: true,
+    opacity: 1,
+    size: { x: 24, y: 24 },
+    fillGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+    fillPaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 1, g: 1, b: 1, a: 1 } }],
+    strokeGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+    strokePaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0.2, g: 0.2, b: 0.2 } }],
+    strokeWeight: 2,
+  };
+  const geoBoth = extractGeometry(
+    { msg: { blobs: [blob] }, byKey: new Map([["1:1", outlined]]), children: new Map() } as any,
+    "1:1",
+  );
+  eq("svg: filled+outlined glyph has two distinct paints", geoBoth.fills, ["#ffffff", "#333333"]);
+  const webMulti = emitIconComponent("OutlinedIcon", geoBoth, { web: true, mono: false });
+  check(
+    "svg: filled+outlined icon bakes BOTH paints (no currentColor flattening)",
+    /fill="#ffffff"/.test(webMulti) &&
+      /fill="#333333"/.test(webMulti) &&
+      !/currentColor/.test(webMulti),
+    webMulti.slice(0, 400),
   );
 }
 
@@ -1630,6 +2303,180 @@ const bind = (node: string, field: string) => [{ node, field }];
     /usage: raw\.mts/.test(r.stderr ?? ""),
     (r.stderr ?? "").slice(0, 120),
   );
+}
+
+// ── codegen --images: raster refs resolve against the MODULE, not the page ───
+// The emission lives in the CLI itself (nodeStyleBody + variantFile close over the parsed
+// flags), so this drives the real binary over a SYNTHETIC IR + images dir and asserts on the
+// emitted variant files. Covers both halves of the defect: the document-relative URL, and
+// the `background` shorthand sitting next to the `backgroundImage` longhand — React patches
+// only the keys whose values changed, so re-applying the shorthand on a variant change
+// silently resets background-image to none.
+{
+  const codegenPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli", "codegen.mts");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-codegen-"));
+  try {
+    // Two rasters whose content hashes share a long prefix: the import identifier derived
+    // from a hash-named file has to stay unique (and a valid identifier) even then.
+    const hashA = "aaaaaaaaaaaa1111";
+    const hashB = "aaaaaaaaaaaa2222";
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // magic bytes only
+    const imagesDir = path.join(tmp, "images");
+    fs.mkdirSync(imagesDir, { recursive: true });
+    fs.writeFileSync(path.join(imagesDir, hashA), png); // extension-less, as the .fig stores it
+    fs.writeFileSync(path.join(imagesDir, hashB), png);
+
+    const irDir = path.join(tmp, "ir");
+    fs.mkdirSync(path.join(irDir, "components"), { recursive: true });
+    fs.mkdirSync(path.join(irDir, "screens"), { recursive: true });
+    const box = (w: number, h: number) => ({ x: 0, y: 0, w, h });
+    // variant "photo": root carries a solid fill AND an image fill (the shorthand trap),
+    // its child carries a second, distinct image fill (the identifier-collision case).
+    const child = {
+      id: "n_photo",
+      path: "/photo",
+      guid: "1:11",
+      type: "frame",
+      name: "Photo",
+      box: box(100, 60),
+      style: { fills: [{ type: "image", imageHash: hashB }] },
+      children: [],
+    };
+    const photoVariant = {
+      id: "n_a",
+      path: "/a",
+      guid: "1:10",
+      type: "frame",
+      name: "Tile",
+      box: box(100, 100),
+      style: {
+        fills: [
+          { type: "solid", hex: "#ff0000" },
+          { type: "image", imageHash: hashA },
+        ],
+      },
+      children: [child],
+    };
+    // variant "plain": a solid fill and nothing else — the regression guard.
+    const plainVariant = {
+      id: "n_b",
+      path: "/b",
+      guid: "1:20",
+      type: "frame",
+      name: "Tile",
+      box: box(100, 100),
+      style: { fills: [{ type: "solid", hex: "#00ff00" }] },
+      children: [],
+    };
+    fs.writeFileSync(
+      path.join(irDir, "screens", "s.json"),
+      JSON.stringify({
+        id: "n_root",
+        path: "/",
+        guid: "1:0",
+        type: "frame",
+        name: "Screen",
+        box: box(400, 400),
+        children: [photoVariant, plainVariant],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "manifest.json"),
+      JSON.stringify({ artifacts: { screens: ["screens/s.json"] } }),
+    );
+    fs.writeFileSync(
+      path.join(irDir, "components", "tile.json"),
+      JSON.stringify({
+        name: "Tile",
+        guid: "1:1",
+        axes: { State: ["photo", "plain"] },
+        variants: [
+          { guidKey: "1:10", props: { State: "photo" }, rawName: "State=photo", bindings: [] },
+          { guidKey: "1:20", props: { State: "plain" }, rawName: "State=plain", bindings: [] },
+        ],
+      }),
+    );
+
+    const run = (out: string, extra: string[]) =>
+      spawnSync(
+        process.argv[0],
+        [
+          codegenPath,
+          irDir,
+          "Tile",
+          "--framework",
+          "web",
+          "--out",
+          out,
+          "--images",
+          imagesDir,
+          ...extra,
+        ],
+        { encoding: "utf8" },
+      );
+    const read = (out: string, file: string) => {
+      const p = path.join(out, "tile", file);
+      return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+    };
+
+    const outBundler = path.join(tmp, "out-bundler");
+    const rb = run(outBundler, []);
+    check("codegen --images: run exits 0", rb.status === 0, (rb.stderr ?? "").slice(-300));
+    const photoFile = read(outBundler, "photo.tsx");
+    const plainFile = read(outBundler, "plain.tsx");
+
+    check(
+      "codegen --images: image fill emits a static import, not a page-relative url",
+      /^import asset_aaaaaaaaaaaa from '\.\/assets\/aaaaaaaaaaaa1111\.png';$/m.test(photoFile) &&
+        !/url\('\.\/assets\//.test(photoFile),
+      photoFile.slice(0, 400),
+    );
+    check(
+      "codegen --images: backgroundImage reads the bundler-resolved url",
+      photoFile.includes("backgroundImage: `url(${assetUrl(asset_aaaaaaaaaaaa)})`,"),
+      photoFile.slice(0, 400),
+    );
+    check(
+      "codegen --images: the url helper accepts a string OR a .src record",
+      /typeof a === 'string' \? a : a\.src/.test(photoFile),
+      photoFile.slice(0, 400),
+    );
+    {
+      const idents = [...photoFile.matchAll(/^import (\S+) from '\.\/assets\/(\S+)';$/gm)].map(
+        (m) => m[1],
+      );
+      eq("codegen --images: one import per distinct raster", idents.length, 2);
+      check(
+        "codegen --images: colliding hash prefixes get distinct valid identifiers",
+        new Set(idents).size === idents.length &&
+          idents.every((i) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(i)),
+        idents.join(", "),
+      );
+    }
+    check(
+      "codegen: image + solid fill emits backgroundColor, never the background shorthand",
+      /backgroundColor: '#ff0000',/.test(photoFile) && !/\bbackground:/.test(photoFile),
+      photoFile.slice(0, 400),
+    );
+    check(
+      "codegen: a solid-only fill still emits the web background shorthand",
+      /\bbackground: '#00ff00',/.test(plainFile),
+      plainFile.slice(0, 400),
+    );
+
+    const outCss = path.join(tmp, "out-css");
+    const rc = run(outCss, ["--asset-base", "/static/img/"]);
+    check("codegen --asset-base: run exits 0", rc.status === 0, (rc.stderr ?? "").slice(-300));
+    const cssPhoto = read(outCss, "photo.tsx");
+    check(
+      "codegen --asset-base: literal url under the configured base, no import",
+      cssPhoto.includes(`backgroundImage: "url('/static/img/aaaaaaaaaaaa1111.png')",`) &&
+        !/from '\.\/assets\//.test(cssPhoto),
+      cssPhoto.slice(0, 400),
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 // ── assetref-lib: published-library assetRef bindings → local guids ──────────
