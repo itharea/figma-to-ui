@@ -7,7 +7,9 @@
 // is reachable (argv[2], else /tmp/figparse/message_new.json) and skip cleanly
 // otherwise. Exits non-zero on any failure. Not imported by anything.
 import * as fs from "fs";
+import * as os from "os";
 import { load, key } from "./lib/figma-index.mts";
+import { normalizeAssetRefs } from "./lib/assetref-lib.mts";
 import {
   letterSpacingToPx,
   letterSpacingStr,
@@ -432,7 +434,13 @@ function makeIndex(nodes: any[]): ReturnType<typeof load> {
   }
   for (const arr of children.values())
     arr.sort((a, b) => (a.parentIndex.position < b.parentIndex.position ? -1 : 1));
-  return { msg: {} as any, nodes, byKey, children };
+  return {
+    msg: {} as any,
+    nodes,
+    byKey,
+    children,
+    assetRefs: { keyedAssets: 0, rewrites: 0, byField: {}, unresolved: {} },
+  };
 }
 {
   // Cycle: master M(1:100) contains an instance pointing back to M → must terminate.
@@ -914,6 +922,135 @@ const bind = (node: string, field: string) => [{ node, field }];
     /usage: raw\.mts/.test(r.stderr ?? ""),
     (r.stderr ?? "").slice(0, 120),
   );
+}
+
+// ── assetref-lib: published-library assetRef bindings → local guids ──────────
+// A .fig that subscribes to its own published library addresses every binding by
+// `{assetRef:{key,version}}`; every resolver in lib/ reads `.guid`. These build both
+// shapes by hand — the live-fixture path can only ever exercise whichever one the
+// decode at hand happens to use.
+{
+  const g = (localID: number) => ({ sessionID: 7, localID });
+  const msg: any = {
+    nodeChanges: [
+      { guid: g(10), type: "VARIABLE", key: "KEY_COLOR", name: "a" },
+      { guid: g(11), type: "VARIABLE_SET", key: "KEY_SET", name: "b" },
+      { guid: g(12), type: "TEXT", key: "KEY_TYPE", name: "c" },
+      {
+        guid: g(20),
+        type: "SYMBOL",
+        // every binding site the format puts an alias at, in its assetRef shape
+        fillPaints: [
+          { colorVar: { value: { alias: { assetRef: { key: "KEY_COLOR", version: "v1" } } } } },
+          { colorVar: { value: { alias: { assetRef: { key: "KEY_MISSING", version: "v1" } } } } },
+        ],
+        variableConsumptionMap: {
+          entries: [
+            { fields: [{ fieldName: 5, value: { alias: { assetRef: { key: "KEY_COLOR" } } } }] },
+          ],
+        },
+        styleIdForText: { assetRef: { key: "KEY_TYPE" } },
+        variableSetID: { assetRef: { key: "KEY_SET" } },
+      },
+      {
+        guid: g(21),
+        type: "SYMBOL",
+        // already re-addressed (or authored guid-first): the existing guid must win
+        styleIdForText: { guid: g(99), assetRef: { key: "KEY_TYPE" } },
+      },
+    ],
+  };
+  const rep = normalizeAssetRefs(msg);
+  const sym = msg.nodeChanges[3];
+
+  eq("assetref: keyed local assets mapped", rep.keyedAssets, 3);
+  eq("assetref: rewrites counted", rep.rewrites, 4);
+  // (a) a key that resolves locally gains a sibling guid …
+  eq("assetref: fillPaints colorVar alias resolved", sym.fillPaints[0].colorVar.value.alias.guid, {
+    sessionID: 7,
+    localID: 10,
+  });
+  // … and the original assetRef survives (non-destructive re-addressing)
+  eq(
+    "assetref: assetRef kept alongside guid",
+    sym.fillPaints[0].colorVar.value.alias.assetRef.key,
+    "KEY_COLOR",
+  );
+  // (d) nested objects, arrays and map-shaped fields are all reached
+  eq(
+    "assetref: consumption-map entry resolved",
+    sym.variableConsumptionMap.entries[0].fields[0].value.alias.guid,
+    { sessionID: 7, localID: 10 },
+  );
+  eq("assetref: styleIdForText resolved", sym.styleIdForText.guid, { sessionID: 7, localID: 12 });
+  eq("assetref: variableSetID resolved", sym.variableSetID.guid, { sessionID: 7, localID: 11 });
+  eq(
+    "assetref: field trail reported per site",
+    rep.byField["SYMBOL/fillPaints[]/colorVar/value/alias"],
+    1,
+  );
+  // (b) a key naming no local node is left alone and reported, never invented
+  eq(
+    "assetref: unresolvable key untouched",
+    sym.fillPaints[1].colorVar.value.alias.guid,
+    undefined,
+  );
+  eq("assetref: unresolvable key reported", rep.unresolved["KEY_MISSING"], 1);
+  // (c) an existing guid is never overwritten
+  eq("assetref: existing guid wins", msg.nodeChanges[4].styleIdForText.guid, {
+    sessionID: 7,
+    localID: 99,
+  });
+  // idempotent — a second pass has nothing left to do
+  eq("assetref: re-run rewrites nothing", normalizeAssetRefs(msg).rewrites, 0);
+}
+{
+  // (e) a guid-addressed export must come through byte-identical, even when its nodes do
+  // publish keys (a library file binding its own assets locally).
+  const g = (localID: number) => ({ sessionID: 3, localID });
+  const msg: any = {
+    nodeChanges: [
+      { guid: g(1), type: "VARIABLE", key: "KEY_COLOR", name: "a" },
+      {
+        guid: g(2),
+        type: "SYMBOL",
+        fillPaints: [{ colorVar: { value: { alias: { guid: g(1) } } } }],
+        styleIdForText: { guid: g(1) },
+      },
+    ],
+  };
+  const before = JSON.stringify(msg);
+  const rep = normalizeAssetRefs(msg);
+  eq("assetref: guid-addressed export unchanged", JSON.stringify(msg), before);
+  eq("assetref: guid-addressed export has no rewrites", rep.rewrites, 0);
+  eq("assetref: guid-addressed export has no unresolved", Object.keys(rep.unresolved).length, 0);
+}
+{
+  // The rewrite is unconditional: it must happen for anything that loads a message, not
+  // only for callers that remember to run the diagnostic CLI.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "figselftest-"));
+  const p = path.join(dir, "message.json");
+  fs.writeFileSync(
+    p,
+    JSON.stringify({
+      nodeChanges: [
+        { guid: { sessionID: 1, localID: 1 }, type: "VARIABLE", key: "KEY_COLOR", name: "a" },
+        {
+          guid: { sessionID: 1, localID: 2 },
+          type: "SYMBOL",
+          fillPaints: [{ colorVar: { value: { alias: { assetRef: { key: "KEY_COLOR" } } } } }],
+        },
+      ],
+    }),
+  );
+  const idx = load(p);
+  eq("assetref: load() applies the rewrite", idx.assetRefs.rewrites, 1);
+  eq(
+    "assetref: load() exposes the resolved guid",
+    idx.byKey.get("1:2").fillPaints[0].colorVar.value.alias.guid,
+    { sessionID: 1, localID: 1 },
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 // ── live fixtures (skip cleanly when no decode is reachable) ─────────────────

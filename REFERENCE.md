@@ -62,6 +62,15 @@ There is no nested tree — `lib/figma-index.mts` rebuilds it:
   fractional-index string — sort children lexically by it.
 - Roots: `type === "DOCUMENT"` → children are `CANVAS` (pages) → children are
   top-level frames/sections.
+- Addressing: a file that **subscribes to its own published library** binds variables,
+  text styles and paint styles by `{assetRef: {key, version}}` instead of `{guid: …}` —
+  at every site (`fillPaints[].colorVar`, `variableConsumptionMap` /
+  `parameterConsumptionMap`, `styleIdForText` / `styleIdForFill`, `variableSetID`,
+  variable→variable aliases). Every resolver reads `.guid`, so `load()` re-addresses them
+  unconditionally (`lib/assetref-lib.mts`): each publishing node carries its own `key`, so
+  `key → guid` is exact. It adds a **sibling** `guid`, never removes the `assetRef` and
+  never overwrites an existing `guid`, which makes it a no-op on a guid-addressed export.
+  Keys naming no node in the file are genuinely external and stay unresolved.
 
 ```sh
 node cli/tree.mts $WORK/msg-<name>.json                 # pages + top-level frames with guid keys
@@ -398,12 +407,13 @@ directory together so the relative imports resolve.
 
 ### Decode & locate (pre-IR)
 
-| Script      | Usage                                                          | Purpose                                                     |
-| ----------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| `parse.mts` | `node cli/parse.mts <canvas.fig> <out.json>`                   | fig-kiwi → message.json                                     |
-| `tree.mts`  | `node cli/tree.mts <msg.json>`                                 | page/frame skeleton with guid keys                          |
-| `find.mts`  | `node cli/find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree)        |
-| `node.mts`  | `node cli/node.mts <msg.json> <guidKey> [field …]`             | raw single-node JSON (confirm a field before relying on it) |
+| Script                    | Usage                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parse.mts`               | `node cli/parse.mts <canvas.fig> <out.json>`                   | fig-kiwi → message.json                                                                                                                                                                                                                                                                                                                                                          |
+| `tree.mts`                | `node cli/tree.mts <msg.json>`                                 | page/frame skeleton with guid keys                                                                                                                                                                                                                                                                                                                                               |
+| `find.mts`                | `node cli/find.mts <msg.json> <regex> [type] [--under <name>]` | locate nodes by name (`--under` scopes to a subtree)                                                                                                                                                                                                                                                                                                                             |
+| `node.mts`                | `node cli/node.mts <msg.json> <guidKey> [field …]`             | raw single-node JSON (confirm a field before relying on it)                                                                                                                                                                                                                                                                                                                      |
+| `normalize-assetrefs.mts` | `node cli/normalize-assetrefs.mts <msg.json> [out.json]`       | **diagnostic, not a pipeline step** — reports the published-library `assetRef` → local-guid re-addressing every `load()` already applies: keyed local assets, rewrites per binding-site field trail, and keys that name no node in the file. Zero rewrites means the export addresses by guid. `out.json` materialises the normalised message for something outside this harness |
 
 ### IR pipeline (the harness spine)
 
