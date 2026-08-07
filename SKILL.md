@@ -240,6 +240,10 @@ illustrations and for raw SVG export:
 node cli/export-svg.mts msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
 ```
 
+Mask layers are clip regions, never artwork — they and their subtrees are skipped. Clips are not
+re-emitted, so a mask whose reveal is not a full-bounds rectangle warns on stderr and its artwork
+exports uncropped; crop at the consuming frame.
+
 Video fills (from the zip's `videos/` by content hash) are the only assets left to wire by hand.
 
 ---

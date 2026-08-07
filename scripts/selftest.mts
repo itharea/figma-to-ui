@@ -912,6 +912,147 @@ const bind = (node: string, field: string) => [{ node, field }];
   );
 }
 
+// ── svg-lib: mask nodes are a clip region, never paint ──────────────────────
+{
+  // Figma's SVG importer wraps pasted artwork in a clip-path group: a mask node whose only
+  // child is a full-bounds rectangle filled opaque black. Walking into it painted that
+  // rectangle straight over the real artwork. Synthetic reproduction of that exact shape.
+  const polyBlob = (pts: [number, number][]) => {
+    const bytes: number[] = [];
+    const f = (v: number) => {
+      const b = Buffer.alloc(4);
+      b.writeFloatLE(v);
+      bytes.push(b[0], b[1], b[2], b[3]);
+    };
+    pts.forEach(([x, y], i) => {
+      bytes.push(i === 0 ? 1 : 2); // M, then L…
+      f(x);
+      f(y);
+    });
+    bytes.push(0); // Z
+    return { bytes };
+  };
+  const W = 350,
+    H = 148;
+  const blobs = [
+    polyBlob([
+      [10, 10],
+      [90, 10],
+      [90, 90],
+    ]), // 0: the real artwork
+    polyBlob([
+      [0, 0],
+      [W, 0],
+      [W, H],
+      [0, H],
+    ]), // 1: full-bounds clip rectangle
+    polyBlob([
+      [0, 0],
+      [W / 2, 0],
+      [W / 2, H],
+      [0, H],
+    ]), // 2: rect covering only half the frame
+    polyBlob([
+      [0, 0],
+      [W, 0],
+      [W / 2, H],
+    ]), // 3: a triangular (non-rectangular) reveal
+  ];
+  const vector = (localID: number, blobIdx: number, color: any) => ({
+    guid: { sessionID: 1, localID },
+    type: "VECTOR",
+    visible: true,
+    opacity: 1,
+    fillGeometry: [{ commandsBlob: blobIdx, windingRule: "NONZERO" }],
+    fillPaints: [{ type: "SOLID", visible: true, opacity: 1, color }],
+  });
+  const cream = { r: 247 / 255, g: 242 / 255, b: 237 / 255, a: 1 };
+  const black = { r: 0, g: 0, b: 0, a: 1 };
+  // root FRAME → [ artwork VECTOR, mask GROUP → clip VECTOR ]
+  const mkIndex = (opts: { mask: boolean | undefined; clipBlob: number; withMask: boolean }) => {
+    const root: any = {
+      guid: { sessionID: 1, localID: 1 },
+      type: "FRAME",
+      visible: true,
+      opacity: 1,
+      size: { x: W, y: H },
+    };
+    const art = vector(2, 0, cream);
+    const group: any = {
+      guid: { sessionID: 1, localID: 3 },
+      type: "GROUP",
+      name: "Clip path group",
+      visible: true,
+      opacity: 1,
+      mask: opts.mask,
+    };
+    const clip = vector(4, opts.clipBlob, black);
+    const nodes: any[] = opts.withMask ? [root, art, group, clip] : [root, art];
+    const byKey = new Map(nodes.map((n) => [key(n.guid), n]));
+    const children = new Map<string, any[]>([["1:1", opts.withMask ? [art, group] : [art]]]);
+    if (opts.withMask) children.set("1:3", [clip]);
+    return { msg: { blobs }, byKey, children } as any;
+  };
+  // Warnings are the lib's only side effect — capture them so a run stays quiet and the
+  // detect-and-warn path can be asserted directly.
+  const warnsOf = (fn: () => void): string[] => {
+    const orig = console.error;
+    const seen: string[] = [];
+    console.error = (...a: any[]) => void seen.push(a.join(" "));
+    try {
+      fn();
+    } finally {
+      console.error = orig;
+    }
+    return seen;
+  };
+
+  let masked!: ReturnType<typeof extractGeometry>;
+  const maskWarns = warnsOf(() => {
+    masked = extractGeometry(mkIndex({ mask: true, clipBlob: 1, withMask: true }), "1:1");
+  });
+  eq("svg mask: clip subtree is not painted", masked.paths.length, 1);
+  eq("svg mask: no spurious black in fills", masked.fills, ["#f7f2ed"]);
+  eq("svg mask: full-bounds rectangular mask is silent", maskWarns, []);
+
+  // The guard must be exactly equivalent to the mask subtree not existing — byte-identical
+  // paths, viewBox and dedup hash, so a mask can never perturb the surrounding artwork.
+  const bare = extractGeometry(mkIndex({ mask: true, clipBlob: 1, withMask: false }), "1:1");
+  eq("svg mask: skipping ≡ absent (paths)", masked.paths, bare.paths);
+  eq("svg mask: skipping ≡ absent (viewBox)", masked.viewBox, bare.viewBox);
+  eq("svg mask: skipping ≡ absent (geomHash)", masked.geomHash, bare.geomHash);
+
+  // Regression guard: the guard keys on `mask === true` only. An ordinary black rectangle in
+  // the same position is real artwork and must still be emitted, unchanged.
+  for (const [label, mask] of [
+    ["absent", undefined],
+    ["false", false],
+  ] as const) {
+    const geo = extractGeometry(mkIndex({ mask, clipBlob: 1, withMask: true }), "1:1");
+    eq(`svg mask: mask ${label} → art still painted (paths)`, geo.paths.length, 2);
+    eq(`svg mask: mask ${label} → art still painted (fills)`, geo.fills, ["#f7f2ed", "#000000"]);
+  }
+
+  // Skipping without applying the clip is only lossless for a full-bounds rectangle. A reveal
+  // that is smaller, or not a rectangle at all, is still skipped (we cannot emit a <clipPath>)
+  // but must not do so silently — the art it masked comes out uncropped.
+  for (const [label, clipBlob] of [
+    ["half-width rect", 2],
+    ["triangle", 3],
+  ] as const) {
+    let geo!: ReturnType<typeof extractGeometry>;
+    const warns = warnsOf(() => {
+      geo = extractGeometry(mkIndex({ mask: true, clipBlob, withMask: true }), "1:1");
+    });
+    eq(`svg mask: ${label} reveal still skipped`, geo.paths.length, 1);
+    check(
+      `svg mask: ${label} reveal warns on stderr`,
+      warns.length === 1 && /not a full-bounds rectangle/.test(warns[0]),
+      JSON.stringify(warns),
+    );
+  }
+}
+
 // ── raw.mts: dispatch smoke (confirms all 8 folded lib imports resolve) ──────
 {
   const rawPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli", "raw.mts");
