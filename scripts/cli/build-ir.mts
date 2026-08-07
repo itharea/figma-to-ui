@@ -28,6 +28,7 @@ import {
   buildScreen,
   registerRawMap,
   provenanceViolations,
+  type IRColor,
   type IRNode,
   type VarIndex,
 } from "../lib/screens-lib.mts";
@@ -402,25 +403,30 @@ const walkIssues = (n: IRNode) => {
     });
   // match:none / unconfirmed nearest colors (theme present only). "exact" is fine;
   // "nearest"/"none" are surfaced as informational review items (never a gate).
-  if (theme.length && n.color?.hex) {
-    const m = n.color.match;
-    if (m === "none" && !seenColorNone.has(n.color.hex)) {
-      seenColorNone.add(n.color.hex);
+  // Runs over BOTH node paints: a node can be filled and outlined at once, and an
+  // unmatched OUTLINE is exactly as reviewable as an unmatched fill.
+  const colorIssues = (c: IRColor | undefined, field: "color" | "stroke") => {
+    if (!theme.length || !c?.hex) return;
+    const m = c.match;
+    if (m === "none" && !seenColorNone.has(c.hex)) {
+      seenColorNone.add(c.hex);
       issues.push({
         kind: "color-unmatched",
-        detail: `color ${n.color.hex} matched no theme token (match:none)`,
-        token: n.color.hex,
+        detail: `${field} ${c.hex} matched no theme token (match:none)`,
+        token: c.hex,
       });
     } else if (typeof m === "string" && m.startsWith("nearest")) {
       issues.push({
         kind: "color-nearest",
-        detail: `color ${n.color.hex} only a ${m} theme match — review (kept as the literal)`,
+        detail: `${field} ${c.hex} only a ${m} theme match — review (kept as the literal)`,
         guid: n.guid,
         path: n.path,
-        token: n.color.hex,
+        token: c.hex,
       });
     }
-  }
+  };
+  colorIssues(n.color, "color");
+  colorIssues(n.stroke, "stroke");
   if (theme.length && n.font && typeof n.font.size === "number") {
     const m = n.font.sizeMatch;
     const k = String(n.font.size);

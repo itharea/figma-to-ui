@@ -108,7 +108,7 @@ export type IRTypography = {
   guid?: string;
 };
 
-// Pull the variable-alias guidKey out of one variableConsumptionMap entry payload.
+// Pull the variable-alias guidKey out of one consumption-map entry payload.
 // Most fields nest it at variableData.value.alias.guid; FONT_STYLE wraps it in
 // value.fontStyleValue.asString.value.alias.guid. Returns null when not an alias.
 function consumptionAliasGuid(variableData: any): string | null {
@@ -129,7 +129,17 @@ const TYPE_VAR_FIELD: Record<string, keyof TypeVars> = {
 };
 
 // The per-property variable bindings on a TEXT STYLE node, resolved to variable NAMES
-// via `varNames` (variable guidKey → name). Reads node.variableConsumptionMap.entries.
+// via `varNames` (variable guidKey → name).
+//
+// Figma writes these bindings into EITHER `variableConsumptionMap` or
+// `parameterConsumptionMap` — both carry the same {variableField, variableData} entry
+// shape, and which map a style uses depends on how it was authored, not on what it
+// binds. Reading only the variable map silently drops every typography token on styles
+// that use the other one (observed on a 56-component library export: all 29 text styles
+// carried all 5 bindings, but only 7 of them in `variableConsumptionMap`), which makes
+// the consuming components hard-code font sizes and the raw Figma family name instead of
+// referencing the type scale. So merge both — parameter map first, variable map last, so
+// the variable map wins on any field present in both.
 function textVarBindings(styleNode: any, varNames: Map<string, string>): TypeVars {
   const out: TypeVars = {
     family: null,
@@ -138,7 +148,10 @@ function textVarBindings(styleNode: any, varNames: Map<string, string>): TypeVar
     lineHeight: null,
     letterSpacing: null,
   };
-  const entries = styleNode?.variableConsumptionMap?.entries ?? [];
+  const entries = [
+    ...(styleNode?.parameterConsumptionMap?.entries ?? []),
+    ...(styleNode?.variableConsumptionMap?.entries ?? []),
+  ];
   for (const e of entries) {
     const field = TYPE_VAR_FIELD[e?.variableField];
     if (!field) continue;
