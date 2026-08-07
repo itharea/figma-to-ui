@@ -17,6 +17,8 @@ import {
   reconcileTextSize,
   classifyPlaceholderText,
   disambiguateJustify,
+  textDecorationToIR,
+  majorityDecoration,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
 import {
@@ -3331,6 +3333,371 @@ eq("compIdent: transliteration still precedes the guard", compIdent("3 öğütü
       /\/\*\* Figma component set: "3D Card"\. \*\//.test(index),
       index.slice(0, 600),
     );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── text decoration: underline/strike-through survives into the IR (#70) ─────
+//
+// Nothing in the skill read `textDecoration` at all — `grep` came back empty across
+// scripts/ — so an underlined label reached codegen as plain text and the only surviving
+// signal was the word "Underlined" inside the applied style's NAME. The four assertions
+// that matter are the four ways a decoration can be authored (node field, applied text
+// style, character run, run-referenced style), plus the regression guard that
+// undecorated text is untouched.
+//
+// Ground truth for the shapes below, read out of the kiwi schema embedded in a real
+// export: `NodeChange.textDecoration` is an enum NONE|UNDERLINE|STRIKETHROUGH, and
+// `TextData.styleOverrideTable` is an array of NodeChange — which is why one character
+// run can carry `textDecoration` (or its own `styleIdForText`) exactly like a node does.
+{
+  // fig enum → the ONE keyword CSS `text-decoration` and RN `textDecorationLine` share.
+  eq("decoration: UNDERLINE maps to the CSS keyword", textDecorationToIR("UNDERLINE"), "underline");
+  eq(
+    "decoration: STRIKETHROUGH is line-through, not 'strikethrough'",
+    textDecorationToIR("STRIKETHROUGH"),
+    "line-through",
+  );
+  for (const v of ["NONE", undefined, null, "", "WAVY"])
+    eq(`decoration: ${JSON.stringify(v)} is undecorated`, textDecorationToIR(v), null);
+
+  // Majority weighting is per CHARACTER: `characterStyleIDs` is parallel to the string.
+  // Weighting per table ENTRY instead would let a 2-character run outvote the other 10.
+  const runs = [
+    { id: 1, decoration: "underline" as const },
+    { id: 2, decoration: null },
+  ];
+  const chars = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2];
+  const wide = majorityDecoration(chars, runs, null);
+  eq("decoration: the run covering most characters wins", wide.decoration, "underline");
+  eq("decoration: mixed runs are reported as mixed", wide.mixed, true);
+  eq("decoration: the tally is readable, biggest first", wide.detail, "underline×10, none×2");
+  // …and the same two entries, weighted per entry, would have tied at 1–1.
+  eq(
+    "decoration: a minority run does not win on entry count",
+    majorityDecoration([1, 2, 2, 2, 2, 2], runs, null).decoration,
+    null,
+  );
+  // An id naming no entry (0 = the node's own style) and a run that never mentions
+  // decoration both INHERIT the base rather than voting "none".
+  eq(
+    "decoration: uncovered characters inherit the node default",
+    majorityDecoration([0, 0, 0], [], "underline").decoration,
+    "underline",
+  );
+  eq(
+    "decoration: a run that re-styles only the size inherits too",
+    majorityDecoration([1, 1], [{ id: 1, decoration: undefined }], "line-through").decoration,
+    "line-through",
+  );
+  eq(
+    "decoration: uniform runs are not a conflict",
+    majorityDecoration([1, 1], [{ id: 1, decoration: "underline" }], null).mixed,
+    false,
+  );
+  // No character map at all → one vote per entry is the only honest weighting left.
+  eq(
+    "decoration: absent characterStyleIDs falls back to per-run votes",
+    majorityDecoration(undefined, [{ id: 1, decoration: "underline" }], null).decoration,
+    "underline",
+  );
+}
+
+// The same four authoring shapes, through the real reconciler this time.
+{
+  const UNDERLINED = {
+    id: "type:5:1",
+    name: "Label/Underlined",
+    family: "Fixture Sans",
+    size: 16,
+    weight: "Regular",
+    lineHeightPx: 20,
+    "letterSpacingPx@size": 0,
+    textCase: null,
+    textDecoration: "UNDERLINE",
+    vars: null as any,
+    source: "text-style" as const,
+    guid: "5:1",
+  };
+  const PLAIN = { ...UNDERLINED, id: "type:5:2", name: "Label/Plain", textDecoration: null };
+  const typeStyles = new Map<string, any>([
+    ["5:1", UNDERLINED],
+    ["5:2", PLAIN],
+  ]);
+  const ir = (fields: any) =>
+    buildScreen(
+      {
+        guid: "1:10",
+        path: "1:10",
+        type: "TEXT",
+        name: "Label",
+        size: { x: 80, y: 20 },
+        fontSize: 16,
+        fontName: { family: "Fixture Sans", style: "Regular" },
+        lineHeight: { value: 20, units: "PIXELS" },
+        textData: { characters: "Aradayım" },
+        children: [],
+        ...fields,
+      },
+      I,
+      {},
+      new Map(),
+      typeStyles,
+    );
+  const styleRef = (l: number) => ({ guid: { sessionID: 5, localID: l } });
+
+  // 1. the reported shape: the decoration lives on the applied TEXT STYLE, and the node
+  //    that applies it declares nothing of its own.
+  const viaStyle = ir({ styleIdForText: styleRef(1) });
+  eq(
+    "decoration: an underlined text style reaches the node",
+    [viaStyle.font?.decoration, viaStyle.font?.decorationSource],
+    ["underline", "style"],
+  );
+  eq("decoration: provenance stays clean", provenanceViolations(viaStyle), []);
+
+  // 2. straight on the node (this is also how an instance override arrives, now that
+  //    resolve-lib carries the field — see the override assertion below).
+  const viaNode = ir({ textDecoration: "UNDERLINE" });
+  eq(
+    "decoration: a node-level textDecoration is read",
+    [viaNode.font?.decoration, viaNode.font?.decorationSource],
+    ["underline", "textDecoration"],
+  );
+  // …and it beats the applied style, including when it explicitly REMOVES the underline.
+  eq(
+    "decoration: the node's own field beats its applied style",
+    ir({ styleIdForText: styleRef(2), textDecoration: "STRIKETHROUGH" }).font?.decoration,
+    "line-through",
+  );
+  eq(
+    "decoration: an explicit NONE on the node un-decorates an underlined style",
+    ir({ styleIdForText: styleRef(1), textDecoration: "NONE" }).font?.decoration,
+    undefined,
+  );
+
+  // 3. strike-through, end to end, so the second enum value is not a dead branch.
+  eq(
+    "decoration: strikethrough resolves to line-through",
+    ir({ textDecoration: "STRIKETHROUGH" }).font?.decoration,
+    "line-through",
+  );
+
+  // 4. REGRESSION GUARD: plain text is byte-identical to before the field existed —
+  //    neither key appears, so no existing screen file grows a `"decoration": null`.
+  const plain = ir({ styleIdForText: styleRef(2) });
+  eq("decoration: undecorated text emits no decoration key", plain.font?.decoration, undefined);
+  eq("decoration: …and no source key either", plain.font?.decorationSource, undefined);
+  eq("decoration: the font block is otherwise unchanged", Object.keys(plain.font ?? {}), [
+    "family",
+    "appFamily",
+    "weight",
+    "size",
+    "sizeSource",
+    "sizeToken",
+    "sizeMatch",
+    "styleName",
+    "styleGuid",
+    "vars",
+    "lineHeightPx",
+    "lineHeightSource",
+    "letterSpacingPx",
+    "letterSpacingRaw",
+    "conflicts",
+  ]);
+
+  // 5. the per-run shapes. A run entry is a NodeChange, so it carries either the
+  //    decoration inline or a `styleIdForText` of its own — and NEITHER was ever
+  //    resolved: `styleRefKey` looked at the node and nothing else.
+  const runInline = ir({
+    textData: {
+      characters: "Aradayım",
+      characterStyleIDs: [3, 3, 3, 3, 3, 3, 3, 3],
+      styleOverrideTable: [{ styleID: 3, textDecoration: "UNDERLINE" }],
+    },
+  });
+  eq(
+    "decoration: a character run's own textDecoration is read",
+    [runInline.font?.decoration, runInline.font?.decorationSource],
+    ["underline", "run"],
+  );
+  const runStyle = ir({
+    textData: {
+      characters: "Aradayım",
+      characterStyleIDs: [3, 3, 3, 3, 3, 3, 3, 3],
+      styleOverrideTable: [{ styleID: 3, styleIdForText: styleRef(1) }],
+    },
+  });
+  eq(
+    "decoration: a run's referenced text style is resolved too",
+    [runStyle.font?.decoration, runStyle.font?.decorationSource],
+    ["underline", "run"],
+  );
+  eq("decoration: a resolved run keeps provenance clean", provenanceViolations(runStyle), []);
+
+  // 6. mixed runs: the majority wins and the minority is REPORTED through the existing
+  //    conflicts channel (which build-ir's issues.json and codegen's TODOs already read),
+  //    never through a new one.
+  const mixed = ir({
+    textData: {
+      characters: "Her tada açığım",
+      characterStyleIDs: [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4],
+      styleOverrideTable: [
+        { styleID: 3, textDecoration: "UNDERLINE" },
+        { styleID: 4, textDecoration: "NONE" },
+      ],
+    },
+  });
+  eq("decoration: mixed runs fall back to the majority", mixed.font?.decoration, "underline");
+  const cf = (mixed.font?.conflicts ?? []).find((c) => c.field === "textDecoration");
+  check("decoration: mixed runs raise a conflict", !!cf, JSON.stringify(mixed.font?.conflicts));
+  check(
+    "decoration: the conflict names both readings and the choice",
+    /underline×12, none×3/.test(cf?.reason ?? "") && /chose "underline"/.test(cf?.reason ?? ""),
+    cf?.reason,
+  );
+  // uniform runs must NOT raise one — otherwise every styled string becomes an issue.
+  eq(
+    "decoration: uniform runs raise no decoration conflict",
+    (runInline.font?.conflicts ?? []).filter((c) => c.field === "textDecoration"),
+    [],
+  );
+}
+
+// resolve-lib: an instance that underlines one label writes `textDecoration` and nothing
+// else. The field was missing from FIELD_KEYS, so the override was dropped before the
+// reconciler could ever see it — the instance silently rendered the MASTER's decoration.
+{
+  const master = { guid: G(3, 1), type: "SYMBOL", name: "Chip" };
+  const label = {
+    guid: G(3, 2),
+    type: "TEXT",
+    name: "Label",
+    parentIndex: { guid: G(3, 1), position: "a" },
+    textData: { characters: "Label" },
+  };
+  const inst = {
+    guid: G(3, 9),
+    type: "INSTANCE",
+    name: "Chip",
+    symbolData: {
+      symbolID: G(3, 1),
+      symbolOverrides: [{ guidPath: { guids: [G(3, 2)] }, textDecoration: "UNDERLINE" }],
+    },
+  };
+  const r = resolveInstance(makeIndex([master, label, inst]), "3:9");
+  eq(
+    "decoration: an instance override of textDecoration survives resolution",
+    (r.children[0] as any)?.textDecoration,
+    "UNDERLINE",
+  );
+  eq(
+    "decoration: …and is recorded as an applied override",
+    Object.keys((r.children[0] as any)?.overrideApplied ?? {}),
+    ["textDecoration"],
+  );
+}
+
+// ir-lib: the decoration is usually authored on the STYLE, so the typography token has to
+// carry it or the styles index has nothing for the reconciler to look up.
+{
+  const idx = makeIndex([
+    {
+      guid: G(4, 1),
+      type: "STYLE",
+      styleType: "TEXT",
+      name: "Label/Underlined",
+      fontSize: 16,
+      fontName: { family: "Fixture Sans", style: "Regular" },
+      textDecoration: "UNDERLINE",
+    },
+    { guid: G(4, 2), type: "STYLE", styleType: "TEXT", name: "Label/Plain", fontSize: 16 },
+  ]);
+  const t = assembleTypography(idx);
+  eq(
+    "decoration: the typography token carries the raw enum",
+    t.map((x) => x.textDecoration),
+    ["UNDERLINE", null],
+  );
+}
+
+// ── decode fixture: the decoration survives the REAL pipeline, bytes → emitted code ─
+//
+// The unit assertions above all hand the reconciler an object built by hand. This one
+// runs the committed decode fixture through `build-ir` and `codegen` exactly as a user
+// would: the fixture's "Eyebrow/s" text style declares `textDecoration: UNDERLINE` and is
+// applied by two nodes through an assetRef-keyed `styleIdForText` — the published-library
+// shape the reported file used. Nothing between the bytes and the .tsx is stubbed.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-decoration-"));
+  const run = (script: string, args: string[]) =>
+    spawnSync(process.argv[0], [path.join(here, "cli", script), ...args], { encoding: "utf8" });
+  try {
+    const irDir = path.join(tmp, "ir");
+    const build = run("build-ir.mts", [fixture, "--scope", "all", "--out", irDir]);
+    check(
+      "decoration/fixture: build-ir exits 0",
+      build.status === 0,
+      (build.stderr ?? "").slice(-400),
+    );
+    const read = (rel: string) => JSON.parse(fs.readFileSync(path.join(irDir, rel), "utf8"));
+
+    const style = read("tokens/typography.json").find((t: any) => t.name === "Eyebrow/s");
+    eq(
+      "decoration/fixture: the text style token keeps the enum",
+      style?.textDecoration,
+      "UNDERLINE",
+    );
+
+    const card = read("screens/fixture-page/card.json");
+    const find = (n: any, name: string): any =>
+      n.name === name ? n : (n.children ?? []).reduce((a: any, c: any) => a ?? find(c, name), null);
+    eq(
+      "decoration/fixture: an assetRef-applied style underlines its node",
+      [find(card, "Subtitle")?.font?.decoration, find(card, "Subtitle")?.font?.decorationSource],
+      ["underline", "style"],
+    );
+    // the sibling applies the OTHER (undecorated) style — proof the field is read per
+    // node and not smeared across the screen.
+    eq(
+      "decoration/fixture: a node on an undecorated style stays plain",
+      find(card, "Title")?.font?.decoration,
+      undefined,
+    );
+    // an undecorated node must not have become an issue, or every plain screen would.
+    eq("decoration/fixture: the build stays issue-free", read("manifest.json").counts.issues, 0);
+
+    // Both emitters, from the same IR value: CSS has the `text-decoration` shorthand,
+    // React Native has only `textDecorationLine`. A fix that wires one and not the other
+    // is exactly the half-done shape this batch keeps finding.
+    for (const [framework, prop] of [
+      ["web", "textDecoration"],
+      ["rn", "textDecorationLine"],
+    ] as const) {
+      const outDir = path.join(tmp, framework);
+      const cg = run("codegen.mts", [irDir, "Chip", "--framework", framework, "--out", outDir]);
+      check(
+        `decoration/fixture: codegen --framework ${framework} exits 0`,
+        cg.status === 0,
+        (cg.stderr ?? "").slice(-400),
+      );
+      const variant = fs.readFileSync(path.join(outDir, "chip", "many-compact.tsx"), "utf8");
+      check(
+        `decoration/fixture: ${framework} emits ${prop}`,
+        new RegExp(`${prop}: 'underline',`).test(variant),
+        variant.slice(0, 900),
+      );
+      // the undecorated variant is untouched — no property, no stray 'none'.
+      const plain = fs.readFileSync(path.join(outDir, "chip", "one-default.tsx"), "utf8");
+      check(
+        `decoration/fixture: ${framework} leaves undecorated text alone`,
+        !/textDecoration/.test(plain),
+        plain.slice(0, 900),
+      );
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

@@ -41,6 +41,10 @@ const FIELD_KEYS = [
   "lineHeight",
   "letterSpacing",
   "textCase",
+  // textCase's exact twin, and missing here for as long as nothing downstream read it:
+  // an instance that underlines (or un-underlines) a label writes `textDecoration` and
+  // nothing else, so leaving it out renders the MASTER's decoration for every instance.
+  "textDecoration",
   "cornerRadius",
   "opacity",
   "strokeWeight",
