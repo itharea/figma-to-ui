@@ -139,17 +139,22 @@ text, theme-bound values, and `// TODO`s on every unconfirmed value).
 - **`--svg msg-<name>.json` makes icons an internal, deterministic step.** Codegen exports each
   vector's geometry into a **deduplicated owned icon component** under `<out>/icons/` (the
   `RoastSquare` pattern) and wires its colour from the IR's resolved (override-aware) value — a
-  mono icon gets `currentColor` + the resolved token, so it recolours correctly. Instance-swap
+  mono icon gets `currentColor` + the resolved token, so it recolours correctly. A glyph that is
+  **both filled and outlined** counts as two paints (IR `color` + `stroke`) — it is not mono, so
+  both colours are baked and the outline survives instead of being flattened. Instance-swap
   slots render `{icon ?? <DefaultGlyph/>}`. No `export-svg` placeholder boxes, no manual re-map.
   (Default source is `manifest.source.path`, but that decode is usually gone from `/tmp` — pass
   `--svg` explicitly.)
 - **`--images $WORK/ex/images`** extracts raster fills into `<slug>/assets/` and wires real
-  references (web `backgroundImage` / rn `<Image>`). Web emits a **static import per raster** and
-  reads back the URL the bundler resolved — a document-relative `url('./assets/…')` inside an
-  inline style resolves against the _page_, not the module, so it 404s on every route that is not
-  at the directory root. The generated file normalises the two bundler shapes itself (a URL
-  string from webpack/Vite/Parcel, a `.src` record from Next.js), so it needs no runtime
-  dependency and no loader config.
+  references (web `backgroundImage` / rn `<Image>`), honouring each paint's own
+  `imageScaleMode` — `FILL`→`cover`, `FIT`→`contain`, `STRETCH`→`100% 100%`, `TILE`→`repeat`.
+  A placement CSS can't express (a `STRETCH` crop matrix, a `TILE` scaling factor) is
+  approximated and gets a `// TODO`. Web emits a **static import per raster** and reads back the
+  URL the bundler resolved — a document-relative `url('./assets/…')` inside an inline style
+  resolves against the _page_, not the module, so it 404s on every route that is not at the
+  directory root. The generated file normalises the two bundler shapes itself (a URL string from
+  webpack/Vite/Parcel, a `.src` record from Next.js), so it needs no runtime dependency and no
+  loader config.
 - **`--asset-base <prefix>`** switches that reference to a literal `url('<prefix>/<file>')` for a
   target with no module graph (plain CSS, a CDN origin, a static `public/` dir). Pass it only
   when the consumer serves the assets itself — the bundler import is the default because it is
@@ -213,7 +218,9 @@ dir, IR component JSON, out file) and the shared theme note. The codegen scaffol
 source of truth: it refactors form (opaque keys → semantic names, N near-identical variant files →
 one prop-driven component, repeated subtrees → shared sub-components, variant axes → props)
 **without changing a single resolved value** (geometry, padding, gap, radius, colour token,
-typography, borders, effects, absolute position, the variant→structure map). It resolves every
+typography, borders, effects, absolute position, the variant→structure map) — a `'fit-content'`
+axis, or one the scaffold omits, is a resolved value too (the designer's hug / fill), never a
+missing number. It resolves every
 `// TODO` and ships zero. Icons already arrive wired as `<NameIcon size color/>` — it preserves
 them. When the same subtree recurs across members of a group, it is extracted once and shared —
 this changes only where the code lives, never a resolved value.
@@ -233,7 +240,8 @@ write `$WORK/groups-assemble.json` with `kind: "assemble"`).
 screen IR path, and out file), the shared elevated components dir, and the theme note. It walks
 `ir-<name>/screens/<page>/<screen>.json`, renders every component **instance through the elevated
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
-rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `absX/absY` for absolute children). It
+rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `color` **and** `stroke` — a node can
+be filled and outlined at once — plus `absX/absY` for absolute children). It
 binds variable-backed values to the theme and changes no resolved value.
 
 **Brownfield?** Build with `build-ir … --theme <path>` and map fig values to repo tokens **by value,

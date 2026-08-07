@@ -229,6 +229,11 @@ section("Per-screen nodes & colors");
     hex: string | null;
     token: string | null;
     match: string | null;
+    // the node's OUTLINE, tracked separately from its fill: a node can carry both,
+    // so a restyled stroke is real drift even when the fill never moved.
+    strokeHex: string | null;
+    strokeToken: string | null;
+    strokeMatch: string | null;
   };
   const flatten = (root: any): Map<string, Flat> => {
     const m = new Map<string, Flat>();
@@ -241,6 +246,9 @@ section("Per-screen nodes & colors");
         hex: n.color?.hex ?? null,
         token: n.color?.token ?? null,
         match: n.color?.match ?? null,
+        strokeHex: n.stroke?.hex ?? null,
+        strokeToken: n.stroke?.token ?? null,
+        strokeMatch: n.stroke?.match ?? null,
       });
       for (const c of n.children ?? []) walk(c);
     })(root);
@@ -267,6 +275,14 @@ section("Per-screen nodes & colors");
         );
       else if (on.token !== nn.token)
         local.push(`  ~ token @ ${p} (${nn.name}): ${on.token ?? "—"} → ${nn.token ?? "—"}`);
+      if (on.strokeHex !== nn.strokeHex)
+        local.push(
+          `  ~ stroke @ ${p} (${nn.name}): ${on.strokeHex ?? "—"}${strokeTokSuffix(on)} → ${nn.strokeHex ?? "—"}${strokeTokSuffix(nn)}`,
+        );
+      else if (on.strokeToken !== nn.strokeToken)
+        local.push(
+          `  ~ stroke token @ ${p} (${nn.name}): ${on.strokeToken ?? "—"} → ${nn.strokeToken ?? "—"}`,
+        );
     }
     if (local.length) {
       line(`screen ${rel}:`);
@@ -280,6 +296,11 @@ section("Per-screen nodes & colors");
       : f.match
         ? ` [${f.match}]`
         : "";
+  }
+  // a function DECLARATION, like tokSuffix: the loop above runs before this point,
+  // so a `const` arrow would sit in the temporal dead zone.
+  function strokeTokSuffix(f: Flat): string {
+    return tokSuffix({ token: f.strokeToken, match: f.strokeMatch });
   }
   if (!any) line("(no per-screen node or color drift on shared screens)");
 }

@@ -87,20 +87,20 @@ about undecided content.
 
 ## 4. Node fields that matter for UI code
 
-| Field                                                                  | Meaning / mapping                                                                                                                                                                                                                          |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `type`                                                                 | `FRAME`, `TEXT`, `INSTANCE`, `SYMBOL` (component master), `CANVAS`, `SECTION`, `VECTOR`, `ROUNDED_RECTANGLE`, …                                                                                                                            |
-| `name`                                                                 | layer name — semantic gold (`product-card`, `tab-bar`, `icons/Nav/Home`)                                                                                                                                                                   |
-| `visible`                                                              | absent = visible; `false` = hidden (skip it)                                                                                                                                                                                               |
-| `size`                                                                 | `{x: width, y: height}`                                                                                                                                                                                                                    |
-| `transform`                                                            | 2×3 matrix `{m00,m01,m02,m10,m11,m12}`; `m02`,`m12` = x,y relative to parent                                                                                                                                                               |
-| `fillPaints[]` / `strokePaints[]`                                      | `type: "SOLID"` with `color` as **0–1 floats** `{r,g,b,a}` (×255 → hex); `type: "IMAGE"` with `image.hash` (bytes → hex = filename in `images/`, §7); gradients carry `stops[]`                                                            |
-| `strokeWeight`, `strokeAlign`                                          | border width / position                                                                                                                                                                                                                    |
-| `borderStrokeWeightsIndependent` + `borderTop/Right/Bottom/LeftWeight` | **per-side** border widths (when independent these apply INSTEAD of `strokeWeight`; absent side = 0). Lets a **bottom-only divider** survive. IR `style.borderWidths {top,right,bottom,left}` → `border-<side>-width`                      |
-| `strokeCap`, `strokeJoin`, `dashPattern`                               | optional stroke detail: `cap`/`join` lower-cased (`join:MITER` is default → omitted), `dashPattern` (`number[]`, e.g. `[10,5]`) → **dashed** stroke (`border-style:dashed` / SVG `stroke-dasharray`). IR per-stroke `cap?`/`join?`/`dash?` |
-| `cornerRadius` or `rectangleTopLeftCornerRadius` (×4)                  | border radius (uniform or per-corner)                                                                                                                                                                                                      |
-| `effects[]`                                                            | shadows/blurs (`type`, `color`, `offset`, `radius`)                                                                                                                                                                                        |
-| `opacity`                                                              | layer opacity                                                                                                                                                                                                                              |
+| Field                                                                  | Meaning / mapping                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `type`                                                                 | `FRAME`, `TEXT`, `INSTANCE`, `SYMBOL` (component master), `CANVAS`, `SECTION`, `VECTOR`, `ROUNDED_RECTANGLE`, …                                                                                                                                                                                                                                                                            |
+| `name`                                                                 | layer name — semantic gold (`product-card`, `tab-bar`, `icons/Nav/Home`)                                                                                                                                                                                                                                                                                                                   |
+| `visible`                                                              | absent = visible; `false` = hidden (skip it)                                                                                                                                                                                                                                                                                                                                               |
+| `size`                                                                 | `{x: width, y: height}`                                                                                                                                                                                                                                                                                                                                                                    |
+| `transform`                                                            | 2×3 matrix `{m00,m01,m02,m10,m11,m12}`; `m02`,`m12` = x,y relative to parent                                                                                                                                                                                                                                                                                                               |
+| `fillPaints[]` / `strokePaints[]`                                      | `type: "SOLID"` with `color` as **0–1 floats** `{r,g,b,a}` (×255 → hex); `type: "IMAGE"` with `image.hash` (bytes → hex = filename in `images/`, §7) **plus `imageScaleMode` / `scalingFactor` / `imageTransform` — the placement, not optional detail (§7)**; gradients carry `stops[]`. Paints STACK and a hidden first entry is normal: filter on `visible !== false` before taking one |
+| `strokeWeight`, `strokeAlign`                                          | border width / position                                                                                                                                                                                                                                                                                                                                                                    |
+| `borderStrokeWeightsIndependent` + `borderTop/Right/Bottom/LeftWeight` | **per-side** border widths (when independent these apply INSTEAD of `strokeWeight`; absent side = 0). Lets a **bottom-only divider** survive. IR `style.borderWidths {top,right,bottom,left}` → `border-<side>-width`                                                                                                                                                                      |
+| `strokeCap`, `strokeJoin`, `dashPattern`                               | optional stroke detail: `cap`/`join` lower-cased (`join:MITER` is default → omitted), `dashPattern` (`number[]`, e.g. `[10,5]`) → **dashed** stroke (`border-style:dashed` / SVG `stroke-dasharray`). IR per-stroke `cap?`/`join?`/`dash?`                                                                                                                                                 |
+| `cornerRadius` or `rectangleTopLeftCornerRadius` (×4)                  | border radius (uniform or per-corner)                                                                                                                                                                                                                                                                                                                                                      |
+| `effects[]`                                                            | shadows/blurs (`type`, `color`, `offset`, `radius`)                                                                                                                                                                                                                                                                                                                                        |
+| `opacity`                                                              | layer opacity                                                                                                                                                                                                                                                                                                                                                                              |
 
 **Auto-layout** (flexbox, on frames):
 
@@ -128,6 +128,14 @@ The IR therefore resolves both axes and **always** emits
 `layout.primarySizing`/`counterSizing`; treating an absent primary as `fixed`
 silently freezes every hugging frame at whatever size it happened to have.
 
+Both sizing fields are stated per axis **relative to `stackMode`** — for a row the
+primary axis is horizontal, for a column it is vertical — so each must be mapped back
+to width/height before it means anything in CSS. Codegen spells **hug** as
+`fit-content`, never `auto`: on a block-level box `width: auto` means _fill_, which is
+wrong in exactly the case that matters. A **fill** axis (the child has `grow`, or
+`alignSelf: stretch`) is omitted outright — `flexGrow`/`align-self` size it, and a
+number there would pin it.
+
 **Per-child sizing & constraints** (on the child node, not the container):
 
 | fig field                                                                              | CSS / RN equivalent                                                                                                                                                                                                                                                                                                                                                       |
@@ -138,6 +146,7 @@ silently freezes every hugging frame at whatever size it happened to have.
 | `horizontalConstraint` / `verticalConstraint` (`MIN`/`MAX`/`CENTER`/`STRETCH`/`SCALE`) | resize constraints for absolute layouts → pin/stretch/scale on resize. IR node `constraints: {h, v}`                                                                                                                                                                                                                                                                      |
 | `minSize: {value:{x,y}}`                                                               | `minWidth`/`minHeight` (emit when > 0). IR node `minW`/`minH` (`maxSize`→`maxW`/`maxH`, absent in current decodes)                                                                                                                                                                                                                                                        |
 | `targetAspectRatio: {value:{x,y}}`                                                     | `aspectRatio = x / y`. IR node `aspectRatio`                                                                                                                                                                                                                                                                                                                              |
+| _(derived — the PARENT's `stackMode`)_                                                 | IR node `parentMode: "row"\|"column"`, stamped on every child of an auto-layout frame. `grow`/`alignSelf` mean "fill along the parent's primary / counter axis", so a consumer reading a child in isolation cannot tell fill-width from fill-height without it. Absent ⇒ the parent is not auto-layout, so nothing fills                                                  |
 
 **Text** (`type: "TEXT"`):
 
@@ -304,6 +313,19 @@ SVG on the brand background, screenshotted at 3×.)
 
 - Image fills: `paint.image.hash` (byte array) → hex string → filename in the
   zip's `images/`. Copy + downscale (`sips -Z 800` on macOS) into app assets.
+- **`paint.imageScaleMode` is load-bearing — the four values are not
+  interchangeable.** `FILL` → `background-size: cover`, `FIT` → `contain`,
+  `STRETCH` → `100% 100%`, `TILE` → `background-repeat: repeat` at the raster's
+  intrinsic size (`paint.scalingFactor` is a multiple of that intrinsic size — CSS
+  has no such unit, so it needs the source dimensions to become an explicit px
+  size). Rendering a `STRETCH` raster as `cover` scales it by the larger ratio and
+  crops the overflow by a **different amount per source aspect**, so a grid of
+  tiles that should look uniform does not.
+- `STRETCH` with a **non-null** `paint.imageTransform` is Figma's _Crop_, not a
+  plain stretch: the 2×3 matrix places a sub-rect of the raster. `100% 100%` would
+  distort it; `cover` is the closest single-declaration approximation.
+- Paints **stack**, and the first entry may be `visible:false`. Count/pick
+  **visible** paints — `paints[0]` can be a hidden layer, i.e. the wrong raster.
 - Video fills: `paint.video.hash` → file in `videos/`. Check the codec before
   bundling (H.264 `avc1` is safe cross-platform; the `mvhd` box gives duration —
   useful for splash-animation timing).
@@ -325,14 +347,27 @@ present so files stay lean.
   `color.varGuid` = the variable guidKey, `color.match = "bound"`, and
   `color.hex` is the variable's RESOLVED value (never the stale cached
   `paint.color`). A literal (unbound) fill keeps `var:null`, `hex = paint.color`.
-  One shared resolver (`resolvePaintColor`) drives `color`, `style.fills[]`, and
-  `style.strokes[]` so all three stay consistent.
+  One shared resolver (`resolvePaintColor`) drives `color`, `stroke`,
+  `style.fills[]`, and `style.strokes[]` so all four stay consistent.
+- **Stroke (`stroke`)** — the node's OUTLINE, in the **same shape as `color`**
+  (`hex`/`token`/`match`/`var`/`varGuid`) and resolved from `strokePaints`
+  independently of the fill. Fill and stroke are two separate paint arrays and a
+  node may carry **both** (a near-white glyph with a dark outline so it reads on
+  photography), so `color` alone is not the node's colour — **read both**. Emitted
+  only when the node has a visible solid stroke paint. The outline's **weight** is
+  not duplicated here: `style.strokes[]` is built from the same paint array and is
+  always present whenever `stroke` is, so read `style.strokes[0].weight` (or
+  `style.borderWidths`) to tell a 2px outline from a hairline.
 - **`style?`** `{ fills?, cornerRadius?, strokes?, borderWidths?, effects?,
 opacity? }`:
-  - `fills[]` — the COMPLETE paint list: each `{type:"solid"|"gradient"|"image",
-hex?, var?, varGuid?, stops?:[{position,hex}], imageHash?, opacity?}`.
-    Gradients keep `stops`; images keep `imageHash` (bytes→hex, the `images/`
-    filename); solids keep the bound `var`/`varGuid`.
+  - `fills[]` — the COMPLETE **visible** paint list (hidden paints are dropped, so
+    "first fill" always means first _visible_ fill): each
+    `{type:"solid"|"gradient"|"image", hex?, var?, varGuid?,
+stops?:[{position,hex}], imageHash?, scaleMode?, scalingFactor?, imageTransform?,
+opacity?}`. Gradients keep `stops`; images keep `imageHash` (bytes→hex, the
+    `images/` filename) plus their placement — `scaleMode` (`FILL`/`FIT`/`STRETCH`/
+    `TILE`, see §7), `scalingFactor` (TILE only) and `imageTransform` (only when
+    non-null: a `STRETCH` crop matrix); solids keep the bound `var`/`varGuid`.
   - `cornerRadius` — a bare number (uniform) or `{tl,tr,br,bl}` (per-corner).
   - `strokes[]` — `{weight, align, hex, var?, varGuid?, cap?, join?, dash?}`
     (`cap`/`join` lower-cased, default `MITER` join omitted; `dash` non-empty ⇒
@@ -351,7 +386,8 @@ wrap?}` — emitted only on a real auto-layout frame; absent ⇒ children are
   omit-when-default with opposite per-axis defaults, so absence is resolved here
   rather than by each consumer.
 - **Responsive child fields:** `grow`, `alignSelf`, `positioning:"absolute"`,
-  `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`.
+  `constraints {h,v}`, `minW`/`minH`/`maxW`/`maxH`, `aspectRatio`, `parentMode`
+  (the parent's stack direction — see the per-child sizing table).
 - **`box`** `{x,y,w,h,absX,absY}` — `x/y` relative to parent; `absX/absY`
   absolute from the page origin.
 - **`text?`** `{value, placeholder, …}` and **`font?`** — reconciled
@@ -362,10 +398,10 @@ styleName?, vars?, lineHeightPx, letterSpacingPx, conflicts[]}`. **Trust the
   codegen references the theme, not literals.
 
 This extraction is a pure function of the bytes and always runs (no `--theme`).
-With `--theme <p>`, each **unbound** `color.hex`/`font.size` also gets a code
-token **by value, within kind** (`color.{token,match}`,
-`font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`; bound colors stay
-`"bound"`). `issues.json`/`intent.json` are informational review notes (never a gate; there is no `decisions.json`).
+With `--theme <p>`, each **unbound** `color.hex`/`stroke.hex`/`font.size` also
+gets a code token **by value, within kind** (`color.{token,match}`,
+`stroke.{token,match}`, `font.{sizeToken,sizeMatch}` = `exact`/`nearest(Δ)`/`none`;
+bound colors stay `"bound"`). `issues.json`/`intent.json` are informational review notes (never a gate; there is no `decisions.json`).
 
 ## 9. Pitfalls checklist
 

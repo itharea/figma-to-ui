@@ -7,8 +7,8 @@
 // is reachable (argv[2], else /tmp/figparse/message_new.json) and skip cleanly
 // otherwise. Exits non-zero on any failure. Not imported by anything.
 import * as fs from "fs";
+import { load, key, I, type Mat } from "./lib/figma-index.mts";
 import * as os from "os";
-import { load, key } from "./lib/figma-index.mts";
 import { normalizeAssetRefs } from "./lib/assetref-lib.mts";
 import {
   letterSpacingToPx,
@@ -19,9 +19,23 @@ import {
   disambiguateJustify,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
-import { buildLayout, cornerRadiusOf } from "./lib/screens-lib.mts";
+import {
+  cornerRadiusOf,
+  buildScreen,
+  provenanceViolations,
+  type VarIndex,
+  imagePlacement,
+  type IRFill,
+  buildLayout,
+  type IRNode,
+} from "./lib/screens-lib.mts";
+import {
+  overlap,
+  overlapArea,
+  hasSignificantNonAdjacentOverlap,
+  sizingLines,
+} from "./lib/layout-lib.mts";
 import { assembleTypography } from "./lib/ir-lib.mts";
-import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
 import {
   cssVarName,
   treePath,
@@ -300,6 +314,128 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   );
 }
 
+// ── layout-lib: sizingLines — hug/fill/fixed per CSS axis ────────────────────
+{
+  // Synthetic IR nodes: a 200×40 box, varied only in the sizing fields under test.
+  const node = (p: Partial<IRNode>): IRNode => ({
+    id: "n_0",
+    path: "/Page/Frame",
+    guid: "1:1",
+    type: "frame",
+    name: "Frame",
+    box: { x: 0, y: 0, w: 200, h: 40, absX: 0, absY: 0 },
+    children: [],
+    ...p,
+  });
+  const HUG_W = "width: 'fit-content', // hug";
+  const HUG_H = "height: 'fit-content', // hug";
+
+  // A ROW stack's PRIMARY axis is horizontal, its COUNTER axis vertical…
+  eq(
+    "sizing row hug/fixed → hug width, fixed height",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "hug", counterSizing: "fixed" } })),
+    [HUG_W, "height: 40,"],
+  );
+  eq(
+    "sizing row fixed/hug → fixed width, hug height",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "fixed", counterSizing: "hug" } })),
+    ["width: 200,", HUG_H],
+  );
+  // …and a COLUMN stack's is the other way round.
+  eq(
+    "sizing column hug/fixed → hug height, fixed width",
+    sizingLines(node({ layout: { mode: "column", primarySizing: "hug", counterSizing: "fixed" } })),
+    ["width: 200,", HUG_H],
+  );
+  eq(
+    "sizing column fixed/hug → hug width, fixed height",
+    sizingLines(node({ layout: { mode: "column", primarySizing: "fixed", counterSizing: "hug" } })),
+    [HUG_W, "height: 40,"],
+  );
+  // Both axes fixed → the measured box, exactly as before the fix (regression guard).
+  eq(
+    "sizing row fixed/fixed → measured box",
+    sizingLines(node({ layout: { mode: "row", primarySizing: "fixed", counterSizing: "fixed" } })),
+    ["width: 200,", "height: 40,"],
+  );
+
+  // FILL: `grow` fills along the PARENT's primary axis, `alignSelf:'stretch'` across its
+  // counter one — so which CSS axis is dropped depends on parentMode, not on the node.
+  eq(
+    "sizing grow in a row parent → width omitted",
+    sizingLines(node({ grow: 1, parentMode: "row" })),
+    ["height: 40,"],
+  );
+  eq(
+    "sizing grow in a column parent → height omitted",
+    sizingLines(node({ grow: 1, parentMode: "column" })),
+    ["width: 200,"],
+  );
+  eq(
+    "sizing stretch in a row parent → height omitted",
+    sizingLines(node({ alignSelf: "stretch", parentMode: "row" })),
+    ["width: 200,"],
+  );
+  eq(
+    "sizing stretch in a column parent → width omitted",
+    sizingLines(node({ alignSelf: "stretch", parentMode: "column" })),
+    ["height: 40,"],
+  );
+  // grow + stretch in the same parent fills BOTH axes → nothing to emit.
+  eq(
+    "sizing grow + stretch → both axes omitted",
+    sizingLines(node({ grow: 1, alignSelf: "stretch", parentMode: "row" })),
+    [],
+  );
+  // Fill outranks the node's OWN mode: a hugging row told to grow must not emit hug.
+  eq(
+    "sizing fill outranks own hug",
+    sizingLines(
+      node({
+        layout: { mode: "row", primarySizing: "hug", counterSizing: "fixed" },
+        grow: 1,
+        parentMode: "row",
+      }),
+    ),
+    ["height: 40,"],
+  );
+  // No parentMode ⇒ the parent is not auto-layout, so nothing fills: keep the box.
+  eq("sizing grow without parentMode → measured box", sizingLines(node({ grow: 1 })), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  // A plain node with no auto-layout keeps its measured box (unchanged behaviour).
+  eq("sizing no layout → measured box", sizingLines(node({})), ["width: 200,", "height: 40,"]);
+  // A zero measurement stays omitted, as it always was.
+  eq(
+    "sizing zero height omitted",
+    sizingLines(node({ box: { x: 0, y: 0, w: 200, h: 0, absX: 0, absY: 0 } })),
+    ["width: 200,"],
+  );
+
+  // TEXT nodes state the same intent in autoResize.
+  const text = (autoResize: string | null) => node({ type: "text", name: "Label", autoResize });
+  eq("sizing text autoResize HEIGHT → fixed width, hug height", sizingLines(text("HEIGHT")), [
+    "width: 200,",
+    HUG_H,
+  ]);
+  eq("sizing text autoResize WIDTH_AND_HEIGHT → hug both", sizingLines(text("WIDTH_AND_HEIGHT")), [
+    HUG_W,
+    HUG_H,
+  ]);
+  eq("sizing text autoResize NONE → fixed both", sizingLines(text("NONE")), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  eq("sizing text autoResize absent → fixed both", sizingLines(text(null)), [
+    "width: 200,",
+    "height: 40,",
+  ]);
+  // A node whose IR carries no box at all (defensive: the field is schema-required, but
+  // sizingLines must never emit `width: undefined`).
+  eq("sizing missing box → nothing", sizingLines(node({ box: undefined as any })), []);
+}
+
 // ── screens-lib: cornerRadiusOf (independent per-corner) ──
 {
   // Independent corners, only the left pair set (slider fill 1153:1957): TR/BR absent
@@ -339,6 +475,207 @@ eq("lineHeightPx AUTO → null", lineHeightPx({ units: "AUTO" }, 16), null);
   // Uniform cornerRadius fallback, and the empty case.
   eq("corner uniform fallback → number", cornerRadiusOf({ cornerRadius: 12 }), 12);
   eq("corner none → undefined", cornerRadiusOf({}), undefined);
+}
+
+// ── screens-lib: fill and stroke are independent node paints (both survive) ──
+{
+  // A node's fill and its stroke live in two SEPARATE paint arrays; collapsing the
+  // node to one colour drops whichever loses, and the survivor looks plausible.
+  // `bound` binds the paint to a variable, so `hex` must come from the variable's
+  // RESOLVED value — never the (deliberately wrong here) cached literal.
+  const paint = (v: number, bound?: [number, number]) => ({
+    type: "SOLID",
+    visible: true,
+    color: { r: v, g: v, b: v, a: 1 },
+    ...(bound
+      ? {
+          colorVar: {
+            value: { alias: { guid: { sessionID: bound[0], localID: bound[1] } } },
+            dataType: "ALIAS",
+            resolvedDataType: "COLOR",
+          },
+        }
+      : {}),
+  });
+  const ir = (fields: any, varIndex: VarIndex = new Map()) =>
+    buildScreen(
+      {
+        guid: "1:10",
+        path: "1:10",
+        type: "VECTOR",
+        name: "glyph",
+        size: { x: 24, y: 24 },
+        children: [],
+        ...fields,
+      },
+      I,
+      {},
+      varIndex,
+    );
+
+  // regression guard: a fill-only node is untouched — same `color`, no `stroke` key.
+  const fillOnly = ir({ fillPaints: [paint(1)] });
+  eq("paints: fill-only node keeps its color", fillOnly.color?.hex, "#ffffff");
+  eq("paints: fill-only node emits no stroke", fillOnly.stroke, undefined);
+
+  // stroke-only (an outline glyph): the stroke is the node's only colour.
+  const strokeOnly = ir({ strokePaints: [paint(0.5)], strokeWeight: 2 });
+  eq("paints: stroke-only node emits no color", strokeOnly.color, undefined);
+  eq("paints: stroke-only node carries the stroke hex", strokeOnly.stroke?.hex, "#808080");
+
+  // the defect: filled AND outlined, each bound to its OWN token. Both must survive
+  // with their own hex and var — the fill must not stand in for the stroke.
+  const varIndex: VarIndex = new Map([
+    ["9:1", { name: "Color/surface/base", value: "#ffffff" }],
+    ["9:2", { name: "Color/border/strong", value: "#333333" }],
+  ]);
+  const both = ir(
+    {
+      fillPaints: [paint(0, [9, 1])], // cached literals are stale; the vars win
+      strokePaints: [paint(0, [9, 2])],
+      strokeWeight: 2,
+      strokeAlign: "CENTER",
+    },
+    varIndex,
+  );
+  eq(
+    "paints: filled+outlined keeps the fill",
+    [both.color?.hex, both.color?.var],
+    ["#ffffff", "Color/surface/base"],
+  );
+  eq(
+    "paints: filled+outlined keeps the stroke",
+    [both.stroke?.hex, both.stroke?.var],
+    ["#333333", "Color/border/strong"],
+  );
+  eq("paints: a bound stroke is match:bound", both.stroke?.match, "bound");
+  eq("paints: stroke provenance keys match color's", provenanceViolations(both), []);
+  // weight is NOT duplicated onto the node — a 2px outline vs a hairline is read off
+  // style.strokes[], which is built from the same paint array and always accompanies it.
+  eq("paints: stroke weight readable from style.strokes", both.style?.strokes?.[0]?.weight, 2);
+
+  // visibility: an invisible stroke paint is ignored, and a visible one stacked
+  // behind it still wins (paint arrays are stacks, not single slots).
+  const hidden = ir({ fillPaints: [paint(1)], strokePaints: [{ ...paint(0), visible: false }] });
+  eq("paints: invisible stroke paint is ignored", hidden.stroke, undefined);
+  eq("paints: invisible stroke does not disturb the fill", hidden.color?.hex, "#ffffff");
+  const stacked = ir({ strokePaints: [{ ...paint(0), visible: false }, paint(0.5)] });
+  eq("paints: first VISIBLE stroke paint wins", stacked.stroke?.hex, "#808080");
+}
+
+// ── screens-lib: image fill placement (imageScaleMode → background-size) ─────
+{
+  const img = (extra: Partial<IRFill> = {}): IRFill => ({
+    type: "image",
+    imageHash: "ab",
+    ...extra,
+  });
+  const css = (f: IRFill) => {
+    const p = imagePlacement(f);
+    return [p.size, p.repeat, p.resizeMode];
+  };
+  // The four modes are NOT interchangeable: emitting them all as `cover` scales a
+  // STRETCH raster by the larger ratio and crops the overflow by a different amount
+  // per source aspect (a 20-variant photo set: 14 STRETCH + 4 FILL visible paints).
+  eq("image FILL → cover", css(img({ scaleMode: "FILL" })), ["cover", "no-repeat", "cover"]);
+  eq("image FIT → contain", css(img({ scaleMode: "FIT" })), ["contain", "no-repeat", "contain"]);
+  eq("image STRETCH → 100% 100%", css(img({ scaleMode: "STRETCH" })), [
+    "100% 100%",
+    "no-repeat",
+    "stretch",
+  ]);
+  eq("image TILE → repeat + intrinsic size", css(img({ scaleMode: "TILE" })), [
+    "auto",
+    "repeat",
+    "repeat",
+  ]);
+  eq(
+    "image TILE anchors top-left",
+    imagePlacement(img({ scaleMode: "TILE" })).position,
+    "top left",
+  );
+  // Regression guard: the previously-correct inputs must not move. An ABSENT mode keeps
+  // the historical `cover` (Figma's own default for a new image paint) and stays silent.
+  eq("image no mode → cover (unchanged)", css(img()), ["cover", "no-repeat", "cover"]);
+  eq("image no mode → no TODO note", imagePlacement(img()).note, undefined);
+  eq("image FILL → no TODO note", imagePlacement(img({ scaleMode: "FILL" })).note, undefined);
+  eq("image STRETCH → no TODO note", imagePlacement(img({ scaleMode: "STRETCH" })).note, undefined);
+  // The three cases CSS cannot express must come back flagged, never silently wrong.
+  // STRETCH + a non-null imageTransform is Figma's "Crop" (a 2×3 placement matrix), so
+  // `100% 100%` would distort it — approximated as cover and reported.
+  const crop = imagePlacement(
+    img({
+      scaleMode: "STRETCH",
+      imageTransform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    }),
+  );
+  eq("image STRETCH+crop matrix → cover", crop.size, "cover");
+  check("image STRETCH+crop matrix → flagged", /crop matrix/.test(crop.note ?? ""), crop.note);
+  const tiled = imagePlacement(img({ scaleMode: "TILE", scalingFactor: 0.5 }));
+  eq("image TILE factor ≠ 1 → size still auto", tiled.size, "auto");
+  check("image TILE factor ≠ 1 → flagged", /scalingFactor 0\.5/.test(tiled.note ?? ""), tiled.note);
+  eq(
+    "image TILE factor 1 → no note",
+    imagePlacement(img({ scaleMode: "TILE", scalingFactor: 1 })).note,
+    undefined,
+  );
+  const unknown = imagePlacement(img({ scaleMode: "SOMETHING_NEW" }));
+  eq("image unknown mode → cover default", unknown.size, "cover");
+  check(
+    "image unknown mode → flagged",
+    /unknown imageScaleMode/.test(unknown.note ?? ""),
+    unknown.note,
+  );
+}
+
+// ── screens-lib: stacked image paints — the VISIBLE one wins ────────────────
+{
+  // Nodes do carry stacked image paints whose first entry is hidden. style.fills[] is a
+  // VISIBLE-paint list, so every emitter's "first image fill" is the first VISIBLE one —
+  // taking fillPaints[0] off the raw node would extract the wrong raster (and the wrong
+  // scale mode with it).
+  const IDENT: Mat = [1, 0, 0, 1, 0, 0];
+  const rect = (fillPaints: any[]): any => ({
+    guid: "1:1",
+    path: "Root",
+    name: "photo",
+    type: "RECTANGLE",
+    size: { x: 100, y: 60 },
+    transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    fillPaints,
+    children: [],
+  });
+  const stacked = buildScreen(
+    rect([
+      { type: "IMAGE", visible: false, image: { hash: "aaaa" }, imageScaleMode: "FILL" },
+      { type: "IMAGE", image: { hash: "bbbb" }, imageScaleMode: "STRETCH" },
+    ]),
+    IDENT,
+  );
+  eq("stacked paints: hidden fill dropped", stacked.style?.fills?.length, 1);
+  eq("stacked paints: the VISIBLE raster wins", stacked.style?.fills?.[0].imageHash, "bbbb");
+  eq("stacked paints: the VISIBLE mode wins", stacked.style?.fills?.[0].scaleMode, "STRETCH");
+  // Placement fields are pass-throughs, emitted only where they mean something:
+  // scalingFactor for TILE, imageTransform only when non-null.
+  const tile = buildScreen(
+    rect([{ type: "IMAGE", image: { hash: "cccc" }, imageScaleMode: "TILE", scalingFactor: 0.25 }]),
+    IDENT,
+  );
+  eq("IMAGE paint → placement carried into the IR", tile.style?.fills?.[0], {
+    type: "image",
+    imageHash: "cccc",
+    scaleMode: "TILE",
+    scalingFactor: 0.25,
+  });
+  const plain = buildScreen(
+    rect([{ type: "IMAGE", image: { hash: "dddd" }, imageScaleMode: "FILL", scalingFactor: 0.25 }]),
+    IDENT,
+  );
+  eq("non-TILE paint drops the meaningless scalingFactor", plain.style?.fills?.[0], {
+    type: "image",
+    imageHash: "dddd",
+    scaleMode: "FILL",
+  });
 }
 
 // ── screens-lib: buildLayout sizing defaults (the two axes default OPPOSITELY) ──
@@ -1233,6 +1570,36 @@ const bind = (node: string, field: string) => [{ node, field }];
     "svg: rn mono icon = react-native-svg + fill={color}",
     /react-native-svg/.test(rnMono) && /fill=\{color\}/.test(rnMono),
     rnMono.slice(0, 160),
+  );
+
+  // A glyph that is BOTH filled and outlined: the pre-outlined strokeGeometry is a
+  // second baked paint, so the extraction yields two distinct fills and the emitted
+  // component must keep BOTH. Driving it mono (the old fills-only paint count) would
+  // recolour the outline to the fill via currentColor and lose the outline entirely.
+  const outlined: any = {
+    guid: { sessionID: 1, localID: 1 },
+    type: "VECTOR",
+    visible: true,
+    opacity: 1,
+    size: { x: 24, y: 24 },
+    fillGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+    fillPaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 1, g: 1, b: 1, a: 1 } }],
+    strokeGeometry: [{ commandsBlob: 0, windingRule: "NONZERO" }],
+    strokePaints: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0.2, g: 0.2, b: 0.2 } }],
+    strokeWeight: 2,
+  };
+  const geoBoth = extractGeometry(
+    { msg: { blobs: [blob] }, byKey: new Map([["1:1", outlined]]), children: new Map() } as any,
+    "1:1",
+  );
+  eq("svg: filled+outlined glyph has two distinct paints", geoBoth.fills, ["#ffffff", "#333333"]);
+  const webMulti = emitIconComponent("OutlinedIcon", geoBoth, { web: true, mono: false });
+  check(
+    "svg: filled+outlined icon bakes BOTH paints (no currentColor flattening)",
+    /fill="#ffffff"/.test(webMulti) &&
+      /fill="#333333"/.test(webMulti) &&
+      !/currentColor/.test(webMulti),
+    webMulti.slice(0, 400),
   );
 }
 
