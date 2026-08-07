@@ -17,6 +17,7 @@ import {
   disambiguateJustify,
 } from "./lib/reconcile-lib.mts";
 import { resolveInstance } from "./lib/resolve-lib.mts";
+import { assembleTypography } from "./lib/ir-lib.mts";
 import { cornerRadiusOf } from "./lib/screens-lib.mts";
 import { overlap, overlapArea, hasSignificantNonAdjacentOverlap } from "./lib/layout-lib.mts";
 import {
@@ -415,6 +416,91 @@ function makeIndex(nodes: any[]): ReturnType<typeof load> {
   eq("override: composes one child", r.children.length, 1);
   eq("override: text → 'Real'", (r.children[0] as any)?.textData?.characters, "Real");
   eq("override: hasTextOverride flagged", r.children[0]?.hasTextOverride, true);
+}
+
+// ── ir-lib: text-style typography bindings live in EITHER consumption map ────
+{
+  // Figma stores a text style's 5 per-property variable bindings in
+  // `variableConsumptionMap` OR `parameterConsumptionMap` depending on how the style was
+  // authored — same entry shape either way. Four hand-built styles: bound via the
+  // parameter map only, via the variable map only, via both (the variable map must win),
+  // and via neither (all 5 null).
+  const V = (l: number, name: string) => ({ guid: G(3, l), type: "VARIABLE", name });
+  const vars = [
+    V(1, "Typography/family/sans"),
+    V(2, "Typography/weight/regular"),
+    V(3, "Typography/size/m"),
+    V(4, "Typography/line-height/m"),
+    V(5, "Typography/spacing/m"),
+    V(11, "Typography/family/serif"),
+    V(12, "Typography/weight/bold"),
+    V(13, "Typography/size/l"),
+    V(14, "Typography/line-height/l"),
+    V(15, "Typography/spacing/l"),
+  ];
+  // One entry per typography field, aliased to variables G(3, base…base+4). FONT_STYLE
+  // nests its alias a level deeper than the rest, exactly as the real format does.
+  const entries = (base: number) => [
+    { variableField: "FONT_FAMILY", variableData: { value: { alias: { guid: G(3, base) } } } },
+    {
+      variableField: "FONT_STYLE",
+      variableData: {
+        value: { fontStyleValue: { asString: { value: { alias: { guid: G(3, base + 1) } } } } },
+      },
+    },
+    { variableField: "FONT_SIZE", variableData: { value: { alias: { guid: G(3, base + 2) } } } },
+    { variableField: "LINE_HEIGHT", variableData: { value: { alias: { guid: G(3, base + 3) } } } },
+    {
+      variableField: "LETTER_SPACING",
+      variableData: { value: { alias: { guid: G(3, base + 4) } } },
+    },
+  ];
+  const style = (l: number, name: string, maps: Record<string, unknown>) => ({
+    guid: G(4, l),
+    type: "STYLE",
+    styleType: "TEXT",
+    name,
+    fontSize: 18,
+    fontName: { family: "Sans Placeholder", style: "Regular" },
+    lineHeight: { value: 24, units: "PIXELS" },
+    ...maps,
+  });
+  const byName = new Map(
+    assembleTypography(
+      makeIndex([
+        ...vars,
+        style(1, "param-only", { parameterConsumptionMap: { entries: entries(1) } }),
+        style(2, "var-only", { variableConsumptionMap: { entries: entries(1) } }),
+        style(3, "both", {
+          parameterConsumptionMap: { entries: entries(11) },
+          variableConsumptionMap: { entries: entries(1) },
+        }),
+        style(4, "unbound", {}),
+      ]),
+    ).map((t) => [t.name, t.vars]),
+  );
+  const bound = {
+    family: "Typography/family/sans",
+    weight: "Typography/weight/regular",
+    size: "Typography/size/m",
+    lineHeight: "Typography/line-height/m",
+    letterSpacing: "Typography/spacing/m",
+  };
+  const unbound = {
+    family: null,
+    weight: null,
+    size: null,
+    lineHeight: null,
+    letterSpacing: null,
+  };
+  eq("typography vars: parameterConsumptionMap alone binds all 5", byName.get("param-only"), bound);
+  eq(
+    "typography vars: variableConsumptionMap alone still binds all 5",
+    byName.get("var-only"),
+    bound,
+  );
+  eq("typography vars: both maps set → variable map wins on all 5", byName.get("both"), bound);
+  eq("typography vars: neither map → all 5 null", byName.get("unbound"), unbound);
 }
 
 // ── theme-lib: name munging, literals, topo order, emit ──────
