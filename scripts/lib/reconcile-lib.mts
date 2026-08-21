@@ -164,9 +164,73 @@ export function textDecorationToIR(v: any): TextDecoration | null {
 }
 
 // One entry of a text node's character-run table (`textData.styleOverrideTable[]`),
-// already resolved to a decoration by the caller. `decoration: undefined` means the run
-// says NOTHING about decoration — it only re-styles size/family/… — so its characters
-// inherit the node default; `null` means the run explicitly declares "no decoration".
+// already resolved by the caller to the value of ONE typography field. `value:
+// undefined` means the run says NOTHING about that field — it only re-styles something
+// else — so its characters inherit the node-level answer.
+export type RunValue<T> = { id: number; value: T | undefined };
+export type RunTally<T> = {
+  value: T; // the majority answer — what a single-valued IR field can carry
+  label: string; // that answer, printable ("16", "Geist Mono Regular", "auto")
+  mixed: boolean; // more than one distinct value across the string
+  distinct: number; // how many distinct values were seen
+  detail: string; // "16×11, 24×5" — ready to drop into a conflict reason
+};
+
+// Majority value across a text node's character runs, for ONE typography field. A node
+// renders with ONE size, ONE face, ONE line height and ONE decoration in both CSS and
+// RN, so a string that is half 24px has to collapse to a single value — the majority —
+// with the minority REPORTED (the caller raises a conflict) rather than silently
+// discarded.
+//
+// The weighting is per CHARACTER, not per run entry: `textData.characterStyleIDs` is
+// parallel to `characters` and names the run that styles each one (confirmed on a live
+// export: a 19-char label with ids [14×9, 13×10] against a 2-entry table whose entries
+// carried `fontSize`/`fontName` inline). Weighting by table entry instead would let a
+// three-character run outvote the other sixteen. An id that names no entry — 0, the
+// node's own style — falls back to `base`, and so does a run that is silent about this
+// field. When the ids are absent the only honest weighting left is one vote per entry.
+//
+// Values are grouped by their `label`, so a caller can tally records (a fontName pair, a
+// {value,units} letter spacing) as readily as a number: two runs are "the same" exactly
+// when they print the same. Ties keep the first-seen value (insertion order), so the
+// result is deterministic.
+export function majorityRunValue<T>(
+  characterStyleIDs: unknown,
+  runs: RunValue<T>[],
+  base: T,
+  label: (v: T) => string,
+): RunTally<T> {
+  const byID = new Map<number, RunValue<T>>();
+  for (const r of runs) byID.set(r.id, r);
+  const forRun = (r: RunValue<T> | undefined): T => (r && r.value !== undefined ? r.value : base);
+
+  const weights = new Map<string, { value: T; weight: number }>();
+  const bump = (v: T) => {
+    const k = label(v);
+    const e = weights.get(k);
+    if (e) e.weight++;
+    else weights.set(k, { value: v, weight: 1 });
+  };
+  const ids = Array.isArray(characterStyleIDs) ? (characterStyleIDs as number[]) : null;
+  if (ids?.length) for (const id of ids) bump(forRun(byID.get(id)));
+  else for (const r of runs) bump(forRun(r));
+
+  let value = base;
+  let best = 0;
+  for (const e of weights.values())
+    if (e.weight > best) {
+      best = e.weight;
+      value = e.value;
+    }
+  const detail = [...weights.entries()]
+    .sort((a, b) => b[1].weight - a[1].weight)
+    .map(([k, e]) => `${k}×${e.weight}`)
+    .join(", ");
+  return { value, label: label(value), mixed: weights.size > 1, distinct: weights.size, detail };
+}
+
+// One character run resolved to a decoration. `undefined` = the run only re-styles
+// size/family/…; `null` = it explicitly declares "no decoration".
 export type DecorationRun = { id: number; decoration: TextDecoration | null | undefined };
 export type DecorationTally = {
   decoration: TextDecoration | null; // the majority answer — what the IR emits
@@ -174,48 +238,21 @@ export type DecorationTally = {
   detail: string; // "underline×11, none×5" — ready to drop into a conflict reason
 };
 
-// Majority decoration across a text node's character runs. One node renders with ONE
-// text-decoration in both CSS and RN, so a string that is half underlined has to
-// collapse to a single value — the majority — with the minority REPORTED (the caller
-// raises a conflict) rather than silently discarded.
-//
-// The weighting is per CHARACTER, not per run entry: `textData.characterStyleIDs` is
-// parallel to `characters` and names the run that styles each one (confirmed on a live
-// export: a 19-char label with ids [14×9, 13×10] against a 2-entry table). Weighting by
-// table entry instead would let a three-character run outvote the other sixteen. An id
-// that names no entry — 0, the node's own style — falls back to `base`, and so does a
-// run that never mentions decoration. When the ids are absent the only honest weighting
-// left is one vote per entry.
-//
-// Ties keep the first-seen value (insertion order), so the result is deterministic.
+// `majorityRunValue` specialised to decoration. Kept under its own name because "none"
+// is the printable spelling of a null decoration, and because a decoration tally reads
+// as a yes/no question rather than a value.
 export function majorityDecoration(
   characterStyleIDs: unknown,
   runs: DecorationRun[],
   base: TextDecoration | null,
 ): DecorationTally {
-  const byID = new Map<number, DecorationRun>();
-  for (const r of runs) byID.set(r.id, r);
-  const forRun = (r: DecorationRun | undefined): TextDecoration | null =>
-    r && r.decoration !== undefined ? r.decoration : base;
-
-  const weights = new Map<TextDecoration | null, number>();
-  const bump = (d: TextDecoration | null) => weights.set(d, (weights.get(d) ?? 0) + 1);
-  const ids = Array.isArray(characterStyleIDs) ? (characterStyleIDs as number[]) : null;
-  if (ids?.length) for (const id of ids) bump(forRun(byID.get(id)));
-  else for (const r of runs) bump(forRun(r));
-
-  let decoration = base;
-  let best = 0;
-  for (const [d, w] of weights)
-    if (w > best) {
-      best = w;
-      decoration = d;
-    }
-  const detail = [...weights.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([d, w]) => `${d ?? "none"}×${w}`)
-    .join(", ");
-  return { decoration, mixed: weights.size > 1, detail };
+  const t = majorityRunValue<TextDecoration | null>(
+    characterStyleIDs,
+    runs.map((r) => ({ id: r.id, value: r.decoration })),
+    base,
+    (d) => d ?? "none",
+  );
+  return { decoration: t.value, mixed: t.mixed, detail: t.detail };
 }
 
 // Placeholder string classifier (the string half; override-presence half is
