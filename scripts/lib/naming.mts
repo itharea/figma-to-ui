@@ -197,6 +197,43 @@ export function axisPropNames(axisNames: string[]): Map<string, string> {
   return out;
 }
 
+// PascalCase glyph stem from a node/layer name ("icons/Tabbar/HouseSimple" → "HouseSimple").
+// TOTAL, like compIdent: a glyph is routinely named "941" (the iOS 9:41 status-bar time) or
+// nothing at all, and the stem is emitted as an exported component name, so both cases take
+// the `Glyph` prefix/fallback. Kept separate from compIdent deliberately: it reads only the
+// last "/" segment of a layer path, and its prefix names what the identifier IS — folding the
+// two together would rename every icon.
+//
+// No asciiFold, unlike every other munger here: the stem is only half of a filename whose
+// other half is a content hash, and folding would rename every icon already on disk for no
+// gain in uniqueness. It is deliberate, not an oversight.
+export function iconIdent(name: string | null | undefined): string {
+  const raw = (name ?? "").split("/").pop() ?? "";
+  const stem = raw
+    .replace(/[^A-Za-z0-9]+/g, " ")
+    .replace(/(?:^|\s)(\w)/g, (_: string, c: string) => c.toUpperCase())
+    .replace(/\s/g, "");
+  return /^[A-Za-z_]/.test(stem) ? stem : `Glyph${stem}`;
+}
+
+// The file/export NAME of an owned icon component: `<stem>_<idHash>Icon`, where idHash is
+// planIcon's content address (geometry for a mono glyph, geometry+palette for a baked one).
+//
+// Shared because TWO entry points now write into the same `<out>/icons/` dir — codegen, for
+// the glyphs inside a component scaffold, and export-svg's `--component` mode, for a bare
+// VECTOR drawn straight onto a screen (which is in no scaffold, so codegen never sees it).
+// The dir is the build's single owned icon set, and the ONLY thing that stops the second
+// writer from shipping a duplicate drawing of a glyph the first already owns is that both
+// derive the same name for the same identity. That agreement has to be one function, not two
+// copies of a template string.
+//
+// The shape it returns is also a CONTRACT stated in both agent prompts — `agents/elevate.md`
+// (do not rename the files in `../icons`) and `agents/assemble-screen.md` (a glyph already
+// owned is reused, never re-exported). Change the shape and both restatements change with it.
+export function ownedIconName(name: string | null | undefined, idHash: string): string {
+  return `${iconIdent(name)}_${idHash}Icon`;
+}
+
 // PascalCase identifier from a Figma name — the meta component name AND the
 // JSX/import name used for nested-component references (parity across both).
 // "" → "Component".

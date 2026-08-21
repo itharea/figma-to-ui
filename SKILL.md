@@ -258,6 +258,7 @@ It operates **only on the in-scope set** — grouping never re-opens the Scope d
   "irDir": "ir-<name>",
   "themeNote": "<the theme import + how bound values reference it>",
   "componentsDir": "<assemble only: where the elevated components live>",
+  "svgSource": "<assemble only: the decode, for exporting the screen's bare vectors>",
   "groups": [
     {
       "id": "<stable id>",
@@ -298,16 +299,28 @@ write `$WORK/groups-assemble.json` with `kind: "assemble"`).
 
 **Spawn the assemble-screen subagent once per screen group in `groups-assemble.json`** —
 `figma-to-ui/agents/assemble-screen.md` — passing the group's member list (each member's slug,
-screen IR path, and out file), the shared elevated components dir, and the theme note. It walks
+screen IR path, and out file), the shared elevated components dir, the decode (`msg-<name>.json`,
+the same file codegen took as `--svg`), and the theme note. It walks
 `ir-<name>/screens/<page>/<screen>.json`, renders every component **instance through the elevated
 component** (variant + props from the instance's resolved values — never re-drawn), and fills the
-rest from IR node data (`layout`/`box`/`style`/`font`/`text`, `color` **and** `stroke` — a node can
-be filled and outlined at once — plus `absX/absY` for absolute children). It
+rest from IR node data (`layout`/`box`/`style`/`font`/`text`, node-level `color` **and** `stroke` —
+a node can be filled and outlined at once, and each carries the `var` binding — plus `absX/absY`
+for absolute children). It
 binds variable-backed values to the theme and changes no resolved value. Size is read **per axis**
 from `layout.primarySizing`/`counterSizing` (mapped to width/height through `layout.mode`) and from
 the child's `grow`/`alignSelf` against `parentMode` — hug is `'fit-content'`, a filled axis is
 omitted, and `box` is the number only where the axis is fixed. Freezing a hugging or filling axis
 to its measured box is the same defect as in the scaffold, one layer up.
+
+Two things a screen carries that a scaffold does not:
+
+- **Bare vectors.** A screen draws glyphs that sit in no component, so codegen never owned them.
+  They go into the SAME owned icon set (`<componentsDir>/icons`) via
+  `export-svg.mts … --component`, which reuses by content address — never an inline `<svg>`,
+  never an icon library, never a dropped node.
+- **Instance overrides.** `override.fields` / `component.overrides` say what an instance actually
+  changed. A field with a prop goes through the prop; a root-box override without one goes
+  through the elevated component's root style-override prop; anything left is reported.
 
 **Brownfield?** Build with `build-ir … --theme <path>` and map fig values to repo tokens **by value,
 never by name**; respect intentional divergence. A by-value mismatch is surfaced as a `// REVIEW`
@@ -315,12 +328,23 @@ note — confirm with the user before overwriting.
 
 ## Step 7 — Standalone assets
 
-Icons are handled inside codegen (Step 4). `export-svg.mts` remains for **standalone** logos /
-illustrations and for raw SVG export:
+A component's icons are handled inside codegen (Step 4). `export-svg.mts` covers the vectors
+codegen never sees — a bare glyph on a screen, a standalone logo or illustration — in either of
+two forms:
 
 ```sh
 node cli/export-svg.mts msg-<name>.json <guidKey> out.svg [--png] [--recolor=currentColor]
+node cli/export-svg.mts msg-<name>.json <guidKey> --component <out>/icons \
+  [--framework rn|web] [--color <hex> …]
 ```
+
+`--component` writes an **owned icon component** into the shared icon set instead of a raw file,
+through the same svg-lib path and under the same content-addressed name codegen uses — so a glyph
+already owned is reused, re-running is a no-op, and there is never a second copy of one drawing.
+Pass one `--color` per DISTINCT resolved paint (the IR node's `color`s, then its `stroke`s): one
+paint ⇒ mono, with a required `color` prop the caller binds to the theme; two or more ⇒ the
+palette is baked and the outline survives. This is the path Step 6 uses for a screen's vectors.
+The raw-file form stays for assets that leave the app (a favicon, a marketing SVG).
 
 Mask layers are clip regions, never artwork — they and their subtrees are skipped. Clips are not
 re-emitted, so a mask whose reveal is not a full-bounds rectangle warns on stderr and its artwork
