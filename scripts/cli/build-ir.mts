@@ -7,6 +7,8 @@
 // Usage:
 //   node build-ir.mts <message.json> --scope <pages|guids>
 //        [--theme <path>] [--mode <name>] [--out ir-<name>] [--force]
+//   node build-ir.mts <message.json> --list-modes   # list the decode's variable modes
+//                                                   # (indexes the message first — see below)
 //
 // IMPORTANT: imports ONLY *-lib.mts modules (never a CLI script) — those run work
 // at import time. console.error = progress; console.log = the artifact summary.
@@ -60,7 +62,7 @@ const argv = process.argv.slice(2);
 const msgPath = argv[0];
 if (!msgPath || msgPath.startsWith("--"))
   throw new Error(
-    "usage: build-ir.mts <message.json> --scope <pages|guids> [--theme <path>] [--mode <name>] [--out ir-<name>] [--force]",
+    "usage: build-ir.mts <message.json> --scope <pages|guids> [--theme <path>] [--mode <name>] [--out ir-<name>] [--force] | --list-modes",
   );
 
 // positionally-tolerant flag scan
@@ -69,6 +71,36 @@ function flag(name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 const hasFlag = (name: string) => argv.includes(name);
+
+// --- --list-modes: what may I pass to --mode? -------------------------------
+// Since #73 an explicit `--mode` that names no real mode is a hard exit(2) here, which is only
+// fair if the names are askable from the CLI that enforces them. They were askable from
+// theme-gen only, and theme-gen needs an IR — i.e. a build you could not spell the mode for yet.
+// Output format, the "(active)" marker and the exit code are theme-gen's on purpose: one flag,
+// learned once, on both CLIs the harness threads `--mode <M>` through.
+//
+// It is NOT theme-gen's cheap flag, though, and the usage text above says so. theme-gen reads a
+// catalog already sitting on disk; modes are a property of the DECODE, so this has to index the
+// message first — the same pass 1 a build does. That indexing is the whole cost and also all of
+// it: this branch runs BEFORE the source hash and the re-run guard, so listing never reads or
+// writes <out>. It cannot report a no-op, cannot refuse to overwrite, cannot invalidate a cached
+// build, and leaves an existing IR byte-identical. Everything the build needs and listing does
+// not is therefore inert under it: `--scope` is not required (variables parent to a VARIABLE_SET,
+// not a page, so no scope narrows this list), and `--mode`/`--out`/`--force`/`--theme` are
+// ignored exactly as theme-gen ignores its own build flags when listing — the list is the answer
+// to the question `--mode` would be asking.
+if (hasFlag("--list-modes")) {
+  console.error(`list-modes: indexing ${msgPath} (a decode's modes are only in its bytes)`);
+  const vars = toIRTokens(resolveVariables(load(msgPath)));
+  const modes = unionModes(vars);
+  // "(active)" is the mode a build with no --mode pins to — the same promise theme-gen's marker
+  // makes about a run with no --mode, answered from the variables instead of from a manifest.
+  const primary = primaryMode(vars);
+  if (modes.length === 0)
+    console.error("build-ir: this decode defines no variable modes — --mode has nothing to match");
+  for (const m of modes) console.log(m === primary ? `${m} (active)` : m);
+  process.exit(0);
+}
 
 const scopeArg = flag("--scope");
 if (!scopeArg)
