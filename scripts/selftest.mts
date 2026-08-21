@@ -3705,6 +3705,144 @@ eq("compIdent: transliteration still precedes the guard", compIdent("3 öğütü
   }
 }
 
+// ── build-ir: --list-modes, so --mode's legal values are askable (#77) ───────
+//
+// #73 made an explicit-but-unmatched `--mode` a hard exit(2) in `build-ir`, matching `theme-gen`.
+// That is the right failure, but it left the pair asymmetric: `theme-gen` can be ASKED which names
+// it accepts, while `build-ir` could only be made to confess them by failing — and `theme-gen`'s
+// answer needs a built IR, which is the artifact you wanted the mode for in the first place.
+//
+// Two properties are asserted, both of which a plausible re-implementation gets wrong. First, the
+// two listings are compared to EACH OTHER rather than to a hard-coded expectation, so the flag
+// cannot drift into two output formats across the CLIs the harness threads one `--mode <M>`
+// through; and every name printed is fed back to both as `--mode`, because a list you cannot paste
+// back is worse than no list. Second — the wrinkle — `build-ir` must INDEX its input to know the
+// modes at all (they live in the decode, not in a catalog on disk), which puts listing one step
+// away from the re-run guard, the overwrite refusal and the writer. It must touch none of them.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "fixtures", "decode-fixture.json");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "f2u-listmodes-"));
+  const run = (script: string, args: string[]) =>
+    spawnSync(process.argv[0], [path.join(here, "cli", script), ...args], { encoding: "utf8" });
+  const lines = (r: { stdout?: string }) => (r.stdout ?? "").trim().split("\n").filter(Boolean);
+  const manifestOf = (dir: string) =>
+    JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+  try {
+    // Discovery must not require the flags a BUILD requires — `--scope` is mandatory for
+    // compiling and meaningless for listing (variables parent to a VARIABLE_SET, not a page).
+    const listed = run("build-ir.mts", [fixture, "--list-modes"]);
+    check(
+      "list-modes: build-ir exits 0 without --scope",
+      listed.status === 0,
+      (listed.stderr ?? "").slice(-400),
+    );
+    eq("list-modes: the modes go to stdout, the active one marked", lines(listed), [
+      "Light (active)",
+      "Dark",
+    ]);
+
+    // The same question asked of theme-gen must give a byte-identical answer.
+    const irDir = path.join(tmp, "ir");
+    const built = run("build-ir.mts", [fixture, "--scope", "all", "--out", irDir]);
+    check(
+      "list-modes: the reference IR builds",
+      built.status === 0,
+      (built.stderr ?? "").slice(-400),
+    );
+    const tg = run("theme-gen.mts", [irDir, "--list-modes"]);
+    eq("list-modes: build-ir and theme-gen print the same list", listed.stdout, tg.stdout);
+    eq("list-modes: …and the same exit code", [listed.status, tg.status], [0, 0]);
+
+    // The round trip: the marker names the mode a plain build pins, and every printed name is
+    // accepted as `--mode` by BOTH CLIs — the cross-CLI agreement #73 established, now reached
+    // from the list rather than from a table written by hand.
+    const names = lines(listed).map((l) => l.replace(/ \(active\)$/, ""));
+    eq(
+      "list-modes: the marked mode is the one a plain build pins",
+      names[lines(listed).findIndex((l) => l.endsWith(" (active)"))],
+      manifestOf(irDir).activeMode,
+    );
+    for (const [i, m] of names.entries()) {
+      const dir = path.join(tmp, `rt${i}`);
+      const b = run("build-ir.mts", [fixture, "--scope", "all", "--out", dir, "--mode", m]);
+      const t = run("theme-gen.mts", [irDir, "--framework", "web", "--no-census", "--mode", m]);
+      eq(`list-modes: "${m}" is accepted as --mode by both CLIs`, [b.status, t.status], [0, 0]);
+      eq(`list-modes: …and build-ir pins exactly it`, manifestOf(dir).activeMode, m);
+    }
+
+    // The wrinkle. Listing indexes the message, so it runs inside the build CLI — but ahead of
+    // everything that reads or writes <out>. Snapshot a real IR, ask again with every build flag
+    // that could plausibly reach into it (including an unmatched --mode, which under --list-modes
+    // must not become the exit 2 a build would give), and require the directory to come back
+    // identical and its incremental no-op still intact.
+    const snapshot = () => {
+      const out: Record<string, string> = {};
+      const walk = (d: string, rel: string) => {
+        for (const e of fs
+          .readdirSync(d, { withFileTypes: true })
+          .sort((a, b) => (a.name < b.name ? -1 : 1)))
+          if (e.isDirectory()) walk(path.join(d, e.name), `${rel}${e.name}/`);
+          else out[`${rel}${e.name}`] = fs.readFileSync(path.join(d, e.name), "utf8");
+      };
+      walk(irDir, "");
+      return out;
+    };
+    const before = snapshot();
+
+    // Same source, same --out, no --force: the exact shape a BUILD answers with the incremental
+    // no-op. Listing must answer with the list — this is what fails if the flag is handled from
+    // the obvious place, next to the catalog it prints, which is downstream of the guard.
+    const cached = run("build-ir.mts", [fixture, "--list-modes", "--out", irDir]);
+    eq("list-modes: an --out that would no-op still lists", lines(cached), lines(listed));
+    check(
+      "list-modes: …and never reports the incremental no-op instead",
+      cached.status === 0 && !/noop/.test(cached.stdout ?? ""),
+      (cached.stdout ?? "").slice(0, 200),
+    );
+
+    // Different source bytes at the same --out: the shape a build REFUSES outright. Reading the
+    // mode names out of an unrelated message is not an overwrite, so it must still just answer.
+    const alt = path.join(tmp, "alt-fixture.json");
+    fs.writeFileSync(alt, fs.readFileSync(fixture, "utf8") + "\n"); // same content, other hash
+    const foreign = run("build-ir.mts", [alt, "--list-modes", "--out", irDir]);
+    eq("list-modes: an --out built from other bytes is not an overwrite", lines(foreign), [
+      "Light (active)",
+      "Dark",
+    ]);
+    eq("list-modes: …and does not trip the overwrite refusal", foreign.status, 0);
+
+    // And the build flags proper are inert, including an unmatched --mode: under --list-modes it
+    // is not the exit 2 the same string would earn a build, because nothing is being pinned.
+    const again = run("build-ir.mts", [
+      fixture,
+      "--list-modes",
+      "--out",
+      irDir,
+      "--force",
+      "--mode",
+      "Nope",
+    ]);
+    eq("list-modes: --out/--force/--mode are inert under it", lines(again), lines(listed));
+    eq("list-modes: …an unmatched --mode is not the exit 2 a build gives", again.status, 0);
+    eq("list-modes: …an existing IR is byte-identical afterwards", snapshot(), before);
+    eq(
+      "list-modes: …so the cached build still no-ops",
+      JSON.parse(run("build-ir.mts", [fixture, "--scope", "all", "--out", irDir]).stdout ?? "{}")
+        .noop,
+      true,
+    );
+
+    // Nothing is created either: --out naming a directory that does not exist must still not.
+    const ghost = path.join(tmp, "never-created");
+    const nothing = run("build-ir.mts", [fixture, "--list-modes", "--out", ghost]);
+    eq("list-modes: exits 0 with --out naming nothing", nothing.status, 0);
+    check("list-modes: …and does not create the output directory", !fs.existsSync(ghost));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // ── live fixtures (skip cleanly when no decode is reachable) ─────────────────
 const decodePath = process.argv[2] || "/tmp/figparse/message_new.json";
 if (fs.existsSync(decodePath)) {
